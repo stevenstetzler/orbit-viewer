@@ -3,9 +3,12 @@
 A real, live demo of `openRemoteSpk()` (see `docs/lazy-loading.md`)
 running in an actual browser: pick a real `.bsp` SPK kernel from disk,
 and spiceJS reads only the byte ranges it actually needs out of it --
-via `File.slice()`, never a full upload or a full parse -- to plot
-eleven Solar System bodies over an adjustable window around *now*,
-rendered with [three.js](https://threejs.org/).
+via `File.slice()`, never a full upload or a full parse -- to plot ten
+Solar System bodies over an adjustable window around *now*, rendered
+with [three.js](https://threejs.org/). Click a body to re-center the
+view on it, in either a fixed or that body's own rotating frame, or
+Shift+Click it to drop into a true-to-scale single-body-and-its-moons
+view -- see "Click, Control+Click, Alt/Option+Click, Shift+Click" below.
 
 ## Running it
 
@@ -100,27 +103,40 @@ Verified directly: Earth's own Z-coordinate (which effectively
 only ~30 thousand km in ECLIPJ2000, a ~2000x reduction, at a sample
 epoch checked against the real `de440.bsp`.
 
-## Orbit-arc span follows the reference epoch
+## Orbit-arc span follows the reference epoch, loading more data as needed
 
-Each body's orbit-arc line spans &plusmn;the "Time window" value
-around wherever the "Reference epoch" slider is currently pointing,
-not a span fixed at the moment the kernel was opened -- drag that
-slider and every arc redraws around the new epoch (clamped to the
-edges of the actual prefetched range, so this never needs new
-network/file reads). This makes "Time window" do double duty: how much
-gets prefetched *and* how much trajectory each arc traces around your
-current view -- want to see just the last/next few days around some
-specific moment instead of the whole prefetched span? Narrow it.
+Each body's orbit-arc line spans a **constant** &plusmn;the "Time
+window" value around wherever the "Reference epoch" slider is
+currently pointing, not a span fixed at the moment the kernel was
+opened. Since the reference epoch can sit anywhere within &plusmn;the
+window around *now*, the arc's own span (&plusmn;window around *that*
+epoch) can reach up to 2x the window away from *now* at the slider's
+own extremes -- so dragging it there calls `prefetch()` again,
+incrementally (already-covered bytes are never re-fetched), extending
+how far the file has been read rather than clipping the arc short.
+This makes "Time window" do double duty: how much gets prefetched
+around *now* by default, and how much trajectory each arc traces
+around wherever you're currently looking. In practice this extension
+is often free: DE440's own densely-packed Chebyshev records mean a
+window's initial fetch frequently already covers well beyond a 2x
+extension (verified directly -- a &plusmn;30-day window scrubbed to its
+edge needed zero new bytes for the real `de440.bsp`); a genuinely new
+fetch only showed up when testing a much wider &plusmn;10-year window
+scrubbed to *its* edge (7 new range reads, 0.79 MB).
 
 ## Bodies shown, and their real relative sizes
 
-Sun (10), Mercury (199), Venus (299), Earth (399), Moon (301), Mars (4),
-Jupiter (5), Saturn (6), Uranus (7), Neptune (8), Pluto (9). Mercury/
-Venus use their own body IDs (DE440 carries dedicated segments for
-them); the outer planets stay barycenter-based for *position* (their
-own offset from the barycenter isn't separately modeled -- see
-`perf/README.md`), though see "Centering the view" below for how their
-*orientation* still uses the real planet.
+Sun (10), Mercury (199), Venus (299), Earth (399), Mars (4), Jupiter
+(5), Saturn (6), Uranus (7), Neptune (8), Pluto (9). Mercury/Venus use
+their own body IDs (DE440 carries dedicated segments for them); the
+outer planets stay barycenter-based for *position* (their own offset
+from the barycenter isn't separately modeled -- see `perf/README.md`),
+though see "Alt/Option+Click" below for how their *orientation* still
+uses the real planet. The Moon isn't in this default list even though
+DE440 carries it -- at the whole-system AU scale its marker position
+is visually indistinguishable from Earth's own (they'd overlap
+completely); **Shift+Click Earth** (see below) to see it at a scale
+where it's actually visible.
 
 Marker sizes are real physical body radii -- `BODY<id>_RADII` from
 `kernels/pck00011.tpc`, read via `bodyValues()` (spiceJS's
@@ -141,49 +157,83 @@ marker doesn't grow large enough to swallow Mercury's orbit -- verified
 directly: the chosen scale puts the Sun's marker just inside Mercury's
 real perihelion distance, with margin.
 
-## Centering the view
+## Click, Control+Click, Alt/Option+Click, Shift+Click
 
-Click a body in the "Bodies shown" legend to re-center the whole scene
-on it -- every position becomes `spkez(otherBody, clickedBody, et)`
-instead of `spkez(otherBody, 0, et)`, so e.g. clicking Earth shows a
-geocentric view (Sun ~1 AU away, other planets at their true distance
-from Earth, not the Sun). This needs no new prefetching: every body
-was already prefetched relative to the SSB, which is exactly the chain
-`spkez()` needs to compute *any* pairwise state between two of them.
+Every legend row supports four click variants, all built on the same
+underlying idea: every position becomes `spkez(otherBody, clickedBody,
+et, 'NONE', someFrame, pool)` instead of `spkez(otherBody, 0, et, ...)`
+-- so e.g. clicking Earth shows a geocentric view (Sun ~1 AU away,
+other planets at their true distance from Earth, not the Sun). None of
+these need new prefetching for the *system-wide* bodies: every one was
+already prefetched relative to the SSB, exactly the chain `spkez()`
+needs to compute any pairwise state between two of them.
 
-**Alt/Option+Click** goes further: it also locks the view's
-orientation to that body's own rotating `IAU_<BODY>` frame (via
-`spkez()`'s `ref` parameter, using the classic text-PCK orientation
-formula and `kernels/pck00011.tpc`'s real constants -- see
-`src/bodyOrientation.js`) instead of the fixed, non-rotating
-`ECLIPJ2000` frame every other view uses. Orbit-arc lines are hidden while a
-rotating frame is active: this demo's fixed sample budget (tens of
-points across the time window) is far coarser than most bodies' own
-rotation periods (Jupiter's is ~10 hours), so a connect-the-dots line
-through those samples would alias into a meaningless tangle -- each
-individual sampled *position* is still exact, only a sparse *line*
-through them isn't meaningful in a fast-rotating frame. The live
-marker positions (as the "Reference epoch" slider moves) stay exact
-regardless. Click the active body again (with the same modifier) to
-reset back to the Solar System Barycenter / J2000 default.
+- **Click** / **Control+Click** (the same thing): centers on that
+  body, in the fixed, non-rotating `ECLIPJ2000` frame every other
+  system-wide view uses.
+- **Alt/Option+Click**: centers on that body, locked instead to its
+  own rotating `IAU_<BODY>` frame (via `spkez()`'s `ref` parameter,
+  using the classic text-PCK orientation formula and
+  `kernels/pck00011.tpc`'s real constants -- see
+  `src/bodyOrientation.js`). Orbit-arc lines are hidden while a
+  rotating frame is active: this demo's fixed sample budget (tens of
+  points across the time window) is far coarser than most bodies' own
+  rotation periods (Jupiter's is ~10 hours), so a connect-the-dots line
+  through those samples would alias into a meaningless tangle -- each
+  individual sampled *position* is still exact, only a sparse *line*
+  through them isn't meaningful in a fast-rotating frame. Live marker
+  positions stay exact regardless.
 
-Note: for the outer planets, the *position* used is still the
-barycenter (no separate planet-body segment exists in DE440 for them),
-but the `IAU_<BODY>` frame is keyed to the real planet (e.g. `IAU_JUPITER`'s
-orientation constants are `BODY599_POLE_RA` etc., not `BODY5_...` --
-confirmed against `pck00011.tpc`, which has no orientation data for
-barycenters at all). `spkez()`'s frame rotation doesn't require the
-frame's center to match the target/observer IDs, so this is a
-perfectly ordinary "shown at the barycenter's position, oriented as
-the planet actually rotates" view -- not an approximation glued on for
-this demo specifically.
+  Note: for the outer planets, the *position* used is still the
+  barycenter (no separate planet-body segment exists in DE440 for
+  them), but the `IAU_<BODY>` frame is keyed to the real planet (e.g.
+  `IAU_JUPITER`'s orientation constants are `BODY599_POLE_RA` etc., not
+  `BODY5_...` -- confirmed against `pck00011.tpc`, which has no
+  orientation data for barycenters at all). `spkez()`'s frame rotation
+  doesn't require the frame's center to match the target/observer IDs,
+  so this is a perfectly ordinary "shown at the barycenter's position,
+  oriented as the planet actually rotates" view.
+- **Shift+Click**: enters "precise" single-body mode -- see below.
+
+Click the active body again with the same modifier to go back to the
+Solar System Barycenter / `ECLIPJ2000` default.
+
+## Shift+Click: precise single-body mode
+
+Shows *only* the clicked body and its real satellites (from
+`SATELLITES` in `index.html` -- a small hardcoded map, since DE440 is a
+solar-system-*planetary* ephemeris, not a satellite-system one; only
+Earth's Moon is actually present in this data at all -- Jupiter's/
+Saturn's/etc. real moons would need their own separate SPK, e.g.
+`jup365.bsp`, not part of this demo). Every other body is hidden from
+the 3D scene (the "Bodies shown" legend stays fully populated and
+clickable, so you can jump straight to a different body's view without
+backing out first). Any satellites aren't prefetched until you actually
+enter precise mode for their parent body -- lazy, on demand, same
+principle as everything else in this demo.
+
+The scale changes too: instead of the whole-system AU-anchored scale
+(where every body's true radius would be sub-pixel), precise mode uses
+one linear km-to-scene-unit factor anchored to the clicked body's own
+real radius (`BODY<id>_RADII`) -- so both the body's size *and* its
+satellite's orbital distance are rendered genuinely true-to-scale
+relative to each other, which is exactly the trade-off this whole-system
+default view can't afford to make. The camera automatically reframes
+around the real extent of what's now shown (a lone body's own radius,
+or out past its farthest satellite's orbit) -- verified live: Mars
+(no satellite data) frames as a comfortably-sized lone sphere; Earth +
+Moon frames with the Moon's real, distant orbit fully visible.
+
+Click the `#viewStatus` bar (or the active body again with Shift) to
+leave precise mode.
 
 ## Notes
 
-- Positions are converted from km to AU and then to a fixed scene
-  scale (4.2 units/AU) so the whole range from Mercury to Pluto is
-  visible at once; this is a display choice, not something spiceJS
-  itself does.
+- Whole-system positions are converted from km to AU and then to a
+  fixed scene scale (4.2 units/AU) so the whole range from Mercury to
+  Pluto is visible at once; precise mode uses a different, real-radius-
+  anchored scale instead (see "Shift+Click" above). Both are display
+  choices, not something spiceJS itself does.
 - three.js is loaded from a CDN (unpkg, pinned to 0.169.0) via an
   import map -- swap that for a local copy if you need this to work
   fully offline.

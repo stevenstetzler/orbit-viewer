@@ -28,20 +28,23 @@
     white-space: pre-wrap; font: 11px/1.5 ui-monospace, monospace; background: #05070d;
     border: 1px solid #1c2230; border-radius: 4px; padding: 8px; height: 220px; overflow-y: auto;
   }
-  #legend { list-style: none; margin: 0; padding: 0; }
+  #legend, #preciseLegend { list-style: none; margin: 0; padding: 0; }
   #legend li {
     display: flex; align-items: center; gap: 8px; margin: 2px -8px; padding: 4px 8px;
     border-radius: 4px; cursor: pointer;
   }
   #legend li:hover { background: #141a26; }
   #legend li.active { background: #172038; box-shadow: inset 2px 0 0 #7fb2ff; }
-  #legend .swatch { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }
-  #legend .name { flex: 1 1 auto; }
-  #legend .dist { color: #8892a6; font-variant-numeric: tabular-nums; }
+  #preciseLegend li { display: flex; align-items: center; gap: 8px; margin: 2px -8px; padding: 4px 8px; }
+  #legend .swatch, #preciseLegend .swatch { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }
+  #legend .name, #preciseLegend .name { flex: 1 1 auto; }
+  #legend .dist, #preciseLegend .dist { color: #8892a6; font-variant-numeric: tabular-nums; }
   #viewStatus {
     display: flex; align-items: center; justify-content: space-between; gap: 8px;
     margin: 0 0 8px; padding: 6px 8px; background: #141a26; border-radius: 4px; font-size: 12px;
   }
+  #viewStatus.exitable { cursor: pointer; }
+  #viewStatus.exitable:hover { background: #1a2333; }
   #viewStatus .label { color: #d7dce5; }
   #viewStatus button { padding: 3px 8px; font-size: 11px; }
   #timeRow, #windowRow { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
@@ -99,23 +102,33 @@
     </div>
     <input id="timeSlider" type="range" min="-30" max="30" step="0.25" value="0" disabled style="width:100%" />
     <p class="sub" style="margin:6px 0 0">
-      Position within the time window above (UTC) -- the orbit-arc
-      lines re-center on this epoch as it moves, clipped to the edges
-      of the prefetched window above.
+      Position within the time window above (UTC) -- each orbit-arc
+      line re-centers on this epoch as it moves, always spanning the
+      full &plusmn;window above (loading more bytes on demand if you
+      scrub somewhere not prefetched yet, rather than clipping the arc
+      short there).
     </p>
 
     <h2>Bodies shown</h2>
     <p class="sub" style="margin-bottom:8px">
-      Click a body to center the view on it. <b>Alt/Option+Click</b> to
-      also lock the view to that body's own rotating <code>IAU_&lt;BODY&gt;</code>
-      frame, instead of the fixed (non-rotating) <code>ECLIPJ2000</code>
-      orientation every other view uses -- orbit-arc lines are hidden
-      in a rotating frame (a coarse time sample can't meaningfully
-      trace a fast rotation; the live marker positions stay exact
-      regardless).
+      <b>Click</b> a body to center the view on it (non-rotating
+      <code>ECLIPJ2000</code>, same as <b>Control+Click</b>).
+      <b>Alt/Option+Click</b> locks the view to that body's own
+      rotating <code>IAU_&lt;BODY&gt;</code> frame instead -- orbit-arc
+      lines are hidden there (a coarse time sample can't meaningfully
+      trace a fast rotation; live marker positions stay exact
+      regardless). <b>Shift+Click</b> enters a "precise" single-body
+      mode: centers on just that body and its real satellites (if
+      any), true-to-scale by its own physical radius rather than the
+      whole-system AU scale. Click the active body again (same
+      modifier) to go back.
     </p>
     <div id="viewStatus"><span class="label">Viewing from: &ndash;</span></div>
     <ul id="legend"></ul>
+    <div id="preciseLegendWrap" style="display:none">
+      <h2 style="margin-top:12px">Satellites (precise mode)</h2>
+      <ul id="preciseLegend"></ul>
+    </div>
   </div>
   <div id="viewport">
     <div id="overlayHint">Drag to orbit &middot; scroll to zoom</div>
@@ -143,6 +156,9 @@ const timeLabel = document.getElementById('timeLabel');
 const windowSlider = document.getElementById('windowSlider');
 const windowLabel = document.getElementById('windowLabel');
 const legendEl = document.getElementById('legend');
+const preciseLegendEl = document.getElementById('preciseLegend');
+const preciseLegendWrapEl = document.getElementById('preciseLegendWrap');
+const viewStatusEl = document.getElementById('viewStatus');
 const viewStatusLabel = document.querySelector('#viewStatus .label');
 
 function log(line) {
@@ -180,6 +196,18 @@ const DAY = 86400;
 // at closest approach.
 const EARTH_RADIUS_KM = 6378.1366;
 const RADIUS_SCENE_SCALE = 0.10 / Math.sqrt(EARTH_RADIUS_KM);
+
+// "Precise" single-body mode (Shift+Click): the clicked body's own
+// real radius, in scene units -- every position and every marker
+// radius (including its satellites') is then a single, true, linear
+// km-to-scene-unit scale anchored to this, so relative sizes *and*
+// distances within that one system are both physically accurate at
+// once. This is the opposite trade-off from RADIUS_SCENE_SCALE above:
+// there, one AU-anchored scale has to cover the whole solar system, so
+// true radii would be sub-pixel and a compressed (sqrt) size scale is
+// used instead; here, zoomed into a single body, true-to-scale
+// rendering is exactly what's numerically sane.
+const PRECISE_BODY_RADIUS_UNITS = 1.0;
 
 // Hardcoded, real NAIF addresses -- both confirmed (via curl, see the
 // PR/commit notes) to send no Access-Control-Allow-Origin header, so a
@@ -221,12 +249,18 @@ const DEFAULT_WINDOW_INDEX = 2; // 30 days, matching the slider's initial value
 // require the frame's center to match target/observer, so this is
 // fine: "shown at the barycenter's position, sized and oriented as the
 // planet actually is."
+// The Moon isn't in this default list even though DE440 carries it --
+// at the whole-system AU scale it's visually indistinguishable from
+// Earth (their marker positions overlap; see the Earth legend row's
+// own distance readout elsewhere in this file's commit history). It's
+// still fully available, though: Shift+Click Earth (see SATELLITES
+// below) to see it in "precise" single-body mode, at a scale where its
+// ~60-Earth-radius separation is actually visible.
 const BODIES = [
   { target: 10, bodyId: 10, name: 'Sun', color: 0xffd34d, fallbackRadius: 5, iauFrame: 'IAU_SUN' },
   { target: 199, bodyId: 199, name: 'Mercury', color: 0x9c9c9c, fallbackRadius: 2, iauFrame: 'IAU_MERCURY' },
   { target: 299, bodyId: 299, name: 'Venus', color: 0xe8c27a, fallbackRadius: 2.4, iauFrame: 'IAU_VENUS' },
   { target: 399, bodyId: 399, name: 'Earth', color: 0x4da6ff, fallbackRadius: 2.6, iauFrame: 'IAU_EARTH' },
-  { target: 301, bodyId: 301, name: 'Moon', color: 0xd9d9d9, fallbackRadius: 1.2, iauFrame: 'IAU_MOON' },
   { target: 4, bodyId: 499, name: 'Mars (barycenter)', color: 0xd9583a, fallbackRadius: 2.2, iauFrame: 'IAU_MARS' },
   { target: 5, bodyId: 599, name: 'Jupiter (barycenter)', color: 0xe0b98a, fallbackRadius: 3.6, iauFrame: 'IAU_JUPITER' },
   { target: 6, bodyId: 699, name: 'Saturn (barycenter)', color: 0xead6a8, fallbackRadius: 3.2, iauFrame: 'IAU_SATURN' },
@@ -234,6 +268,21 @@ const BODIES = [
   { target: 8, bodyId: 899, name: 'Neptune (barycenter)', color: 0x5b7fe0, fallbackRadius: 2.8, iauFrame: 'IAU_NEPTUNE' },
   { target: 9, bodyId: 999, name: 'Pluto (barycenter)', color: 0xbfa6d9, fallbackRadius: 1.4, iauFrame: 'IAU_PLUTO' },
 ];
+
+/**
+ * Natural satellites shown in "precise" (Shift+Click) mode for a given
+ * body, keyed by `bodyId` -- NOT a general spiceJS feature, just this
+ * demo's own hardcoded mapping of what DE440/DE440s actually carries:
+ * only Earth's Moon (301) is present in this data at all. DE440 is a
+ * solar-system-*planetary* ephemeris, not a satellite-system one --
+ * Jupiter's/Saturn's/etc. real moons need their own separate SPK
+ * kernel (e.g. jup365.bsp), not part of this demo or its data, so
+ * precise mode on any other body shows just that body alone.
+ */
+const SATELLITES = {
+  399: [{ target: 301, bodyId: 301, name: 'Moon', color: 0xd9d9d9, iauFrame: 'IAU_MOON' }],
+};
+
 const SSB = 0; // Solar System Barycenter -- the default view center
 
 // The default *inertial* (non-rotating) view frame. NOT the DE440
@@ -265,7 +314,8 @@ scene.background = new THREE.Color(0x05070d);
 // can put things like the Moon's orbit at a tiny scene-unit scale, and
 // scroll-zooming in close to see it shouldn't clip through the near plane.
 const camera = new THREE.PerspectiveCamera(50, viewport.clientWidth / viewport.clientHeight, 0.0005, 1000);
-camera.position.set(0, 22, 34);
+const DEFAULT_CAMERA_POSITION = new THREE.Vector3(0, 22, 34);
+camera.position.copy(DEFAULT_CAMERA_POSITION);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(window.devicePixelRatio);
@@ -295,13 +345,56 @@ function animate() {
 }
 animate();
 
+function resetCameraToDefault() {
+  camera.position.copy(DEFAULT_CAMERA_POSITION);
+  controls.target.set(0, 0, 0);
+  controls.update();
+}
+
+/**
+ * Frames the camera around the current (precise-mode) scene's real
+ * extent -- computed from actual marker positions/radii just placed,
+ * not a guess, since this varies hugely body-to-body: a lone body with
+ * no satellite data (e.g. Mars, in this demo's data -- see SATELLITES)
+ * needs a close-up around just its own ~1-unit radius, while Earth's
+ * real Moon needs enough room for a ~60-body-radius gap.
+ */
+function fitCameraForPrecise() {
+  let maxExtent = demo.scale.markerRadius(demo.bodies[0]); // the precise-mode center's own radius, always present
+  for (const b of demo.bodies) {
+    if (b.target === demo.viewObserver) continue;
+    const dist = b.marker.position.length();
+    maxExtent = Math.max(maxExtent, dist + demo.scale.markerRadius(b));
+  }
+  // The floor (4) matters most for a body with no satellite data (e.g.
+  // Mars, in this demo's data): there, maxExtent is just that body's
+  // own ~1-unit radius, and a smaller floor left the camera sitting
+  // close enough to fill almost the entire frame with it -- verified
+  // live via screenshot before landing on 4.
+  const cameraDistance = Math.max(4, maxExtent * 2.5);
+  const dir = DEFAULT_CAMERA_POSITION.clone().normalize();
+  camera.position.copy(dir.multiplyScalar(cameraDistance));
+  controls.target.set(0, 0, 0);
+  controls.update();
+}
+
 // ---------------------------------------------------------------------
-// Demo state. `demo` holds one open kernel session (remote + et0);
-// `demo.bodies`/`demo.halfWindowDays` are rebuilt every time the time
-// window changes, without re-opening the kernel.
+// Demo state. `demo` holds one open kernel session (remote + et0).
+// `demo.systemBodies` is the full whole-system body list, rebuilt only
+// when the time window changes -- it never changes across a view/mode
+// switch, and drives the always-present "Bodies shown" legend.
+// `demo.bodies` is whatever's *currently displayed* in the 3D scene:
+// equal to demo.systemBodies in 'system' mode, or [center, ...its
+// satellites] in 'precise' mode (see enterPreciseMode()).
+// `demo.scale` is the current position/radius scale (SYSTEM_SCALE, or
+// a precise-mode scale from makePreciseScale()) -- everything that
+// converts a km position or a km radius into scene units goes through
+// it, so the rest of the code never branches on mode directly.
 // ---------------------------------------------------------------------
 let demo = null;
 let windowChangeInFlight = false;
+let modeChangeInFlight = false;
+let sceneUpdateSeq = 0; // see updateSceneForOffset()'s staleness guard
 
 function kmToScene(posKm) {
   // km -> AU, then a fixed display scale so the whole DE440 range is
@@ -319,6 +412,31 @@ function kmToScene(posKm) {
   // instead. Either way, three.js's default "up" is Y, so swap Y/Z for
   // a natural top-down view.
   return [auX * scale, auZ * scale, -auY * scale];
+}
+
+/** The whole-system (AU-anchored) position/radius scale -- see kmToScene()/sceneRadiusFor(). */
+const SYSTEM_SCALE = {
+  posToScene: kmToScene,
+  markerRadius: (b) => sceneRadiusFor(b),
+};
+
+/**
+ * The "precise" single-body mode's position/radius scale (see
+ * PRECISE_BODY_RADIUS_UNITS above): one linear km-to-scene-unit factor
+ * anchored to `centerRadiusKm`, applied identically to *every*
+ * position and *every* marker radius in that mode -- true relative
+ * size and distance at once, unlike SYSTEM_SCALE's AU-anchored
+ * position scale + separately-compressed marker size.
+ */
+function makePreciseScale(centerRadiusKm) {
+  const linScale = PRECISE_BODY_RADIUS_UNITS / centerRadiusKm; // scene units per km
+  return {
+    posToScene: (posKm) => [posKm[0] * linScale, posKm[2] * linScale, -posKm[1] * linScale],
+    markerRadius: (b) => {
+      const km = meanRadiusKmFor(b);
+      return km != null ? km * linScale : 0.02; // small placeholder if RADII is somehow missing
+    },
+  };
 }
 
 function clearBodies() {
@@ -387,7 +505,8 @@ async function beginSession(remote, { sourceLabel, sourceSizeBytes, counters = n
   log(`Reference epoch (now, UTC): ${et2utcCalendar(et0)}  (ET ${et0.toFixed(3)} s)`);
 
   demo = {
-    remote, et0, sourceLabel, sourceSizeBytes, counters, halfWindowDays: null, bodies: [],
+    remote, et0, sourceLabel, sourceSizeBytes, counters, halfWindowDays: null,
+    bodies: [], systemBodies: [], mode: 'system', preciseBodyId: null, scale: SYSTEM_SCALE,
     viewObserver: SSB, viewFrame: INERTIAL_FRAME, viewLabel: 'Solar System Barycenter',
   };
   updateViewStatus();
@@ -399,38 +518,44 @@ async function beginSession(remote, { sourceLabel, sourceSizeBytes, counters = n
 }
 
 /**
- * A body's marker radius in scene units -- real BODY<id>_RADII data
- * (see the RADIUS_SCENE_SCALE comment above), computed once and cached
- * on the body object (`b.sceneRadius`), since it never changes across
- * epochs/window/view changes, only across a brand new kernel session.
+ * A body's real mean radius in km -- BODY<id>_RADII, averaged across
+ * the (up to triaxial) axes -- computed once and cached on the body
+ * object (`b.meanRadiusKm`, `null` if unavailable), since it never
+ * changes across epochs/window/view/mode changes, only across a brand
+ * new kernel session.
  */
-function sceneRadiusFor(b) {
-  if (b.sceneRadius != null) return b.sceneRadius;
+function meanRadiusKmFor(b) {
+  if ('meanRadiusKm' in b) return b.meanRadiusKm;
   try {
     const radii = bodyValues(b.bodyId, 'RADII', demo.remote.pool);
-    const meanRadiusKm = (radii[0] + radii[1] + radii[2]) / 3;
-    b.sceneRadius = RADIUS_SCENE_SCALE * Math.sqrt(meanRadiusKm);
+    b.meanRadiusKm = (radii[0] + radii[1] + radii[2]) / 3;
   } catch (err) {
     log(`  -> no real RADII for ${b.name} (${err.message}); using a placeholder marker size.`);
-    b.sceneRadius = b.fallbackRadius * 0.05;
+    b.meanRadiusKm = null;
   }
-  return b.sceneRadius;
+  return b.meanRadiusKm;
+}
+
+/** A body's marker radius in *system-mode* scene units -- see the RADIUS_SCENE_SCALE comment above. */
+function sceneRadiusFor(b) {
+  const km = meanRadiusKmFor(b);
+  return km != null ? RADIUS_SCENE_SCALE * Math.sqrt(km) : b.fallbackRadius * 0.05;
 }
 
 /**
  * (Re)creates the marker THREE.Mesh for each of demo.bodies -- sized by
- * sceneRadiusFor() (real body radii) and highlighted if it's the
- * current view's own center. No prefetching here, just geometry, so
- * this is cheap enough to call on every legend click; it does NOT set
- * marker *position* (updateSceneForOffset() does that, every time,
- * including right after this is called) or touch arc lines (rebuildArcs()
- * below, independently).
+ * demo.scale.markerRadius() (real body radii, scaled per the current
+ * mode) and highlighted if it's the current view's own center. No
+ * prefetching here, just geometry, so this is cheap enough to call on
+ * every legend click; it does NOT set marker *position*
+ * (updateSceneForOffset() does that, every time, including right after
+ * this is called) or touch arc lines (rebuildArcs() below, independently).
  */
 function ensureMarkers() {
   for (const b of demo.bodies) {
     if (b.marker) scene.remove(b.marker);
     const isCenter = b.target === demo.viewObserver;
-    const geo = new THREE.SphereGeometry(sceneRadiusFor(b), 20, 16);
+    const geo = new THREE.SphereGeometry(demo.scale.markerRadius(b), 20, 16);
     const mat = new THREE.MeshStandardMaterial({
       color: b.color, emissive: b.color, emissiveIntensity: isCenter ? 1.2 : b.target === 10 ? 1.2 : 0.15,
     });
@@ -441,12 +566,13 @@ function ensureMarkers() {
 
 /**
  * (Re)builds each body's orbit-arc line, centered on `centerEt` and
- * spanning +-demo.halfWindowDays (the "Time window" control doing
- * double duty as the arc's own span) -- clamped to demo.etStart/etEnd,
- * the range actually prefetched, so this never needs new data no
- * matter where `centerEt` lands (the arc just clips near an edge of
- * the prefetched window rather than extending past it). Called after
- * every "Reference epoch" slider move, so the arc always shows the
+ * spanning a constant +-demo.halfWindowDays (the "Time window" control
+ * doing double duty as the arc's own span) -- by the time this runs,
+ * updateSceneForOffset() has already made sure that whole span is
+ * covered by demo.etStart/etEnd (extending the prefetch if it wasn't),
+ * so no clamping/clipping happens here in the normal path; the
+ * Math.max/min below is just a defensive fallback. Called after every
+ * "Reference epoch" slider move, so the arc always shows the
  * trajectory *around wherever you're currently looking*, not frozen at
  * the moment the kernel was first opened.
  *
@@ -482,7 +608,7 @@ function rebuildArcs(centerEt) {
       for (let i = 0; i < demo.arcSamples; i++) {
         const et = arcStart + (i / (demo.arcSamples - 1)) * (arcEnd - arcStart);
         const { position } = spkez(b.target, demo.viewObserver, et, 'NONE', demo.viewFrame, demo.remote.pool);
-        arcPoints.push(new THREE.Vector3(...kmToScene(position)));
+        arcPoints.push(new THREE.Vector3(...demo.scale.posToScene(position)));
       }
       const arcGeo = new THREE.BufferGeometry().setFromPoints(arcPoints);
       const arcMat = new THREE.LineBasicMaterial({ color: b.color, transparent: true, opacity: 0.45 });
@@ -494,10 +620,54 @@ function rebuildArcs(centerEt) {
   }
 }
 
-/** Re-prefetch (incrementally -- already-fetched bytes are reused) and rebuild the scene for a new +-halfWindowDays around demo.et0. */
+/**
+ * Extends the prefetched window to cover [newStart, newEnd] (a
+ * superset of demo.etStart/etEnd) for every currently-displayed body
+ * (demo.bodies) -- prefetch() is incremental, so bytes already
+ * covering the *previous* window are never re-fetched, only new edges
+ * are. Called from updateSceneForOffset() when the "Reference epoch"
+ * slider scrubs near/past an edge of what's already prefetched, so
+ * each orbit-arc line can stay a constant +-halfWindowDays span around
+ * wherever you're currently looking, instead of clipping there.
+ *
+ * (In 'precise' mode this only extends demo.bodies -- the center body
+ * and its satellites -- not the full demo.systemBodies list, so the
+ * "Bodies shown" legend's AU readouts for bodies *not* currently
+ * displayed can go blank if you scrub far enough in precise mode;
+ * that's an accepted, honest trade-off in favor of not silently
+ * fetching data for bodies you can't currently even see.)
+ */
+async function extendPrefetch(newStart, newEnd) {
+  const before = demo.counters ? { ...demo.counters } : null;
+  for (const b of demo.bodies) {
+    try {
+      await demo.remote.prefetch({ target: b.target, observer: SSB, etStart: newStart, etEnd: newEnd });
+    } catch (err) {
+      log(`  -> couldn't extend prefetch for ${b.name} (${err.message})`);
+    }
+  }
+  demo.etStart = newStart;
+  demo.etEnd = newEnd;
+  if (demo.counters) {
+    const deltaRequests = demo.counters.requestCount - before.requestCount;
+    const deltaBytes = demo.counters.bytesRead - before.bytesRead;
+    if (deltaRequests > 0) {
+      log(`Extended prefetch to follow the reference epoch: ${deltaRequests} new range reads, ` +
+        `${(deltaBytes / 1e6).toFixed(2)} MB newly read. Cumulative: ${demo.counters.requestCount} reads, ` +
+        `${(demo.counters.bytesRead / 1e6).toFixed(2)} MB of "${demo.sourceLabel}".`);
+    }
+  }
+}
+
+/** Re-prefetch (incrementally -- already-fetched bytes are reused) and rebuild the whole-system scene for a new +-halfWindowDays around demo.et0. Always drops back to 'system' mode/scale, even if 'precise' mode was active. */
 async function rebuildForWindow(halfWindowDays) {
   if (!demo) return;
+  const wasPrecise = demo.mode === 'precise';
   clearBodies();
+  demo.mode = 'system';
+  demo.preciseBodyId = null;
+  demo.scale = SYSTEM_SCALE;
+  if (wasPrecise) resetCameraToDefault();
 
   const etStart = demo.et0 - halfWindowDays * DAY;
   const etEnd = demo.et0 + halfWindowDays * DAY;
@@ -531,22 +701,25 @@ async function rebuildForWindow(halfWindowDays) {
   }
 
   demo.bodies = bodiesState;
+  demo.systemBodies = bodiesState;
   demo.halfWindowDays = halfWindowDays;
   demo.etStart = etStart;
   demo.etEnd = etEnd;
   demo.arcSamples = arcSamples;
   ensureMarkers();
   buildLegend(bodiesState);
+  buildPreciseLegend([]);
 
   timeSlider.disabled = false;
   timeSlider.min = String(-halfWindowDays);
   timeSlider.max = String(halfWindowDays);
   timeSlider.step = String(Math.max(0.01, halfWindowDays / 240));
   timeSlider.value = '0';
-  updateSceneForOffset(0);
+  await updateSceneForOffset(0);
   log(`Scene built for +-${halfWindowDays} days. Drag the sliders above to explore.`);
 }
 
+/** Always built from demo.systemBodies -- the full legend stays the same, clickable set regardless of the current view/mode. */
 function buildLegend(bodiesState) {
   legendEl.innerHTML = '';
   for (const b of bodiesState) {
@@ -562,30 +735,55 @@ function buildLegend(bodiesState) {
     dist.className = 'dist';
     dist.id = `dist-${b.target}`;
     li.append(swatch, name, dist);
-    li.addEventListener('click', (evt) => {
-      const wantFrame = evt.altKey ? b.iauFrame : INERTIAL_FRAME;
-      // Click the active body again to reset back to the SSB/ECLIPJ2000 default.
-      if (demo.viewObserver === b.target && demo.viewFrame === wantFrame) {
-        setView(SSB, INERTIAL_FRAME, 'Solar System Barycenter');
-      } else {
-        setView(b.target, wantFrame, b.name);
-      }
-    });
+    li.addEventListener('click', (evt) => handleBodyClick(b, evt));
     legendEl.appendChild(li);
   }
   updateLegendActiveState();
 }
 
+/** Populates (or, given [], hides) the "Satellites (precise mode)" mini-legend -- see enterPreciseMode(). */
+function buildPreciseLegend(satellites) {
+  preciseLegendEl.innerHTML = '';
+  preciseLegendWrapEl.style.display = satellites.length ? '' : 'none';
+  for (const b of satellites) {
+    const li = document.createElement('li');
+    const swatch = document.createElement('span');
+    swatch.className = 'swatch';
+    swatch.style.background = '#' + b.color.toString(16).padStart(6, '0');
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = b.name;
+    const dist = document.createElement('span');
+    dist.className = 'dist';
+    dist.id = `pdist-${b.target}`;
+    li.append(swatch, name, dist);
+    preciseLegendEl.appendChild(li);
+  }
+}
+
 function updateLegendActiveState() {
   for (const li of legendEl.children) li.classList.remove('active');
-  if (demo && demo.viewObserver !== SSB) {
-    const activeLi = document.getElementById(`legend-${demo.viewObserver}`);
-    if (activeLi) activeLi.classList.add('active');
-  }
+  if (!demo || demo.viewObserver === SSB) return;
+  // Legend rows are keyed by `target` (see buildLegend()), and
+  // demo.viewObserver is always set to the clicked body's `target` in
+  // both 'system' and 'precise' mode (see setView()/enterPreciseMode()),
+  // so this lookup works identically for both -- no need to special-case
+  // `bodyId` (which for the barycenter-positioned outer planets differs
+  // from `target`, but was never what the legend row is keyed by).
+  const activeLi = document.getElementById(`legend-${demo.viewObserver}`);
+  if (activeLi) activeLi.classList.add('active');
 }
 
 function updateViewStatus() {
   if (!demo) return;
+  if (demo.mode === 'precise') {
+    const satCount = demo.bodies.length - 1;
+    viewStatusLabel.textContent = `Precise mode: ${demo.viewLabel}` +
+      (satCount > 0 ? ` + ${satCount} satellite${satCount === 1 ? '' : 's'}` : ' (no satellite data in this kernel)');
+    viewStatusEl.classList.add('exitable');
+    return;
+  }
+  viewStatusEl.classList.remove('exitable');
   const orientation = demo.viewFrame === INERTIAL_FRAME
     ? `${INERTIAL_FRAME}, non-rotating`
     : `locked to ${demo.viewFrame}, rotating`;
@@ -593,23 +791,138 @@ function updateViewStatus() {
   viewStatusLabel.textContent = `Viewing from: ${label} (${orientation})`;
 }
 
-/** Re-center (and optionally re-orient) the view -- no re-prefetch needed, every already-prefetched body can already be used as an observer or a frame reference. */
-function setView(observerTarget, frameName, label) {
+/**
+ * Re-center (and optionally re-orient) the whole-system view -- no
+ * re-prefetch needed, every already-prefetched body can already be
+ * used as an observer or a frame reference. Always drops 'precise'
+ * mode back to 'system' first if it was active, since every non-Shift
+ * click means "go back to the whole-system view" (at this new center).
+ */
+async function setView(observerTarget, frameName, label) {
   if (!demo) return;
+  if (demo.mode === 'precise') {
+    clearBodies();
+    demo.mode = 'system';
+    demo.preciseBodyId = null;
+    demo.scale = SYSTEM_SCALE;
+    demo.bodies = demo.systemBodies;
+    buildPreciseLegend([]);
+    resetCameraToDefault();
+  }
   demo.viewObserver = observerTarget;
   demo.viewFrame = frameName;
   demo.viewLabel = label;
   ensureMarkers();
-  updateSceneForOffset(Number(timeSlider.value));
+  await updateSceneForOffset(Number(timeSlider.value));
   updateViewStatus();
   updateLegendActiveState();
 }
 
-/** Updates marker positions (and the orbit arcs -- see rebuildArcs()) for `offsetDays` from demo.et0, i.e. the "Reference epoch" slider's current position. */
-function updateSceneForOffset(offsetDays) {
+/**
+ * "Precise" single-body mode (Shift+Click): centers on `spec`, shows
+ * only it and its real satellites (SATELLITES[spec.bodyId], often
+ * empty -- see that constant's comment), and switches to a scale
+ * anchored to `spec`'s own real physical radius (makePreciseScale())
+ * instead of the whole-system AU scale -- true relative size/distance
+ * for a single system, numerically sane at this scale (unlike the
+ * AU-anchored system view, where every planet's radius is many orders
+ * of magnitude below a screen pixel).
+ */
+async function enterPreciseMode(spec) {
   if (!demo) return;
+  const satelliteSpecs = SATELLITES[spec.bodyId] || [];
+  log(`Entering precise mode: ${spec.name}` +
+    (satelliteSpecs.length ? ` + ${satelliteSpecs.length} satellite(s)...` : ' (no satellite data in this kernel)...'));
+
+  const included = [{ ...spec, isPreciseCenter: true }];
+  for (const sat of satelliteSpecs) {
+    try {
+      await demo.remote.prefetch({ target: sat.target, observer: SSB, etStart: demo.etStart, etEnd: demo.etEnd });
+      included.push({ ...sat });
+    } catch (err) {
+      log(`  -> couldn't prefetch satellite ${sat.name}: ${err.message}`);
+    }
+  }
+
+  const centerRadiusKm = meanRadiusKmFor(included[0]); // cache lands on the copy demo.bodies will actually hold
+  if (centerRadiusKm == null) {
+    log(`  -> no real radius known for ${spec.name}; precise mode needs one, staying in the current view.`);
+    return;
+  }
+
+  clearBodies();
+  demo.mode = 'precise';
+  demo.preciseBodyId = spec.bodyId;
+  demo.viewObserver = spec.target;
+  demo.viewFrame = INERTIAL_FRAME;
+  demo.viewLabel = spec.name;
+  demo.bodies = included;
+  demo.scale = makePreciseScale(centerRadiusKm);
+  sunLight.position.set(0, 0, 0); // this system's own center stands in as "the star" for lighting purposes
+
+  ensureMarkers();
+  buildPreciseLegend(included.filter((b) => !b.isPreciseCenter));
+  await updateSceneForOffset(Number(timeSlider.value));
+  fitCameraForPrecise();
+  updateViewStatus();
+  updateLegendActiveState();
+}
+
+/** Leaves 'precise' mode, back to the whole-system SSB/ECLIPJ2000 default. */
+async function exitPreciseMode() {
+  await setView(SSB, INERTIAL_FRAME, 'Solar System Barycenter');
+}
+
+/**
+ * Click (or Alt/Control/Shift+Click) on a "Bodies shown" legend row --
+ * see this file's "Bodies shown" hint text for what each combination
+ * does. Shift takes priority if held with another modifier.
+ */
+function handleBodyClick(b, evt) {
+  if (!demo || modeChangeInFlight) return;
+  modeChangeInFlight = true;
+  const done = () => { modeChangeInFlight = false; };
+  const fail = (err) => { log(`ERROR: ${err.message}`); console.error(err); };
+
+  if (evt.shiftKey) {
+    const alreadyThisPrecise = demo.mode === 'precise' && demo.preciseBodyId === b.bodyId;
+    (alreadyThisPrecise ? exitPreciseMode() : enterPreciseMode(b)).catch(fail).finally(done);
+    return;
+  }
+
+  const wantFrame = evt.altKey ? b.iauFrame : INERTIAL_FRAME;
+  const alreadyThisView = demo.mode === 'system' && demo.viewObserver === b.target && demo.viewFrame === wantFrame;
+  (alreadyThisView
+    ? setView(SSB, INERTIAL_FRAME, 'Solar System Barycenter')
+    : setView(b.target, wantFrame, b.name)
+  ).catch(fail).finally(done);
+}
+
+/**
+ * Updates marker positions (and the orbit arcs -- see rebuildArcs())
+ * for `offsetDays` from demo.et0, i.e. the "Reference epoch" slider's
+ * current position. Async: may extend the prefetch (see
+ * extendPrefetch()) first if the epoch's own +-halfWindowDays arc span
+ * isn't fully covered yet. `sceneUpdateSeq` guards against a slower,
+ * stale call finishing *after* a newer one and clobbering its result
+ * -- expected when this fires on every "Reference epoch" 'input' event
+ * during a fast drag, each one able to await a real (if local-disk)
+ * async prefetch.
+ */
+async function updateSceneForOffset(offsetDays) {
+  if (!demo) return;
+  const mySeq = ++sceneUpdateSeq;
   const et = demo.et0 + offsetDays * DAY;
   timeLabel.textContent = `${et2utcCalendar(et)}  (${offsetDays >= 0 ? '+' : ''}${offsetDays.toFixed(2)} d)`;
+
+  const halfSpan = demo.halfWindowDays * DAY;
+  const neededStart = et - halfSpan;
+  const neededEnd = et + halfSpan;
+  if (neededStart < demo.etStart || neededEnd > demo.etEnd) {
+    await extendPrefetch(Math.min(demo.etStart, neededStart), Math.max(demo.etEnd, neededEnd));
+    if (mySeq !== sceneUpdateSeq) return; // a newer update superseded this one while we were awaiting
+  }
+
   for (const b of demo.bodies) {
     let position;
     try {
@@ -618,20 +931,60 @@ function updateSceneForOffset(offsetDays) {
       log(`  -> couldn't place ${b.name} relative to the current view (${err.message})`);
       continue;
     }
-    const [x, y, z] = kmToScene(position);
+    const [x, y, z] = demo.scale.posToScene(position);
     b.marker.position.set(x, y, z);
-    if (b.target === 10) sunLight.position.set(x, y, z);
+    if (demo.mode === 'system' && b.target === 10) sunLight.position.set(x, y, z);
+  }
+
+  // Legend AU readouts: always demo.systemBodies (informational even
+  // for bodies not currently drawn in 3D -- see 'precise' mode above).
+  for (const b of demo.systemBodies) {
     const distEl = document.getElementById(`dist-${b.target}`);
-    if (distEl) {
-      const auDist = Math.hypot(...position) / AU_KM;
-      distEl.textContent = `${auDist.toFixed(2)} AU`;
+    if (!distEl) continue;
+    try {
+      const { position } = spkez(b.target, demo.viewObserver, et, 'NONE', demo.viewFrame, demo.remote.pool);
+      distEl.textContent = `${(Math.hypot(...position) / AU_KM).toFixed(2)} AU`;
+    } catch (err) {
+      distEl.textContent = '';
     }
   }
+
+  // Precise-mode satellite readouts: km, more natural than AU at this scale.
+  if (demo.mode === 'precise') {
+    for (const b of demo.bodies) {
+      if (b.target === demo.viewObserver) continue;
+      const distEl = document.getElementById(`pdist-${b.target}`);
+      if (!distEl) continue;
+      try {
+        const { position } = spkez(b.target, demo.viewObserver, et, 'NONE', demo.viewFrame, demo.remote.pool);
+        distEl.textContent = `${Math.hypot(...position).toFixed(0)} km`;
+      } catch (err) {
+        distEl.textContent = '';
+      }
+    }
+  }
+
   rebuildArcs(et);
 }
 
+// Not awaited here -- updateSceneForOffset() is self-cancelling (see
+// its sceneUpdateSeq guard) if a newer 'input' event fires (a fast
+// drag) before an in-flight extendPrefetch() finishes, so each tick
+// can just fire-and-forget; .catch() only for genuinely unexpected errors.
 timeSlider.addEventListener('input', () => {
-  updateSceneForOffset(Number(timeSlider.value));
+  updateSceneForOffset(Number(timeSlider.value)).catch((err) => {
+    log(`ERROR: ${err.message}`);
+    console.error(err);
+  });
+});
+
+viewStatusEl.addEventListener('click', () => {
+  if (demo && demo.mode === 'precise') {
+    exitPreciseMode().catch((err) => {
+      log(`ERROR: ${err.message}`);
+      console.error(err);
+    });
+  }
 });
 
 // 'change' (fires on release), not 'input' (fires continuously while
