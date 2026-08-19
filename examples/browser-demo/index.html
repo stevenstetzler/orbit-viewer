@@ -112,15 +112,15 @@
     <div id="timeRow">
       <span id="timeLabel">&ndash;</span>
     </div>
-    <input id="timeSlider" type="range" min="-30" max="30" step="any" value="0" disabled style="width:100%" />
+    <input id="timeSlider" type="range" min="-3650" max="3650" step="any" value="0" disabled style="width:100%" />
     <p class="sub" style="margin:6px 0 0">
-      Position in time (UTC) to view live marker positions at. Each
-      body's orbit-arc line always spans that body's own real orbital
-      period, &plusmn;half a period around wherever this slider is
-      currently pointing -- not a shared window, since a moon's period
-      (days) and a planet's (years) differ far too much to share one
-      (loading more bytes on demand if you scrub somewhere not
-      prefetched yet, rather than clipping an arc short).
+      Position in time (UTC, &plusmn;10 years around now) to view live
+      marker positions and orbit-arc lines at. Each body's orbit-arc
+      line is the exact two-body orbit ellipse implied by its own real
+      state right now -- not sampled real trajectory data over a time
+      span, so it's always a clean closed curve regardless of how far
+      you scrub (loading more bytes on demand if you scrub somewhere
+      not prefetched yet).
     </p>
 
     <h2>Bodies shown</h2>
@@ -129,9 +129,10 @@
       <code>ECLIPJ2000</code>, same as <b>Control+Click</b>).
       <b>Alt/Option+Click</b> locks the view to that body's own
       rotating <code>IAU_&lt;BODY&gt;</code> frame instead -- orbit-arc
-      lines are hidden there (a coarse time sample can't meaningfully
-      trace a fast rotation; live marker positions stay exact
-      regardless). <b>Command/Meta+Click</b> (the Windows/Super key on
+      lines are hidden there (the frame itself is spinning, so an
+      "orbit" drawn in it would just retrace that spin, not anything
+      about the other bodies' real trajectories; live marker positions
+      stay exact regardless). <b>Command/Meta+Click</b> (the Windows/Super key on
       non-Mac keyboards) enters a "precise" single-body mode: centers
       on just that body and its real satellites (if any), true-to-scale
       by its own physical radius rather than the whole-system AU scale.
@@ -242,13 +243,6 @@ const NAIF_SPK_URL = 'https://naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/pla
 
 const SUN_TARGET = 10;
 
-// Used for any body whose real orbital period can't be determined --
-// the Sun itself (no single primary it orbits, in the two-body sense
-// estimateOrbitalPeriodSec() uses), or a body missing real GM data.
-// Matches this demo's old fixed default window, before per-body
-// periods existed.
-const FALLBACK_HALF_SPAN_DAYS = 30;
-
 // Bodies to render: NAIF ID (position), display name, color, a fallback
 // marker radius (used only if real RADII data can't be found -- see
 // sceneRadiusFor()), the body-fixed IAU_<NAME> frame Alt/Option+Click
@@ -302,17 +296,20 @@ const BODIES = [
  * Without that proxy running, precise mode on these bodies just says
  * so and shows the body alone, same as it always did.
  *
- * Saturn has no entry: the only Saturn-system file in the manifest
- * (sat480) carries no classic moons at all -- confirmed against the
- * real file, see kernels/sources.mjs's own comment on it.
- *
  * `only`, where present, restricts which of the kernel's real targets
  * are offered: ura184-3 also carries Uranus's small/irregular outer
  * moons (716-724), which have no real RADII in pck00011.tpc (checked
  * directly) and orbit tens of millions of km out -- letting them in
  * would both render as placeholder dots and blow out
  * fitCameraForPrecise()'s auto-framing relative to the five actually
- * well-known major moons this is meant to show.
+ * well-known major moons this is meant to show. sat441's own Phoebe
+ * (609) gets the same exclusion for the same reason, despite having
+ * real RADII data: at ~12.4 million km out it's ~3.5x farther than
+ * the next-farthest moon here (Iapetus, ~3.5 million km) and ~66x
+ * farther than the closest (Mimas, ~188,000 km) -- verified directly
+ * against the real file -- a genuinely different class of orbit
+ * (distant, retrograde, captured), not just a farther member of the
+ * same regular-moon family the other 13 are.
  */
 const SATELLITE_KERNEL_FOR_BODY = {
   // Moon's real `center` in the manifest is the Earth-Moon barycenter
@@ -325,12 +322,19 @@ const SATELLITE_KERNEL_FOR_BODY = {
   399: { kernelId: 'de440s', centerId: 3 },
   499: { kernelId: 'mar099' },
   599: { kernelId: 'jup365' },
+  699: { kernelId: 'sat441', only: [601, 602, 603, 604, 605, 606, 607, 608, 612, 613, 614, 632, 634] }, // classical + small inner moons; excludes Phoebe (609), see below
   799: { kernelId: 'ura184-3', only: [701, 702, 703, 704, 705] },
   899: { kernelId: 'nep105' }, // Nereid only -- nep105 has no Triton (see kernels/sources.mjs)
   999: { kernelId: 'plu060' },
 };
 
-const SATELLITE_COLORS = [0xd9d9d9, 0xffb37a, 0x8fd9c4, 0xe0a6ff, 0x7ac9ff, 0xffe27a, 0xff8fa6, 0xa6ffb3];
+// 14 entries -- one more than the largest satellite family currently
+// shown (Saturn, 13) -- so no two of one body's moons ever share a
+// color via the i % length wraparound below.
+const SATELLITE_COLORS = [
+  0xd9d9d9, 0xffb37a, 0x8fd9c4, 0xe0a6ff, 0x7ac9ff, 0xffe27a, 0xff8fa6, 0xa6ffb3,
+  0xffcc66, 0x66ffe0, 0xff99cc, 0xb3ff66, 0x9999ff, 0xff8c66,
+];
 
 /**
  * Real satellites of a body, read from kernels/sources.mjs's own
@@ -372,54 +376,85 @@ const SSB = 0; // Solar System Barycenter -- the default view center
 const INERTIAL_FRAME = 'ECLIPJ2000';
 
 // ---------------------------------------------------------------------
-// Per-body real orbital period
+// Two-body orbital ellipse geometry
 // ---------------------------------------------------------------------
-// Every body's orbit-arc line spans exactly one of its own real orbits,
-// [-P/2, +P/2] around the reference epoch -- not a shared window (a
-// moon's period runs days, a planet's runs years, and Pluto's runs
-// nearly two and a half centuries; no single window size is right for
-// all of them at once). `P` comes from the vis-viva equation, using
-// this repo's own bundled `gm_de440.tpc` (loadGravitationalParameters())
-// and the body's actual state (position, velocity) relative to its real
-// primary at the reference epoch -- not looked up from an external
-// database: NASA/JPL's Small-Body Database (the obvious-looking source)
-// only covers asteroids and comets, not planets or natural satellites --
+// Every body's orbit-arc line is the exact analytic ellipse implied by
+// its own real state (position, velocity) and GM at the CURRENT
+// reference epoch -- not a series of sampled real trajectory points
+// over some time span. This needed two earlier, more complicated
+// designs first (a shared time window, then a per-body real-period
+// window with adaptive angular sampling to avoid aliasing within it --
+// see git history) before landing here: an ellipse is a closed curve
+// by construction, so it always looks right regardless of how many
+// times a fast body has actually orbited, with no time-span/sampling
+// tuning needed at all, and no need to prefetch a whole orbit's worth
+// of real data ahead of time -- only the single state at whatever
+// epoch is currently showing, which the live marker position already
+// needs anyway.
+//
+// GM comes from this repo's own bundled `kernels/gm_de440.tpc`
+// (loadGravitationalParameters()), not an external database: NASA/
+// JPL's Small-Body Database (the obvious-looking source) only covers
+// asteroids and comets, not planets or natural satellites --
 // confirmed directly (`sstr=Mercury`/`Phobos`/`Charon` all come back
 // "specified object was not found"), and some names actively collide
 // with real asteroids of the same name (`sstr=Io`/`Europa` resolve to
 // main-belt asteroids 85 Io and 52 Europa, not Jupiter's moons) -- so it
 // would either fail outright or silently return the wrong object's
-// period for every body this demo shows.
+// data for every body this demo shows.
+//
+// The curve is drawn at ORBIT_ELLIPSE_SEGMENTS points, evenly spaced in
+// *eccentric* anomaly (via THREE.EllipseCurve -- see
+// computeOrbitalEllipse()/rebuildArcs() below), not true anomaly: for
+// an eccentric orbit that's smoother-looking (more uniform curvature
+// between points) than evenly spacing by time or true anomaly would
+// be, and for a genuinely closed analytic curve there's no aliasing
+// concern driving the choice the way there was for the old
+// sampled-trajectory design -- a single fixed, generous point count is
+// all this needs, for any body, any eccentricity, any epoch.
+const ORBIT_ELLIPSE_SEGMENTS = 180;
 
 /**
- * A body's real (osculating) orbital period around `primaryId`, in
- * seconds -- from the vis-viva equation:
- *   1/a = 2/r - v^2/mu          (specific orbital energy)
- *   P   = 2*pi*sqrt(a^3/mu)     (Kepler's third law)
- * using the reduced two-body `mu = GM(primary) + GM(body)` (both from
- * `demo.remote.pool`, where gm_de440.tpc is loaded -- see
- * loadGravitationalParameters()'s own comment on why always that pool,
- * regardless of which pool `pool` itself is) and the body's actual
- * state relative to `primaryId` at `et`. Any frame works here: vis-viva
- * only needs |r| and |v|, and rotating between frames doesn't change
- * either magnitude.
+ * A body's real (osculating) orbital ellipse around `primaryId`, at
+ * `et`, in `primaryId`'s own rest frame (primary at the origin, which
+ * is also one of the ellipse's two foci -- not its geometric center).
+ * From the standard two-body conserved quantities:
+ *   invA = 2/r - v^2/mu                     (vis-viva -> 1/semi-major axis)
+ *   h    = r x v                            (specific angular momentum -- orbit-normal direction)
+ *   eVec = (v x h)/mu - r/|r|               (eccentricity vector -- points toward periapsis)
+ * using the reduced two-body `mu = GM(primary) + GM(body)` (both
+ * always read from `demo.remote.pool`, where gm_de440.tpc is loaded --
+ * see loadGravitationalParameters()'s own comment on why that pool
+ * specifically, regardless of which pool `pool` itself is).
+ *
+ * Returns `{ a, e, b, pHat, qHat }`: semi-major/-minor axis (km),
+ * eccentricity, and an orthonormal in-plane basis (THREE.Vector3,
+ * `pHat` toward periapsis, `qHat` completing a right-handed frame with
+ * the orbit normal) -- together these place any point on the ellipse
+ * via `pHat*x + qHat*y` for `(x, y)` in the ellipse's own 2D perifocal
+ * plane (see rebuildArcs()). Deriving the basis from the conserved
+ * vectors directly, rather than going through the classical inclination/
+ * node/argument-of-periapsis angles, avoids their usual singularities
+ * (undefined node for zero inclination, undefined argument of periapsis
+ * for zero eccentricity) -- exactly the near-circular case several of
+ * this demo's own moons are close to.
  *
  * This is exact for genuinely Keplerian (two-body) motion. Real solar
  * system motion is n-body, so the result is really an *osculating*
- * period -- the instantaneous idealized two-body period implied by the
- * body's state at this one epoch, not a value refined over the whole
- * orbit. That's the same approximation already accepted for orbit-arc
- * *sampling* (see sampleArcAdaptive() below), and just as negligible an
- * error at the timescales this demo cares about.
+ * ellipse -- the instantaneous idealized two-body orbit implied by the
+ * body's state at this one epoch, not a shape refined over the whole
+ * orbit -- recomputed fresh from real data every time the reference
+ * epoch moves, so it stays consistent with (and honest about) the
+ * actual perturbed trajectory rather than freezing a single snapshot.
  *
  * Throws if the body isn't gravitationally bound to `primaryId` at this
- * epoch (`invA <= 0` -- would only happen for real solar system bodies
- * if GM data were wrong or missing) or if either GM lookup fails
- * entirely for the primary (a body's own GM, if missing, is just
- * treated as 0 -- fine for e.g. Styx, whose real mass is small enough
- * that gm_de440.tpc itself lists it as exactly 0).
+ * epoch (`invA <= 0`), if the orbit is rectilinear (zero angular
+ * momentum -- no well-defined plane), or if the primary's own GM
+ * lookup fails entirely (a body's own GM, if missing, is just treated
+ * as 0 -- fine for e.g. Styx, whose real mass is small enough that
+ * gm_de440.tpc itself lists it as exactly 0).
  */
-function estimateOrbitalPeriodSec(targetId, primaryId, et, pool) {
+function computeOrbitalEllipse(targetId, primaryId, et, pool) {
   const muPrimary = bodyValues(primaryId, 'GM', demo.remote.pool)[0];
   let muTarget = 0;
   try {
@@ -430,88 +465,39 @@ function estimateOrbitalPeriodSec(targetId, primaryId, et, pool) {
   const mu = muPrimary + muTarget;
 
   const { position, velocity } = spkez(targetId, primaryId, et, 'NONE', INERTIAL_FRAME, pool);
-  const r = Math.hypot(...position);
-  const v = Math.hypot(...velocity);
-  const invSemiMajorAxis = 2 / r - (v * v) / mu;
+  const r = new THREE.Vector3(...position);
+  const v = new THREE.Vector3(...velocity);
+  const rMag = r.length();
+  const vMag = v.length();
+
+  const invSemiMajorAxis = 2 / rMag - (vMag * vMag) / mu;
   if (invSemiMajorAxis <= 0) {
     throw new Error(`orbit around body ${primaryId} is not bound (unbound/parabolic) at this epoch`);
   }
-  const semiMajorAxis = 1 / invSemiMajorAxis;
-  return 2 * Math.PI * Math.sqrt((semiMajorAxis * semiMajorAxis * semiMajorAxis) / mu);
-}
+  const a = 1 / invSemiMajorAxis;
 
-// ---------------------------------------------------------------------
-// Adaptive orbit-arc sampling
-// ---------------------------------------------------------------------
-// The previous scheme used a fixed sample count spread evenly across
-// the arc's whole time span (more samples for a wider window, capped
-// for render cost) -- correct only by accident, when the span happens
-// to be within about one order of magnitude of the body's own orbital
-// period (which is all whole-system planet arcs over the default
-// +-30-day window are). It breaks in both directions once that's not
-// true: too FEW samples once the span covers many periods of a body
-// moving fast relative to the window (verified live, screenshotted:
-// Jupiter's Galilean moons, 1.8-16.7 day periods, rendered as a
-// tangled "spirograph" over a 60-day precise-mode span at the old
-// fixed ~60-sample budget -- and the exact same failure mode hits the
-// whole-system view too, just for different bodies: Mercury's 88-day
-// period means a +-10-year window traces almost 40 orbits, badly
-// aliased at the old scheme's 240-sample cap); too MANY (wasted
-// render budget, spread uselessly thin) for a slow body over a narrow
-// window.
-//
-// This instead measures each body's REAL angular rate directly from
-// its own state vectors -- no orbital period, no extra GM kernel
-// needed. For two-body (Keplerian) motion, specific angular momentum
-// h = r x v is exactly conserved, so the instantaneous angular rate at
-// any sampled point is h/|r|^2; sampling based on the actual angle
-// swept between consecutive points (rather than a fixed time step)
-// naturally lands more points where a body is moving fast (near
-// periapsis) and fewer where it's moving slowly (near apoapsis), for
-// ANY body, at ANY span-to-period ratio, with no per-body tuning.
-// Real solar system motion is n-body, not exactly two-body, but the
-// perturbations are negligible at the timescales relevant to a
-// smooth-looking line.
-
-const ARC_MAX_STEP_RAD = (10 * Math.PI) / 180; // no two consecutive plotted points more than 10 degrees apart, as seen from the observer
-const ARC_SEED_COUNT = 24; // evenly-spaced starting points, before adaptive refinement -- guards against the refinement's one real blind spot: it only ever looks *between* two already-sampled points, so if by coincidence two adjacent seeds land at a similar phase (the window is close to an exact multiple of the body's period), whatever happens between them is invisible to it. More, evenly-spread seeds make that coincidence unlikely; it isn't ruled out.
-const ARC_MAX_SAMPLES = 400; // hard cap on total points per body per arc, win or lose -- bounds both render cost and the O(n^2) refinement scan below (400^2 = 1.6e5 comparisons, done off already-prefetched bytes with no I/O -- well under a millisecond)
-
-function angleBetweenVectors(p1, p2) {
-  const d1 = Math.hypot(p1[0], p1[1], p1[2]);
-  const d2 = Math.hypot(p2[0], p2[1], p2[2]);
-  if (d1 === 0 || d2 === 0) return 0;
-  const dot = (p1[0] * p2[0] + p1[1] * p2[1] + p1[2] * p2[2]) / (d1 * d2);
-  return Math.acos(Math.max(-1, Math.min(1, dot)));
-}
-
-/**
- * Samples `target`'s position relative to `observer` across [et0, et1],
- * adaptively: starts from ARC_SEED_COUNT evenly-spaced points, then
- * repeatedly bisects whichever consecutive pair currently sweeps the
- * widest angle (as seen from the observer) until every gap is under
- * ARC_MAX_STEP_RAD or ARC_MAX_SAMPLES is reached. Returns an array of
- * `{ et, position }` in time order.
- */
-function sampleArcAdaptive(target, observer, et0, et1, frame, pool) {
-  const at = (et) => ({ et, position: spkez(target, observer, et, 'NONE', frame, pool).position });
-
-  const samples = [];
-  for (let i = 0; i < ARC_SEED_COUNT; i++) {
-    samples.push(at(et0 + (i / (ARC_SEED_COUNT - 1)) * (et1 - et0)));
+  const h = new THREE.Vector3().crossVectors(r, v);
+  if (h.lengthSq() === 0) {
+    throw new Error('rectilinear orbit (zero angular momentum) -- no well-defined orbital plane');
   }
+  const hHat = h.clone().normalize();
 
-  while (samples.length < ARC_MAX_SAMPLES) {
-    let worstIdx = -1;
-    let worstAngle = ARC_MAX_STEP_RAD;
-    for (let i = 0; i < samples.length - 1; i++) {
-      const angle = angleBetweenVectors(samples[i].position, samples[i + 1].position);
-      if (angle > worstAngle) { worstAngle = angle; worstIdx = i; }
-    }
-    if (worstIdx < 0) break; // every gap is already under threshold
-    samples.splice(worstIdx + 1, 0, at((samples[worstIdx].et + samples[worstIdx + 1].et) / 2));
-  }
-  return samples;
+  const eVec = new THREE.Vector3().crossVectors(v, h).divideScalar(mu).sub(r.clone().divideScalar(rMag));
+  const e = eVec.length();
+
+  // Below this, the eccentricity vector's *direction* is numerical
+  // noise (its magnitude is meaningful, but which way it points isn't,
+  // for a genuinely circular orbit). Falling back to the body's own
+  // current position direction instead -- always exactly in-plane, by
+  // definition of two-body motion -- keeps pHat well-defined and keeps
+  // the rendered ellipse's phase continuous with where the body
+  // actually is, rather than snapping to an arbitrary axis.
+  const ECCENTRICITY_EPS = 1e-8;
+  const pHat = e > ECCENTRICITY_EPS ? eVec.divideScalar(e) : r.clone().normalize();
+  const qHat = new THREE.Vector3().crossVectors(hHat, pHat).normalize();
+  const b = a * Math.sqrt(Math.max(0, 1 - e * e));
+
+  return { a, e, b, pHat, qHat };
 }
 
 // ---------------------------------------------------------------------
@@ -707,9 +693,8 @@ async function loadPlanetaryConstants(pool) {
  * every planet/barycenter, and every natural satellite this demo can
  * show. Same reasoning as loadLeapseconds()/loadPlanetaryConstants()
  * above: this repo's own bundled copy, no live NAIF fetch needed for a
- * ~12 KB file that never changes. Used only by
- * estimateOrbitalPeriodSec() below, to size each body's own orbit-arc
- * span to its own real orbital period via the vis-viva equation.
+ * ~12 KB file that never changes. Used only by computeOrbitalEllipse()
+ * below, to compute each body's own real two-body orbit shape.
  *
  * Always loaded into (and looked up from) `demo.remote.pool`
  * specifically, never `demo.activeRemote.pool` -- same reasoning
@@ -746,14 +731,15 @@ async function beginSession(remote, { sourceLabel, sourceSizeBytes, counters = n
     bodies: [], systemBodies: [], mode: 'system', preciseBodyId: null, scale: SYSTEM_SCALE,
     viewObserver: SSB, viewFrame: INERTIAL_FRAME, viewLabel: 'Solar System Barycenter',
     // The "active" remote drives 3D-scene rendering (rebuildArcs(),
-    // updateSceneForOffset()'s marker loop, extendBodyPrefetch()) and,
+    // updateSceneForOffset()'s marker loop, ensureBodyCoverage()) and,
     // in 'precise' mode, can be a *different* kernel than `remote` (a
-    // satellite kernel -- see resolveSatellitesFor()). There's no
-    // shared etStart/etEnd here any more: each body in demo.bodies
-    // carries its own (b.etStart/b.etEnd, sized to its own real
-    // orbital period -- see prefetchOneOrbit()), since a moon's period
-    // (days) and a planet's (years) are too different to share one
-    // window.
+    // satellite kernel -- see resolveSatellitesFor()). Each body in
+    // demo.bodies carries its own b.dataStart/b.dataEnd (see
+    // prefetchBodyProbe()/ensureBodyCoverage()) -- just whatever epoch
+    // range has actually been scrubbed to, not a shared window: orbit
+    // arcs are analytic ellipses now (computeOrbitalEllipse()),
+    // recomputed from a single state at a time, not sampled real
+    // trajectory data over a span.
     activeRemote: remote,
     satelliteRemotes: new Map(), // kernelId -> openRemoteSpk() result, fetched at most once per session
   };
@@ -810,22 +796,27 @@ function ensureMarkers() {
 }
 
 /**
- * (Re)builds each body's orbit-arc line, centered on `centerEt` and
- * spanning +-half of *that body's own* real orbital period (b.periodSec
- * -- see estimateOrbitalPeriodSec()/prefetchOneOrbit()), not a shared
- * window -- by the time this runs, updateSceneForOffset() has already
- * made sure that span is covered by b.etStart/b.etEnd (extending the
- * prefetch if it wasn't), so no clamping/clipping happens here in the
- * normal path; the Math.max/min below is just a defensive fallback.
- * Called after every "Reference epoch" slider move, so each arc always
- * shows the trajectory *around wherever you're currently looking*, not
- * frozen at the moment the kernel was first opened.
+ * (Re)builds each body's orbit-arc line as an exact analytic ellipse
+ * (computeOrbitalEllipse()) around `centerEt`, in `b.primaryId`'s own
+ * rest frame -- translated into the *current view* by the primary's
+ * own position relative to `demo.viewObserver` at `centerEt` (zero
+ * whenever the primary already IS the current view's center, which is
+ * always true in precise mode -- see enterPreciseMode()). This
+ * translation is only exact instantaneously (both the primary and the
+ * observer are themselves moving), so a body's ellipse only lines up
+ * exactly with its live marker position right at `centerEt`; it's a
+ * closed analytic curve either way, so it never looks aliased or
+ * broken as you scrub, just subtly re-angled frame to frame -- an
+ * honest trade-off for a whole-system default view centered on the
+ * SSB rather than any one body's own real primary. Called after every
+ * "Reference epoch" slider move, so each ellipse reflects the body's
+ * *actual current* osculating orbit, not one frozen at the moment the
+ * kernel was first opened.
  *
- * A body with no known period (b.periodSec == null -- the Sun itself,
- * or a body whose GM-based period computation failed) gets no arc line
- * at all: there's no well-defined "one orbit" to draw for it. Its live
- * marker position (updateSceneForOffset(), unaffected by this) still
- * stays exact regardless.
+ * A body with no real primary to orbit (b.primaryId == null -- only
+ * the Sun, in this demo) gets no arc line at all. Its live marker
+ * position (updateSceneForOffset(), unaffected by this) still stays
+ * exact regardless.
  *
  * No arc lines at all -- for any body -- while locked to a rotating
  * IAU_<BODY> frame (demo.viewFrame !== INERTIAL_FRAME): the frame
@@ -844,40 +835,48 @@ function rebuildArcs(centerEt) {
 
   for (const b of demo.bodies) {
     if (b.target === demo.viewObserver) continue; // degenerate: always (0,0,0) relative to itself
-    if (b.periodSec == null) continue; // no well-defined single orbit to draw for this body
-    const halfSpan = b.periodSec / 2;
-    const arcStart = Math.max(b.etStart, centerEt - halfSpan);
-    const arcEnd = Math.min(b.etEnd, centerEt + halfSpan);
+    if (b.primaryId == null) continue; // no real primary to orbit -- no well-defined ellipse
     try {
-      const samples = sampleArcAdaptive(b.target, demo.viewObserver, arcStart, arcEnd, demo.viewFrame, demo.activeRemote.pool);
-      const arcPoints = samples.map((s) => new THREE.Vector3(...demo.scale.posToScene(s.position)));
+      const { a, e, b: semiMinor, pHat, qHat } = computeOrbitalEllipse(b.target, b.primaryId, centerEt, demo.activeRemote.pool);
+      const offset = b.primaryId === demo.viewObserver
+        ? new THREE.Vector3()
+        : new THREE.Vector3(...spkez(b.primaryId, demo.viewObserver, centerEt, 'NONE', demo.viewFrame, demo.activeRemote.pool).position);
+      const curve = new THREE.EllipseCurve(-a * e, 0, a, semiMinor, 0, 2 * Math.PI, false, 0);
+      const arcPoints = curve.getPoints(ORBIT_ELLIPSE_SEGMENTS).map((p) => {
+        const posKm = pHat.clone().multiplyScalar(p.x).add(qHat.clone().multiplyScalar(p.y)).add(offset);
+        return new THREE.Vector3(...demo.scale.posToScene([posKm.x, posKm.y, posKm.z]));
+      });
       const arcGeo = new THREE.BufferGeometry().setFromPoints(arcPoints);
       const arcMat = new THREE.LineBasicMaterial({ color: b.color, transparent: true, opacity: 0.45 });
       b.arcLine = new THREE.Line(arcGeo, arcMat);
       scene.add(b.arcLine);
     } catch (err) {
-      log(`  -> couldn't draw ${b.name}'s arc relative to the current view (${err.message})`);
+      log(`  -> couldn't draw ${b.name}'s orbit ellipse (${err.message})`);
     }
   }
 }
 
 /**
- * Extends `b`'s own prefetched window to cover [newStart, newEnd] (a
- * superset of b.etStart/b.etEnd) -- prefetch() is incremental, so bytes
- * already covering the *previous* window are never re-fetched, only new
- * edges are. Called per-body from updateSceneForOffset() when the
- * "Reference epoch" slider scrubs near/past the edge of *that specific
- * body's* own +-period/2 span, so its arc can stay that constant span
- * around wherever you're currently looking, instead of clipping there.
- * Different bodies hit this at wildly different rates -- a fast moon's
- * narrow window is left behind by even a small scrub, while Pluto's
- * multi-century one rarely needs extending at all.
+ * Extends `b`'s own prefetched coverage to include `et`, if it doesn't
+ * already -- prefetch() is incremental, so bytes already covering the
+ * previous range are never re-fetched, only the new edge is. Called
+ * per body from updateSceneForOffset() on every "Reference epoch"
+ * slider move; since the orbit-arc line is now an analytic ellipse
+ * recomputed from a single state (computeOrbitalEllipse()), not
+ * sampled real trajectory data over a span, there's no period-derived
+ * margin to maintain any more -- just whatever epoch has actually been
+ * scrubbed to, growing b.dataStart/b.dataEnd as needed. In practice a
+ * single DAF record's own real coverage (days to weeks, for DE440/
+ * satellite SPKs) already gives this a fair amount of built-in slack.
  */
-async function extendBodyPrefetch(b, newStart, newEnd) {
+async function ensureBodyCoverage(b, et) {
+  if (et >= b.dataStart && et <= b.dataEnd) return;
+  const newStart = Math.min(b.dataStart, et);
+  const newEnd = Math.max(b.dataEnd, et);
   const before = demo.counters ? { ...demo.counters } : null;
   await demo.activeRemote.prefetch({ target: b.target, observer: SSB, etStart: newStart, etEnd: newEnd });
-  b.etStart = newStart;
-  b.etEnd = newEnd;
+  b.dataStart = newStart;
+  b.dataEnd = newEnd;
   if (demo.counters) {
     const deltaRequests = demo.counters.requestCount - before.requestCount;
     const deltaBytes = demo.counters.bytesRead - before.bytesRead;
@@ -890,86 +889,31 @@ async function extendBodyPrefetch(b, newStart, newEnd) {
 }
 
 /**
- * Two-phase prefetch for one body, against `remote`: (1) a minimal
- * probe at demo.et0 (zero-width -- just enough to read one state),
- * needed to compute the body's own real orbital period around
- * `primaryId` (estimateOrbitalPeriodSec()); (2) using that period, the
- * body's own full one-orbit window, [et0 - P/2, et0 + P/2]. Mutates
- * `body` in place with `.periodSec`/`.etStart`/`.etEnd`.
- *
- * A body whose target *is* `primaryId` (only the Sun, in this demo --
- * see buildScene()) has no meaningful period around itself: skipped
- * straight to the fallback window, same as a body whose GM-based period
- * computation throws (missing/bad GM data -- shouldn't happen for any
- * real body here, but this demo accepts any user-picked kernel via the
- * file picker, so it's handled rather than assumed away).
+ * Minimal prefetch for one body: just enough to read its state at
+ * demo.et0 (zero-width -- ensureRange() naturally fetches the whole
+ * DAF record containing that epoch, typically days to weeks wide for
+ * DE440/satellite SPKs, so this is rarely revisited even as you
+ * scrub). No whole-orbit window needed any more: every body's arc is
+ * an analytic ellipse (computeOrbitalEllipse(), rebuildArcs())
+ * recomputed fresh from its real state at the *current* reference
+ * epoch, not sampled real trajectory data over a fixed span. Records
+ * `primaryId` on `body` -- the real body it orbits (the Sun for a
+ * planet, the clicked body for one of its satellites) -- for
+ * rebuildArcs() to use later; this doesn't affect what gets
+ * prefetched here, only what `body.target`'s own chain-to-SSB already
+ * gives.
  */
-async function prefetchOneOrbit(remote, body, primaryId) {
+async function prefetchBodyProbe(remote, body, primaryId) {
   await remote.prefetch({ target: body.target, observer: SSB, etStart: demo.et0, etEnd: demo.et0 });
-
-  let periodSec = null;
-  if (body.target !== primaryId) {
-    try {
-      periodSec = estimateOrbitalPeriodSec(body.target, primaryId, demo.et0, remote.pool);
-    } catch (err) {
-      log(`  -> couldn't determine ${body.name}'s real orbital period (${err.message}); ` +
-        `using a fallback +-${FALLBACK_HALF_SPAN_DAYS}-day window.`);
-    }
-  }
-
-  const halfSpanSec = periodSec != null ? periodSec / 2 : FALLBACK_HALF_SPAN_DAYS * DAY;
-  const etStart = demo.et0 - halfSpanSec;
-  const etEnd = demo.et0 + halfSpanSec;
-  await remote.prefetch({ target: body.target, observer: SSB, etStart, etEnd });
-
-  body.periodSec = periodSec;
-  body.etStart = etStart;
-  body.etEnd = etEnd;
-}
-
-/**
- * Sets timeSlider's min/max to +-(the largest half-period among
- * demo.bodies, in days) -- so the "Reference epoch" slider can always
- * reach anywhere within the widest orbit currently shown (Pluto's
- * ~124-year half-period in the default whole-system view; a close
- * moon's few-day one in precise mode). The current view's own center
- * (target === demo.viewObserver) is excluded -- it has no meaningful
- * orbit *in this view* (rebuildArcs() skips it for the same reason),
- * and its periodSec is explicitly null anyway when it's a precise-mode
- * center (see enterPreciseMode()) specifically so it can't leak its
- * own stale whole-system period in here. `FALLBACK_HALF_SPAN_DAYS` is
- * used only as each individual body's own stand-in when its period
- * couldn't be determined, and as the overall result only if literally
- * nothing else qualifies -- never as a floor over real, possibly
- * *smaller*, computed periods (verified live: without this, every
- * Jovian moon's real ~1.8-16.7-day periods were being masked by a
- * spurious 30-day floor).
- *
- * Re-clamps the slider's current value into the new bounds (needed
- * explicitly: browsers don't reliably re-clamp an out-of-range .value
- * just because .min/.max changed under it -- e.g. switching from a
- * wide-period view to a narrow one) and returns that clamped value,
- * for the caller to pass straight to updateSceneForOffset().
- */
-function updateTimeSliderBounds() {
-  let maxHalfSpanDays = 0;
-  for (const b of demo.bodies) {
-    if (b.target === demo.viewObserver) continue;
-    const halfSpanDays = (b.periodSec != null ? b.periodSec / 2 : FALLBACK_HALF_SPAN_DAYS * DAY) / DAY;
-    if (halfSpanDays > maxHalfSpanDays) maxHalfSpanDays = halfSpanDays;
-  }
-  if (maxHalfSpanDays === 0) maxHalfSpanDays = FALLBACK_HALF_SPAN_DAYS; // nothing else shown has a known orbit at all
-  timeSlider.min = String(-maxHalfSpanDays);
-  timeSlider.max = String(maxHalfSpanDays);
-  const clamped = Math.max(-maxHalfSpanDays, Math.min(maxHalfSpanDays, Number(timeSlider.value) || 0));
-  timeSlider.value = String(clamped);
-  return clamped;
+  body.primaryId = primaryId;
+  body.dataStart = demo.et0;
+  body.dataEnd = demo.et0;
 }
 
 /**
  * Prefetches and builds the whole-system scene: every body in BODIES,
- * each sized to its own real orbital period around the Sun (see
- * prefetchOneOrbit()). Always drops back to 'system' mode/scale, even
+ * each mapped to its own real primary (the Sun -- see
+ * prefetchBodyProbe()). Always drops back to 'system' mode/scale, even
  * if 'precise' mode was active. Called once at session start; nothing
  * else rebuilds it, since there's no more shared "time window" control
  * to change it from.
@@ -996,7 +940,7 @@ async function buildScene() {
       // pairwise (target, observer) state between them afterwards, not
       // just relative to the SSB itself. Switching the view center
       // (setView() below) never needs a re-prefetch as a result.
-      await prefetchOneOrbit(demo.remote, body, SUN_TARGET);
+      await prefetchBodyProbe(demo.remote, body, SUN_TARGET);
     } catch (err) {
       log(`  -> skipped (${err.message})`);
       continue;
@@ -1019,9 +963,8 @@ async function buildScene() {
   buildPreciseLegend([]);
 
   timeSlider.disabled = false;
-  const clampedOffset = updateTimeSliderBounds();
-  await updateSceneForOffset(clampedOffset);
-  log(`Scene built -- each body's orbit-arc line spans its own real orbital period. Drag the "Reference epoch" slider to explore.`);
+  await updateSceneForOffset(Number(timeSlider.value));
+  log(`Scene built -- each body's orbit-arc line is its own exact two-body orbit ellipse. Drag the "Reference epoch" slider to explore.`);
 }
 
 /** Always built from demo.systemBodies -- the full legend stays the same, clickable set regardless of the current view/mode. */
@@ -1111,7 +1054,7 @@ async function setView(observerTarget, frameName, label) {
     demo.preciseBodyId = null;
     demo.scale = SYSTEM_SCALE;
     demo.activeRemote = demo.remote;
-    demo.bodies = demo.systemBodies; // already carries its own per-body periodSec/etStart/etEnd -- nothing to restore separately
+    demo.bodies = demo.systemBodies; // already carries its own per-body primaryId/dataStart/dataEnd -- nothing to restore separately
     buildPreciseLegend([]);
     resetCameraToDefault();
   }
@@ -1119,8 +1062,7 @@ async function setView(observerTarget, frameName, label) {
   demo.viewFrame = frameName;
   demo.viewLabel = label;
   ensureMarkers();
-  const clampedOffset = updateTimeSliderBounds();
-  await updateSceneForOffset(clampedOffset);
+  await updateSceneForOffset(Number(timeSlider.value));
   updateViewStatus();
   updateLegendActiveState();
 }
@@ -1168,10 +1110,9 @@ async function openSatelliteKernel(kernelId) {
  *    (confirmed in kernels/sources.mjs), so this needs nothing from
  *    demo.remote at all.
  *
- * Each returned satellite carries its own `.periodSec`/`.etStart`/
- * `.etEnd` (see prefetchOneOrbit()), sized to its own real orbital
- * period around `spec.target` -- not a shared window, since e.g.
- * Jupiter's moons alone span 1.8 days (Io) to 16.7 days (Callisto).
+ * Each returned satellite carries its own `.primaryId` (`spec.target`
+ * -- see prefetchBodyProbe()), used later to draw its own real
+ * two-body orbit ellipse around the clicked body (rebuildArcs()).
  *
  * @returns {{ remote: object, satellites: object[] }}
  *   `remote` is whichever of the two ended up being used (or demo.remote,
@@ -1191,7 +1132,7 @@ async function resolveSatellitesFor(spec) {
   for (const sat of candidates) {
     const body = { ...sat };
     try {
-      await prefetchOneOrbit(demo.remote, body, spec.target);
+      await prefetchBodyProbe(demo.remote, body, spec.target);
       fromMain.push(body);
     } catch {
       // Not in the loaded kernel -- try the mapped satellite kernel below.
@@ -1219,7 +1160,7 @@ async function resolveSatellitesFor(spec) {
   for (const sat of candidates) {
     const body = { ...sat };
     try {
-      await prefetchOneOrbit(satRemote, body, spec.target);
+      await prefetchBodyProbe(satRemote, body, spec.target);
       fromSatKernel.push(body);
     } catch (err) {
       log(`  -> couldn't prefetch ${sat.name} (${err.message})`);
@@ -1237,19 +1178,12 @@ async function enterPreciseMode(spec) {
     ? `  -> ${satellites.length} satellite(s): ${satellites.map((s) => s.name).join(', ')}`
     : `  -> no satellite data available for ${spec.name} in this session.`);
 
-  // periodSec explicitly cleared: `spec` comes from demo.systemBodies,
-  // so it still carries its OWN (stale, and here irrelevant) heliocentric
-  // period/window from the whole-system view -- e.g. Earth's real ~365-day
-  // orbit around the Sun, not anything to do with its own satellites. Left
-  // alone, updateTimeSliderBounds() would pick that up as if it were the
-  // widest orbit in this precise-mode scene (verified live: it was --
-  // Earth's own 182.7-day half-period leaking into the "Reference epoch"
-  // slider's bounds for its Moon, Jupiter's own 2166-day one for its
-  // moons). rebuildArcs()/updateSceneForOffset() never draw an arc or
-  // need a real window for the center body anyway (target === viewObserver
-  // is always the first, degenerate skip in both), so this has no other
-  // effect.
-  const included = [{ ...spec, isPreciseCenter: true, periodSec: null }, ...satellites];
+  // `spec` comes from demo.systemBodies, so it still carries its OWN
+  // (stale, here irrelevant) primaryId/dataStart/dataEnd from the
+  // whole-system view -- harmless: rebuildArcs() and the marker loop
+  // both key the center body off target === viewObserver, always true
+  // here, before ever consulting primaryId.
+  const included = [{ ...spec, isPreciseCenter: true }, ...satellites];
 
   const centerRadiusKm = meanRadiusKmFor(included[0]); // cache lands on the copy demo.bodies will actually hold
   if (centerRadiusKm == null) {
@@ -1270,8 +1204,7 @@ async function enterPreciseMode(spec) {
 
   ensureMarkers();
   buildPreciseLegend(included.filter((b) => !b.isPreciseCenter));
-  const clampedOffset = updateTimeSliderBounds();
-  await updateSceneForOffset(clampedOffset);
+  await updateSceneForOffset(Number(timeSlider.value));
   fitCameraForPrecise();
   updateViewStatus();
   updateLegendActiveState();
@@ -1315,10 +1248,11 @@ function handleBodyClick(b, evt) {
  * Updates marker positions (and the orbit arcs -- see rebuildArcs())
  * for `offsetDays` from demo.et0, i.e. the "Reference epoch" slider's
  * current position. Async: may extend the prefetch (see
- * extendBodyPrefetch()) first, per body, for whichever currently-shown
- * bodies' own +-period/2 arc span isn't fully covered yet -- different
- * bodies hit this at very different rates, so each is checked and
- * extended independently rather than as one shared range.
+ * ensureBodyCoverage()) first, per body, for whichever currently-shown
+ * bodies don't yet have data covering this epoch -- different bodies
+ * hit this at different times depending on how far you've scrubbed
+ * relative to what's already been visited, so each is checked and
+ * extended independently.
  * `sceneUpdateSeq` guards against a slower, stale call finishing
  * *after* a newer one and clobbering its result -- expected when this
  * fires on every "Reference epoch" 'input' event during a fast drag,
@@ -1331,22 +1265,12 @@ async function updateSceneForOffset(offsetDays) {
   timeLabel.textContent = `${et2utcCalendar(et)}  (${offsetDays >= 0 ? '+' : ''}${offsetDays.toFixed(2)} d)`;
 
   for (const b of demo.bodies) {
-    // Fallback bodies (b.periodSec == null -- the Sun, or a body whose
-    // period computation failed) still get extended, just with the
-    // fixed fallback span instead of a period-derived one -- otherwise
-    // scrubbing far enough would leave their marker position stuck
-    // unresolved outside their initial narrow probe window.
-    const halfSpan = b.periodSec != null ? b.periodSec / 2 : FALLBACK_HALF_SPAN_DAYS * DAY;
-    const neededStart = et - halfSpan;
-    const neededEnd = et + halfSpan;
-    if (neededStart < b.etStart || neededEnd > b.etEnd) {
-      try {
-        await extendBodyPrefetch(b, Math.min(b.etStart, neededStart), Math.max(b.etEnd, neededEnd));
-      } catch (err) {
-        log(`  -> couldn't extend prefetch for ${b.name} (${err.message})`);
-      }
-      if (mySeq !== sceneUpdateSeq) return; // a newer update superseded this one while we were awaiting
+    try {
+      await ensureBodyCoverage(b, et);
+    } catch (err) {
+      log(`  -> couldn't extend prefetch for ${b.name} (${err.message})`);
     }
+    if (mySeq !== sceneUpdateSeq) return; // a newer update superseded this one while we were awaiting
   }
 
   for (const b of demo.bodies) {
@@ -1395,7 +1319,7 @@ async function updateSceneForOffset(offsetDays) {
 
 // Not awaited here -- updateSceneForOffset() is self-cancelling (see
 // its sceneUpdateSeq guard) if a newer 'input' event fires (a fast
-// drag) before its in-flight extendBodyPrefetch() calls finish, so each
+// drag) before its in-flight ensureBodyCoverage() calls finish, so each
 // tick can just fire-and-forget; .catch() only for genuinely unexpected errors.
 timeSlider.addEventListener('input', () => {
   updateSceneForOffset(Number(timeSlider.value)).catch((err) => {

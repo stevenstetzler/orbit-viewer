@@ -73,21 +73,19 @@ without errors.
    here reading from local disk instead of over HTTP.
 4. For each body, calls `prefetch({ target, observer: 0, etStart: et0,
    etEnd: et0 })` -- a minimal probe at the reference epoch, just
-   enough to read one state -- then computes that body's own real
-   orbital period from it (see "Orbit-arc span: each body's own real
-   orbital period" below), then calls `prefetch()` again for that
-   body's own full one-orbit window. Evaluates ordinary `spkez()` at
-   however many sample epochs each body's own real angular rate calls
-   for (see "Orbit-arc sampling" below) to draw its orbit arc *around
-   the "Reference epoch" slider's current position* (not frozen at the
-   moment the kernel was opened), plus its live marker position, every
-   time that slider moves.
+   enough to read one state. Evaluates ordinary `spkez()` once at the
+   "Reference epoch" slider's current position for the body's real
+   state (position, velocity), and draws its orbit-arc line as the
+   exact analytic two-body ellipse that state implies (see "Orbit-arc
+   shape: an exact two-body ellipse" below) -- recomputed fresh, from
+   real data, every time that slider moves, along with the live marker
+   position.
 5. Logs how many range reads it took and how many total bytes were
    actually touched, out of the file's real size -- so you can see the
    lazy-loading savings live, not just in `perf/report.md`. Scrubbing
-   the reference epoch re-prefetches incrementally, per body -- already-
-   fetched bytes are never re-fetched, so extending a body's own window
-   only reads the *new* bytes that extension needs.
+   the reference epoch re-prefetches incrementally, per body, only as
+   far as you've actually scrubbed -- already-fetched bytes are never
+   re-fetched.
 
 ## Why not just `fetch()` it by URL?
 
@@ -124,22 +122,43 @@ Verified directly: Earth's own Z-coordinate (which effectively
 only ~30 thousand km in ECLIPJ2000, a ~2000x reduction, at a sample
 epoch checked against the real `de440.bsp`.
 
-## Orbit-arc span: each body's own real orbital period
+## Orbit-arc shape: an exact two-body ellipse
 
-Earlier versions of this demo had a "Time window" slider -- one shared
-&plusmn;span, in days, applied to every body's orbit-arc line at once.
-That doesn't work: a moon's period runs days, a planet's runs years,
-and Pluto's runs nearly two and a half centuries, so no single window
-size is ever right for all of them simultaneously. The slider is gone;
-each body's arc now spans exactly `[-P/2, +P/2]` around wherever the
-"Reference epoch" slider is currently pointing, where `P` is *that
-body's own* real orbital period.
+Earlier versions of this demo drew each orbit-arc line from *sampled
+real trajectory data* -- first over one shared time window applied to
+every body at once, then (after that broke down: a moon's period runs
+days, a planet's runs years, Pluto's runs nearly two and a half
+centuries, so no single window size was ever right for all of them)
+over each body's own real orbital period specifically, with an
+adaptive sampling scheme to avoid aliasing within that span. Both
+needed prefetching a whole orbit's worth of data ahead of time, and
+both were still just an approximation of a curve, sampled at finitely
+many points.
 
-`P` comes from the vis-viva equation (`1/a = 2/r - v^2/mu`, then
-`P = 2*pi*sqrt(a^3/mu)`), using the body's actual state (from `spkez()`)
-and the reduced two-body `mu = GM(primary) + GM(body)` -- primary being
-the Sun for a planet, or the clicked body for one of its satellites in
-precise mode. `GM` comes from this repo's own bundled
+The current design skips sampling a trajectory at all: each orbit-arc
+line is the **exact analytic ellipse** implied by the body's own real
+state (position, velocity) and `GM` at the *current* reference epoch,
+via the standard two-body orbital-mechanics identities:
+
+```
+invA = 2/r - v^2/mu                     (vis-viva -> 1/semi-major axis)
+h    = r x v                            (specific angular momentum -- orbit-normal direction)
+eVec = (v x h)/mu - r/|r|               (eccentricity vector -- points toward periapsis)
+```
+
+giving semi-major/-minor axis, eccentricity, and an orthonormal
+in-plane basis (`pHat` toward periapsis, `qHat` completing a
+right-handed frame) -- together enough to place any point on the
+ellipse directly, via
+[`THREE.EllipseCurve`](https://threejs.org/docs/#api/en/extras/curves/EllipseCurve)
+in the body's own perifocal plane, then a single 3D rotation
+(`pHat*x + qHat*y`) into the actual view. Deriving the basis from `h`/
+`eVec` directly, rather than the classical inclination/node/argument-
+of-periapsis angles, sidesteps their usual singularities (undefined
+node for zero inclination, undefined argument of periapsis for zero
+eccentricity) -- exactly the near-circular case several of this demo's
+own moons are close to. `mu` uses the reduced two-body
+`GM(primary) + GM(body)`, `GM` from this repo's own bundled
 `kernels/gm_de440.tpc` (~12 KB, same NAIF-generic-file pattern as
 `naif0012.tls`/`pck00011.tpc`), not an external API: NASA/JPL's
 Small-Body Database (the obvious-looking source, given its name) only
@@ -149,69 +168,42 @@ confirmed directly against the real API (`sstr=Mercury`, `Phobos`, and
 names actively collide with real asteroids of the same name
 (`sstr=Io`/`Europa` resolve to main-belt asteroids 85 Io and 52 Europa,
 not Jupiter's moons) -- so it would either fail outright or silently
-return the wrong object's period for every body this demo shows.
+return the wrong object's data for every body this demo shows.
 
-Since a moon's real period is so much shorter than a planet's, the
-"Reference epoch" slider's own range now adapts to whatever's actually
-shown: &plusmn;the widest half-period among the currently-displayed
-bodies -- Pluto's ~124-year half-period in the default whole-system
-view (measured: &plusmn;45,069 days), or a single moon's own
-few-day one in precise mode (measured: &plusmn;13.4 days for the Moon
-around Earth, &plusmn;8.34 days for Callisto around Jupiter -- its own
-real ~16.7-day period, matching Callisto's actual orbital period almost
-exactly). Dragging the slider re-prefetches per body, incrementally
-(already-covered bytes are never re-fetched, and each body extends
-independently -- a fast-orbiting moon needs this far more often than a
-slow-orbiting outer planet). In practice this extension is often free:
-DE440's own densely-packed Chebyshev records mean a body's initial
-one-orbit fetch frequently already covers well beyond what scrubbing to
-its own edge needs (verified directly against the real `de440s.bsp`).
+Since it's a closed curve by construction, it always looks right
+regardless of how many times a fast body has actually orbited -- no
+sampling density or time-span tuning needed at all, for any body, at
+any eccentricity, at any epoch. This is really the *osculating* orbit
+-- the instantaneous idealized two-body shape implied by the body's
+real (perturbed, n-body) state at this one epoch, not a shape refined
+over a whole real orbit -- recomputed fresh every time the "Reference
+epoch" slider moves, so it stays honest about the actual current
+trajectory rather than freezing a single snapshot. The "Reference
+epoch" slider itself now has a fixed &plusmn;10-year range (no more
+per-body-period-derived bounds needed, since there's no span left to
+size): scrubbing it still prefetches incrementally per body, but only
+as far as you've actually visited, not a whole orbit ahead of time --
+verified live, screenshotted: scrubbing to the slider's own edge
+(&plusmn;3650 days) still renders a clean, undistorted ellipse, not a
+degraded or clipped one.
 
-A body whose real period can't be determined -- only the Sun itself, in
-this demo, since it has no single primary of its own to orbit in this
-two-body sense -- falls back to a fixed &plusmn;30-day window (still
-prefetched and shown with a live marker position, just with no orbit-arc
-line drawn for it, since there's no well-defined single orbit to trace).
+A body with no real primary to orbit -- only the Sun itself, in this
+demo, since it has no single primary of its own in this two-body sense
+-- gets no orbit-arc line at all (still prefetched and shown with a
+live marker position, just with nothing well-defined to draw an
+ellipse around).
 
-## Orbit-arc sampling
-
-Each body's orbit-arc line is sampled **adaptively**, based on that
-body's own real angular rate, not a fixed point count spread evenly
-across the arc's time span. A fixed count is only right by accident,
-when the span happens to be within about an order of magnitude of the
-body's own orbital period -- which is all whole-system arcs are, at
-the default &plusmn;30-day window. It breaks in both directions once
-that's not true: a fast-moving body over a span covering many of its
-own orbits gets *too few* samples (verified live, screenshotted:
-Jupiter's Galilean moons -- 1.8-16.7 day periods -- rendered as a
-tangled, self-intersecting "spirograph" over a 60-day precise-mode
-span at a fixed ~60-sample budget; the same failure hits the
-whole-system view too, for different bodies -- Mercury's 88-day period
-means a &plusmn;10-year window traces almost 40 orbits), while a
-slow-moving body over a narrow span gets *too many*, wasted spread
-uselessly thin.
-
-Instead, each arc starts from a small number of evenly-spaced seed
-points, then repeatedly bisects whichever consecutive pair of points
-currently sweeps the widest angle (as seen from the observer) until
-every gap is under a fixed angular threshold or a hard sample cap is
-hit. This needs no orbital period and no extra GM kernel: specific
-angular momentum (`r &times; v`) is exactly conserved for two-body
-motion, so measuring the actual angle swept between two sampled points
--- rather than assuming a fixed time step -- naturally puts more
-points where a body is moving fast (near periapsis) and fewer where
-it's slow (near apoapsis), for any body, at any span-to-period ratio,
-with no per-body tuning. (Real solar system motion is n-body, not
-exactly two-body, but the perturbations are negligible at the
-timescales that matter for a smooth-looking line.)
-
-Now that every arc's *span* is always exactly one real orbital period
-(see above), the original failure mode this was built to fix -- many
-periods aliased into one fixed-size window -- can't happen by
-construction any more; what adaptive sampling still buys is correctly
-resolving *eccentricity* within that single orbit (denser sampling near
-a fast periapsis passage, sparser near a slow apoapsis one), which a
-fixed-count scheme would still get wrong for any non-circular orbit.
+When the current view isn't centered on a body's own real primary (the
+default whole-system view centers on the SSB, not the Sun; clicking a
+different planet re-centers on it instead of the Sun) its ellipse is
+computed in the primary's own rest frame, then translated by the
+primary's own position relative to the current view center at the
+current epoch -- exact instantaneously, since both the primary and the
+observer are themselves moving, so a body's ellipse lines up exactly
+with its live marker only right at that epoch; still always a clean
+closed curve regardless, just subtly re-angled frame to frame as you
+scrub. Verified live: re-centering on Mars still renders Earth's real
+heliocentric ellipse correctly, translated into Mars's own view.
 
 ## Bodies shown, and their real relative sizes
 
@@ -268,9 +260,8 @@ needs to compute any pairwise state between two of them.
   rotating frame is active: the frame itself is spinning around the
   clicked body every rotation period (Jupiter's is ~10 hours), so an
   "orbit" line drawn in it would just retrace that spin rather than
-  show anything about the other bodies' real trajectories -- not a
-  sampling problem (see "Orbit-arc sampling" below), just not a
-  meaningful thing to draw here. Live marker positions stay exact
+  show anything about the other bodies' real trajectories -- just not
+  a meaningful thing to draw here. Live marker positions stay exact
   regardless.
 
   Note: for the outer planets, the *position* used is still the
@@ -293,10 +284,22 @@ Shows *only* the clicked body and its real satellites. DE440/DE440s
 are solar-system-*planetary* ephemerides, not satellite-system ones --
 Earth's Moon is the only satellite actually present in that data, so
 every other planet's moons come from a separate, dedicated satellite
-SPK (`mar099.bsp`, `jup365.bsp`, `ura184_part-3.bsp`, `nep105.bsp`,
-`plu060.bsp` -- see `kernels/sources.mjs`; `sat480.bsp` genuinely has
-none of Saturn's classic moons, so Saturn honestly reports "no
-satellite data" in precise mode). `SATELLITE_KERNEL_FOR_BODY` in
+SPK (`mar099.bsp`, `jup365.bsp`, `sat441.bsp`, `ura184_part-3.bsp`,
+`nep105.bsp`, `plu060.bsp` -- see `kernels/sources.mjs`).
+`sat441.bsp` carries the nine classical named Saturnian moons
+(Mimas..Phoebe) plus five small inner/Lagrangian ones, but Phoebe
+(609) is excluded from what's shown: at ~12.4 million km out it's
+~66x farther than the closest of the other 13 (Mimas, ~188,000 km) and
+~3.5x farther than the next-farthest (Iapetus, ~3.5 million km) --
+verified directly against the real file -- a genuinely different class
+of orbit (distant, retrograde, captured), not just a farther member of
+the same regular-moon family the other 13 are; including it would blow
+out the camera's auto-framing around the ones that actually matter.
+NAIF also publishes `sat456.bsp` alongside `sat441.bsp` -- ~44
+*irregular* outer moons, recently given real names (2025) replacing
+provisional `S/2004_S_xx` designations -- but none of them have known
+real radii in `kernels/pck00011.tpc`, so they're not catalogued here.
+`SATELLITE_KERNEL_FOR_BODY` in
 `index.html` maps each planet to the satellite kernel that carries its
 moons -- the actual moon list for each is read live from
 `kernels/sources.mjs`'s own catalogue (`satellitesFromManifest()`),
@@ -320,15 +323,11 @@ Command+Click, Mars fetches `mar099.bsp` (Phobos + Deimos) only on its
 first Command+Click, and returning to Jupiter shows all 8 moons again
 with no new fetch.
 
-Precise mode uses the same adaptive orbit-arc sampling as the
-whole-system view (see "Orbit-arc sampling" above) -- no separate
-tuning needed for close, fast-orbiting moons vs. the whole system's
-year-scale planets, since the sampler measures each body's own real
-angular rate directly rather than assuming one. Jupiter's four
-innermost, fastest moons (7-16 hour periods) still show some faceting
-at the sampler's hard cap in a very wide window -- their live marker
-positions stay exact regardless, same distinction already drawn for
-rotating-frame arcs above.
+Precise mode uses the same analytic two-body ellipse as the
+whole-system view (see "Orbit-arc shape" above) -- no separate tuning
+needed for close, fast-orbiting moons vs. the whole system's
+year-scale planets, since it's computed from each body's own real
+state directly rather than sampled over any particular span.
 
 The scale changes too: instead of the whole-system AU-anchored scale
 (where every body's true radius would be sub-pixel), precise mode uses

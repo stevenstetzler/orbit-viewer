@@ -132,26 +132,37 @@ export const KERNELS = {
       { id: 599, center: 5, name: 'Jupiter' },
     ],
   },
-  sat480: {
+  sat441: {
     group: 'satellite',
-    file: 'sat480.bsp',
-    url: `${NAIF_BASE}spk/satellites/sat480.bsp`,
-    bytes: 12621824,
-    // Worth knowing before you reach for this one: despite the name it
-    // carries no classic Saturnian moons at all -- just Saturn itself
-    // and one unnamed small body (65304), and that body's only segment
-    // is type 17, which spiceJS does not evaluate yet. Verified by
-    // reading the real file's summary records, not assumed from the
-    // filename. For Titan/Enceladus/etc. you want a different sat*.bsp.
-    description: 'Saturn: the planet itself, plus one small body (65304) in an unsupported type-17 segment. No classic moons.',
-    segmentTypes: [2, 17],
-    unsupported: [{ type: 17, targets: [65304], note: 'equinoctial elements -- not in src/spk.js SUPPORTED_TYPES' }],
-    etCoverage: [-1.578e9, 1.578e9],
+    file: 'sat441.bsp',
+    url: `${NAIF_BASE}spk/satellites/sat441.bsp`,
+    bytes: 661592064,
+    // Replaces sat480 (see git history) -- sat480 carried no classic
+    // moons at all, just Saturn itself and one unsupported-type small
+    // body. This is the file people actually mean by "Saturn's moons":
+    // the nine classical named satellites
+    // (Mimas..Phoebe) plus five of the small inner/Lagrangian ones
+    // (Helene, Telesto, Calypso, Methone, Polydeuces), all with real
+    // BODY<id>_RADII data in kernels/pck00011.tpc (confirmed directly).
+    // NAIF also publishes sat456.bsp (120.8 MB) alongside this one --
+    // ~44 *irregular* outer moons (recently given real names as of
+    // 2025, replacing provisional S/2004_S_xx designations) -- but
+    // NONE of them have known real radii in the bundled PCK, so
+    // they're not catalogued here; see kernels/README.md.
+    description: 'Saturn system: the nine classical moons (Mimas..Phoebe) plus Helene, Telesto, Calypso, Methone and Polydeuces.',
+    segmentTypes: [2],
+    etCoverage: [-7.8894e9, 7.8897e9],
     targets: [
       { id: 3, center: 0, name: 'Earth-Moon barycenter' }, { id: 6, center: 0, name: 'Saturn barycenter' },
       { id: 10, center: 0, name: 'Sun' }, { id: 399, center: 3, name: 'Earth' },
+      { id: 601, center: 6, name: 'Mimas' }, { id: 602, center: 6, name: 'Enceladus' },
+      { id: 603, center: 6, name: 'Tethys' }, { id: 604, center: 6, name: 'Dione' },
+      { id: 605, center: 6, name: 'Rhea' }, { id: 606, center: 6, name: 'Titan' },
+      { id: 607, center: 6, name: 'Hyperion' }, { id: 608, center: 6, name: 'Iapetus' },
+      { id: 609, center: 6, name: 'Phoebe' }, { id: 612, center: 6, name: 'Helene' },
+      { id: 613, center: 6, name: 'Telesto' }, { id: 614, center: 6, name: 'Calypso' },
+      { id: 632, center: 6, name: 'Methone' }, { id: 634, center: 6, name: 'Polydeuces' },
       { id: 699, center: 6, name: 'Saturn' },
-      { id: 65304, center: 699, name: '65304 (unnamed small body)', unsupported: true },
     ],
   },
   'ura184-1': {
