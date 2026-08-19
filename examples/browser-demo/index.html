@@ -7,7 +7,7 @@
   html, body { margin: 0; height: 100%; background: #05070d; color: #d7dce5; font: 14px/1.4 system-ui, sans-serif; }
   #app { display: flex; height: 100%; }
   #sidebar {
-    width: 340px; flex: 0 0 auto; box-sizing: border-box; padding: 16px;
+    width: 360px; flex: 0 0 auto; box-sizing: border-box; padding: 16px;
     overflow-y: auto; background: #0b0e17; border-right: 1px solid #1c2230;
   }
   #viewport { flex: 1 1 auto; position: relative; }
@@ -16,11 +16,13 @@
   h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: #8892a6; margin: 20px 0 8px; }
   p.sub { margin: 0 0 16px; color: #8892a6; }
   a { color: #7fb2ff; }
-  button {
-    background: #2a5adf; color: #fff; border: none; border-radius: 4px;
-    padding: 8px 12px; font: inherit; cursor: pointer;
+  button, a.button {
+    display: inline-block; background: #2a5adf; color: #fff; border: none; border-radius: 4px;
+    padding: 8px 12px; font: inherit; cursor: pointer; text-decoration: none;
   }
   button:disabled { background: #2a3245; color: #626c80; cursor: default; }
+  button.secondary, a.button.secondary { background: #1c2230; color: #cdd4e0; }
+  .buttonRow { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
   input[type=file] { display: block; margin: 8px 0; font-size: 12px; color: #8892a6; }
   #status {
     white-space: pre-wrap; font: 11px/1.5 ui-monospace, monospace; background: #05070d;
@@ -31,9 +33,9 @@
   #legend .swatch { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }
   #legend .name { flex: 1 1 auto; }
   #legend .dist { color: #8892a6; font-variant-numeric: tabular-nums; }
-  #timeRow { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
-  #timeSlider { flex: 1 1 auto; }
-  #timeLabel { font-variant-numeric: tabular-nums; white-space: nowrap; color: #8892a6; font-size: 12px; }
+  #timeRow, #windowRow { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+  #timeSlider, #windowSlider { flex: 1 1 auto; }
+  #timeLabel, #windowLabel { font-variant-numeric: tabular-nums; white-space: nowrap; color: #8892a6; font-size: 12px; }
   #overlayHint {
     position: absolute; left: 16px; bottom: 12px; color: #626c80; font-size: 11px;
     pointer-events: none;
@@ -47,24 +49,43 @@
     <p class="sub">DE440 planetary ephemeris, read lazily straight out of a
       real <code>.bsp</code> kernel file, entirely in this tab.</p>
 
-    <h2>1. Load a kernel</h2>
+    <h2>1. Get a kernel</h2>
     <p class="sub" style="margin-bottom:8px">
-      Pick a real SPK file from disk (e.g.
-      <a href="https://naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/planets/de440s.bsp" target="_blank" rel="noopener">de440s.bsp</a>,
-      ~32&nbsp;MB, or the full <code>de440.bsp</code>). Nothing is uploaded
-      anywhere -- the file never leaves this tab. Only the small byte ranges
-      spiceJS actually needs are read from it, via
-      <code>openRemoteSpk()</code>'s lazy loader.
+      NAIF's server doesn't send CORS headers, so this page can't
+      <code>fetch()</code> a kernel directly from
+      <code>naif.jpl.nasa.gov</code> -- browsers block cross-origin reads
+      without them, regardless of caching. Download once (native browser
+      download, unaffected by CORS since it's not read by JS), then pick
+      the file below. Nothing is ever uploaded -- the file stays local and
+      only the small byte ranges spiceJS needs are read from it.
     </p>
+    <div class="buttonRow">
+      <a class="button" href="https://naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/planets/de440s.bsp"
+         download="de440s.bsp" target="_blank" rel="noopener">Download de440s.bsp (~32 MB)</a>
+      <button id="tryNaifBtn" class="secondary" type="button">Try loading it directly (will likely fail)</button>
+    </div>
+
+    <h2>2. Load a kernel</h2>
     <input id="fileInput" type="file" accept=".bsp" />
     <div id="status">Waiting for a kernel file&hellip;</div>
 
-    <h2>2. Reference epoch</h2>
+    <h2>3. Time window</h2>
+    <div id="windowRow">
+      <input id="windowSlider" type="range" min="0" max="8" step="1" value="2" disabled />
+      <span id="windowLabel">&plusmn;30 d</span>
+    </div>
+    <p class="sub" style="margin:6px 0 0">
+      How much time around now to prefetch and plot. Widening this fetches
+      more of the file (still only the bytes needed for these bodies) --
+      already-fetched bytes are never re-fetched.
+    </p>
+
+    <h2>4. Reference epoch</h2>
     <div id="timeRow">
       <span id="timeLabel">&ndash;</span>
     </div>
     <input id="timeSlider" type="range" min="-30" max="30" step="0.25" value="0" disabled style="width:100%" />
-    <p class="sub" style="margin:6px 0 0">&plusmn;30 days around today (UTC, from your system clock).</p>
+    <p class="sub" style="margin:6px 0 0">Position within the time window above (UTC).</p>
 
     <h2>Bodies shown</h2>
     <ul id="legend"></ul>
@@ -89,8 +110,11 @@ import { load, str2et, et2utcCalendar, openRemoteSpk, spkez, kclear } from '../.
 
 const statusEl = document.getElementById('status');
 const fileInput = document.getElementById('fileInput');
+const tryNaifBtn = document.getElementById('tryNaifBtn');
 const timeSlider = document.getElementById('timeSlider');
 const timeLabel = document.getElementById('timeLabel');
+const windowSlider = document.getElementById('windowSlider');
+const windowLabel = document.getElementById('windowLabel');
 const legendEl = document.getElementById('legend');
 
 function log(line) {
@@ -105,14 +129,35 @@ function resetLog(line) {
 // AU, for scaling km positions down to a sane Three.js scene size.
 const AU_KM = 149597870.7;
 const DAY = 86400;
-const HALF_WINDOW_DAYS = 30;
 
-// Bodies to render: NAIF ID, display name, color, orbit-arc sample count.
+// Hardcoded, real NAIF addresses -- both confirmed (via curl, see the
+// PR/commit notes) to send no Access-Control-Allow-Origin header, so a
+// browser fetch() of either always fails, deterministically, for every
+// user, not just in unusual network setups. Given that, the LSK isn't
+// fetched from here automatically on every load -- that would just
+// guarantee a failed network request (and a console error) on every
+// single page visit for a fact already known ahead of time -- it's
+// used only as a documented source reference, and this repo's own
+// bundled copy (kernels/naif0012.tls) is loaded instead. The SPK URL
+// has no such local fallback (too big to ship), so it's used for the
+// download link and the opt-in "try loading it directly" button below,
+// which exists to make the CORS failure visible and concrete on
+// request, rather than just asserted in a comment.
+const NAIF_LSK_URL = 'https://naif.jpl.nasa.gov/pub/naif/generic_kernels/lsk/naif0012.tls';
+const NAIF_SPK_URL = 'https://naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/planets/de440s.bsp';
+
+// Preset +-window sizes (days) for the window slider -- an index-based
+// slider rather than a linear one, so both "1 day" and "10 years" are
+// easy to land on precisely.
+const WINDOW_PRESETS_DAYS = [1, 7, 30, 90, 180, 365, 730, 1825, 3650];
+const DEFAULT_WINDOW_INDEX = 2; // 30 days, matching the slider's initial value
+
+// Bodies to render: NAIF ID, display name, color, marker radius.
 // Barycenters are used for the outer planets (matching how DE440 itself
 // stores them -- see docs/lazy-loading.md and perf/README.md), Sun/Mercury/
 // Venus/Earth/Moon/Mars use their own body IDs, all relative to the SSB (0).
 const BODIES = [
-  { target: 10, name: 'Sun', color: 0xffd34d, radius: 5, arcSamples: 0 },
+  { target: 10, name: 'Sun', color: 0xffd34d, radius: 5 },
   { target: 1, name: 'Mercury (barycenter)', color: 0x9c9c9c, radius: 2 },
   { target: 2, name: 'Venus (barycenter)', color: 0xe8c27a, radius: 2.4 },
   { target: 399, name: 'Earth', color: 0x4da6ff, radius: 2.6 },
@@ -125,7 +170,11 @@ const BODIES = [
   { target: 9, name: 'Pluto (barycenter)', color: 0xbfa6d9, radius: 1.4 },
 ];
 const OBSERVER = 0; // Solar System Barycenter
-const ARC_SAMPLES = 61; // ~daily over the +-30 day window
+
+/** More samples for a wider window (a decade needs more than a day does), capped for render cost. */
+function arcSamplesForWindow(halfWindowDays) {
+  return Math.max(24, Math.min(240, Math.round(halfWindowDays * 2)));
+}
 
 // ---------------------------------------------------------------------
 // three.js scene setup (runs immediately; populated once a kernel loads)
@@ -166,9 +215,12 @@ function animate() {
 animate();
 
 // ---------------------------------------------------------------------
-// Demo state, rebuilt each time a kernel file is picked.
+// Demo state. `demo` holds one open kernel session (remote + et0);
+// `demo.bodies`/`demo.halfWindowDays` are rebuilt every time the time
+// window changes, without re-opening the kernel.
 // ---------------------------------------------------------------------
-let demo = null; // { remote, et0, bodies: [{ ...BODIES[i], marker, arcPositions: Float64Array[N][3] }] }
+let demo = null;
+let windowChangeInFlight = false;
 
 function kmToScene(posKm) {
   // km -> AU, then a fixed display scale so the whole DE440 range is
@@ -183,55 +235,85 @@ function kmToScene(posKm) {
   return [auX * scale, auZ * scale, -auY * scale];
 }
 
-async function clearDemo() {
-  if (demo) {
-    for (const b of demo.bodies) {
-      scene.remove(b.marker);
-      if (b.arcLine) scene.remove(b.arcLine);
-    }
-    demo = null;
+function clearBodies() {
+  if (!demo) return;
+  for (const b of demo.bodies) {
+    scene.remove(b.marker);
+    if (b.arcLine) scene.remove(b.arcLine);
   }
+  demo.bodies = [];
+}
+
+function clearSession() {
+  clearBodies();
+  demo = null;
   kclear(); // forget any kernels loaded into the global pool by a previous file
 }
 
-async function loadKernelAndBuildScene(file) {
-  await clearDemo();
-  resetLog(`Loading leapseconds kernel...`);
+/**
+ * Loads this repo's own bundled copy of the leapseconds kernel --
+ * not fetched from NAIF_LSK_URL at runtime, since that's known ahead
+ * of time to always fail (see the comment on NAIF_LSK_URL above); no
+ * point spending a doomed network round trip (and a console error) on
+ * every single page load to demonstrate a fact that's already known.
+ */
+async function loadLeapseconds() {
+  const localLskUrl = new URL('../../kernels/naif0012.tls', import.meta.url).href;
+  await load(localLskUrl);
+  log(`Leapseconds kernel loaded from ${localLskUrl} (same content as ${NAIF_LSK_URL})`);
+}
 
-  const lskUrl = new URL('../../kernels/naif0012.tls', import.meta.url).href;
-  await load(lskUrl);
-  log(`Leapseconds kernel loaded from ${lskUrl}`);
+/**
+ * Open a kernel session from an already-constructed `remote` (an
+ * openRemoteSpk() result) and build the initial scene. `counters`, if
+ * given, is a { requestCount, bytesRead } object the caller's
+ * resolveRange updates as it goes, used only for the log summary.
+ */
+async function beginSession(remote, { sourceLabel, sourceSizeBytes, counters = null }) {
+  clearSession();
+  resetLog(`Loading leapseconds kernel...`);
+  await loadLeapseconds();
 
   const et0 = str2et(new Date().toISOString());
   log(`Reference epoch (now, UTC): ${et2utcCalendar(et0)}  (ET ${et0.toFixed(3)} s)`);
 
-  const etStart = et0 - HALF_WINDOW_DAYS * DAY;
-  const etEnd = et0 + HALF_WINDOW_DAYS * DAY;
+  demo = { remote, et0, sourceLabel, sourceSizeBytes, counters, halfWindowDays: null, bodies: [] };
 
-  log(`Opening "${file.name}" (${(file.size / 1e6).toFixed(1)} MB) as a lazily-fetched SPK kernel...`);
-  let requestCount = 0;
-  let bytesRead = 0;
-  const resolveRange = async (_url, startByte, endByteExclusive) => {
-    requestCount += 1;
-    bytesRead += endByteExclusive - startByte;
-    const slice = file.slice(startByte, endByteExclusive);
-    return new Uint8Array(await slice.arrayBuffer());
-  };
-  const remote = await openRemoteSpk(file.name, { fileLength: file.size, resolveRange });
+  windowSlider.disabled = false;
+  windowSlider.value = String(DEFAULT_WINDOW_INDEX);
+  windowLabel.textContent = `±${WINDOW_PRESETS_DAYS[DEFAULT_WINDOW_INDEX]} d`;
+  await rebuildForWindow(WINDOW_PRESETS_DAYS[DEFAULT_WINDOW_INDEX]);
+}
 
+/** Re-prefetch (incrementally -- already-fetched bytes are reused) and rebuild the scene for a new +-halfWindowDays around demo.et0. */
+async function rebuildForWindow(halfWindowDays) {
+  if (!demo) return;
+  clearBodies();
+
+  const etStart = demo.et0 - halfWindowDays * DAY;
+  const etEnd = demo.et0 + halfWindowDays * DAY;
+  const arcSamples = arcSamplesForWindow(halfWindowDays);
+
+  const before = demo.counters ? { ...demo.counters } : null;
   const bodiesState = [];
   for (const spec of BODIES) {
-    log(`Prefetching ${spec.name} (${spec.target}) rel. SSB over +-${HALF_WINDOW_DAYS} days...`);
+    log(`Prefetching ${spec.name} (${spec.target}) rel. SSB over +-${halfWindowDays} days...`);
     try {
-      await remote.prefetch({ target: spec.target, observer: OBSERVER, etStart, etEnd });
+      await demo.remote.prefetch({ target: spec.target, observer: OBSERVER, etStart, etEnd });
     } catch (err) {
       log(`  -> skipped (${err.message})`);
       continue;
     }
     bodiesState.push({ ...spec });
   }
-  log(`Prefetch done: ${requestCount} HTTP-shaped range reads, ${(bytesRead / 1e6).toFixed(2)} MB of ` +
-    `"${file.name}" actually read (out of ${(file.size / 1e6).toFixed(1)} MB total).`);
+
+  if (demo.counters) {
+    const deltaRequests = demo.counters.requestCount - before.requestCount;
+    const deltaBytes = demo.counters.bytesRead - before.bytesRead;
+    log(`Prefetch for this window: ${deltaRequests} new range reads, ${(deltaBytes / 1e6).toFixed(2)} MB newly ` +
+      `read. Cumulative: ${demo.counters.requestCount} reads, ${(demo.counters.bytesRead / 1e6).toFixed(2)} MB ` +
+      `of "${demo.sourceLabel}" (${(demo.sourceSizeBytes / 1e6).toFixed(1)} MB total).`);
+  }
 
   // Build markers + orbit-arc lines.
   for (const b of bodiesState) {
@@ -241,9 +323,9 @@ async function loadKernelAndBuildScene(file) {
     scene.add(b.marker);
 
     const arcPoints = [];
-    for (let i = 0; i < ARC_SAMPLES; i++) {
-      const et = etStart + (i / (ARC_SAMPLES - 1)) * (etEnd - etStart);
-      const { position } = spkez(b.target, OBSERVER, et, 'NONE', null, remote.pool);
+    for (let i = 0; i < arcSamples; i++) {
+      const et = etStart + (i / (arcSamples - 1)) * (etEnd - etStart);
+      const { position } = spkez(b.target, OBSERVER, et, 'NONE', null, demo.remote.pool);
       arcPoints.push(new THREE.Vector3(...kmToScene(position)));
     }
     const arcGeo = new THREE.BufferGeometry().setFromPoints(arcPoints);
@@ -252,12 +334,19 @@ async function loadKernelAndBuildScene(file) {
     scene.add(b.arcLine);
   }
 
-  demo = { remote, et0, etStart, etEnd, bodies: bodiesState };
+  demo.bodies = bodiesState;
+  demo.halfWindowDays = halfWindowDays;
+  demo.etStart = etStart;
+  demo.etEnd = etEnd;
   buildLegend(bodiesState);
+
   timeSlider.disabled = false;
+  timeSlider.min = String(-halfWindowDays);
+  timeSlider.max = String(halfWindowDays);
+  timeSlider.step = String(Math.max(0.01, halfWindowDays / 240));
   timeSlider.value = '0';
   updateSceneForOffset(0);
-  log('Scene built. Drag the slider to move through the +-30 day window.');
+  log(`Scene built for +-${halfWindowDays} days. Drag the sliders above to explore.`);
 }
 
 function buildLegend(bodiesState) {
@@ -299,12 +388,45 @@ timeSlider.addEventListener('input', () => {
   updateSceneForOffset(Number(timeSlider.value));
 });
 
+// 'change' (fires on release), not 'input' (fires continuously while
+// dragging) -- each rebuild does a real prefetch(), so this avoids
+// firing a burst of them while the slider is still being dragged.
+windowSlider.addEventListener('change', async () => {
+  if (!demo || windowChangeInFlight) return;
+  const halfWindowDays = WINDOW_PRESETS_DAYS[Number(windowSlider.value)];
+  windowLabel.textContent = `±${halfWindowDays} d`;
+  windowChangeInFlight = true;
+  windowSlider.disabled = true;
+  try {
+    await rebuildForWindow(halfWindowDays);
+  } catch (err) {
+    log(`ERROR: ${err.message}`);
+    console.error(err);
+  } finally {
+    windowChangeInFlight = false;
+    windowSlider.disabled = false;
+  }
+});
+windowSlider.addEventListener('input', () => {
+  // Live-update the label while dragging, even though the rebuild itself waits for 'change'.
+  windowLabel.textContent = `±${WINDOW_PRESETS_DAYS[Number(windowSlider.value)]} d`;
+});
+
 fileInput.addEventListener('change', async () => {
   const file = fileInput.files && fileInput.files[0];
   if (!file) return;
   fileInput.disabled = true;
   try {
-    await loadKernelAndBuildScene(file);
+    const counters = { requestCount: 0, bytesRead: 0 };
+    const resolveRange = async (_url, startByte, endByteExclusive) => {
+      counters.requestCount += 1;
+      counters.bytesRead += endByteExclusive - startByte;
+      const slice = file.slice(startByte, endByteExclusive);
+      return new Uint8Array(await slice.arrayBuffer());
+    };
+    log(`Opening "${file.name}" (${(file.size / 1e6).toFixed(1)} MB) as a lazily-fetched SPK kernel...`);
+    const remote = await openRemoteSpk(file.name, { fileLength: file.size, resolveRange });
+    await beginSession(remote, { sourceLabel: file.name, sourceSizeBytes: file.size, counters });
   } catch (err) {
     log(`ERROR: ${err.message}`);
     console.error(err);
@@ -313,7 +435,25 @@ fileInput.addEventListener('change', async () => {
   }
 });
 
-log('Ready. Choose a .bsp file above to begin.');
+tryNaifBtn.addEventListener('click', async () => {
+  tryNaifBtn.disabled = true;
+  resetLog(`Trying to open ${NAIF_SPK_URL} directly...`);
+  try {
+    const remote = await openRemoteSpk(NAIF_SPK_URL);
+    log('Connected directly to NAIF (no CORS block in this browser/network) -- continuing.');
+    await beginSession(remote, { sourceLabel: NAIF_SPK_URL, sourceSizeBytes: remote.remoteFile.fileLength });
+  } catch (err) {
+    log(`Failed, as expected: ${err.message}`);
+    log('naif.jpl.nasa.gov sends no Access-Control-Allow-Origin header, so a browser blocks ' +
+      'this fetch entirely -- caching wouldn\'t help either, since JS can never read the bytes ' +
+      'of a cross-origin response without that header, cached or not. Use the download link above ' +
+      'and the file picker instead -- that reads real local bytes with no network/CORS involved.');
+  } finally {
+    tryNaifBtn.disabled = false;
+  }
+});
+
+log('Ready. Download a kernel and choose it above to begin (see "1. Get a kernel").');
 </script>
 </body>
 </html>
