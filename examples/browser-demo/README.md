@@ -71,21 +71,23 @@ without errors.
    `file.slice(start, end).arrayBuffer()` -- the same lazy-fetch
    machinery `docs/lazy-loading.md` describes for a real network URL,
    here reading from local disk instead of over HTTP.
-4. Calls `prefetch({ target, observer: 0, etStart, etEnd })` once per
-   body for the current time window (the "Time window" slider, &plusmn;1
-   day up to &plusmn;10 years -- default &plusmn;30 days), then
-   evaluates ordinary `spkez()` at however many sample epochs each
-   body's own real angular rate calls for (see "Orbit-arc sampling"
-   below) to draw its orbit arc *around the "Reference epoch" slider's
-   current position* (not frozen at the moment the kernel was opened),
-   plus its live marker position, every time that slider moves.
+4. For each body, calls `prefetch({ target, observer: 0, etStart: et0,
+   etEnd: et0 })` -- a minimal probe at the reference epoch, just
+   enough to read one state -- then computes that body's own real
+   orbital period from it (see "Orbit-arc span: each body's own real
+   orbital period" below), then calls `prefetch()` again for that
+   body's own full one-orbit window. Evaluates ordinary `spkez()` at
+   however many sample epochs each body's own real angular rate calls
+   for (see "Orbit-arc sampling" below) to draw its orbit arc *around
+   the "Reference epoch" slider's current position* (not frozen at the
+   moment the kernel was opened), plus its live marker position, every
+   time that slider moves.
 5. Logs how many range reads it took and how many total bytes were
    actually touched, out of the file's real size -- so you can see the
-   lazy-loading savings live, not just in `perf/report.md`. Widening
-   the time window re-prefetches incrementally -- already-fetched bytes
-   are never re-fetched, so e.g. going from &plusmn;30 to &plusmn;365
-   days only reads the *new* bytes that wider window needs (a few
-   hundred KB more, not a second full pass).
+   lazy-loading savings live, not just in `perf/report.md`. Scrubbing
+   the reference epoch re-prefetches incrementally, per body -- already-
+   fetched bytes are never re-fetched, so extending a body's own window
+   only reads the *new* bytes that extension needs.
 
 ## Why not just `fetch()` it by URL?
 
@@ -122,26 +124,54 @@ Verified directly: Earth's own Z-coordinate (which effectively
 only ~30 thousand km in ECLIPJ2000, a ~2000x reduction, at a sample
 epoch checked against the real `de440.bsp`.
 
-## Orbit-arc span follows the reference epoch, loading more data as needed
+## Orbit-arc span: each body's own real orbital period
 
-Each body's orbit-arc line spans a **constant** &plusmn;the "Time
-window" value around wherever the "Reference epoch" slider is
-currently pointing, not a span fixed at the moment the kernel was
-opened. Since the reference epoch can sit anywhere within &plusmn;the
-window around *now*, the arc's own span (&plusmn;window around *that*
-epoch) can reach up to 2x the window away from *now* at the slider's
-own extremes -- so dragging it there calls `prefetch()` again,
-incrementally (already-covered bytes are never re-fetched), extending
-how far the file has been read rather than clipping the arc short.
-This makes "Time window" do double duty: how much gets prefetched
-around *now* by default, and how much trajectory each arc traces
-around wherever you're currently looking. In practice this extension
-is often free: DE440's own densely-packed Chebyshev records mean a
-window's initial fetch frequently already covers well beyond a 2x
-extension (verified directly -- a &plusmn;30-day window scrubbed to its
-edge needed zero new bytes for the real `de440.bsp`); a genuinely new
-fetch only showed up when testing a much wider &plusmn;10-year window
-scrubbed to *its* edge (7 new range reads, 0.79 MB).
+Earlier versions of this demo had a "Time window" slider -- one shared
+&plusmn;span, in days, applied to every body's orbit-arc line at once.
+That doesn't work: a moon's period runs days, a planet's runs years,
+and Pluto's runs nearly two and a half centuries, so no single window
+size is ever right for all of them simultaneously. The slider is gone;
+each body's arc now spans exactly `[-P/2, +P/2]` around wherever the
+"Reference epoch" slider is currently pointing, where `P` is *that
+body's own* real orbital period.
+
+`P` comes from the vis-viva equation (`1/a = 2/r - v^2/mu`, then
+`P = 2*pi*sqrt(a^3/mu)`), using the body's actual state (from `spkez()`)
+and the reduced two-body `mu = GM(primary) + GM(body)` -- primary being
+the Sun for a planet, or the clicked body for one of its satellites in
+precise mode. `GM` comes from this repo's own bundled
+`kernels/gm_de440.tpc` (~12 KB, same NAIF-generic-file pattern as
+`naif0012.tls`/`pck00011.tpc`), not an external API: NASA/JPL's
+Small-Body Database (the obvious-looking source, given its name) only
+covers asteroids and comets, not planets or natural satellites --
+confirmed directly against the real API (`sstr=Mercury`, `Phobos`, and
+`Charon` all come back "specified object was not found"), and some
+names actively collide with real asteroids of the same name
+(`sstr=Io`/`Europa` resolve to main-belt asteroids 85 Io and 52 Europa,
+not Jupiter's moons) -- so it would either fail outright or silently
+return the wrong object's period for every body this demo shows.
+
+Since a moon's real period is so much shorter than a planet's, the
+"Reference epoch" slider's own range now adapts to whatever's actually
+shown: &plusmn;the widest half-period among the currently-displayed
+bodies -- Pluto's ~124-year half-period in the default whole-system
+view (measured: &plusmn;45,069 days), or a single moon's own
+few-day one in precise mode (measured: &plusmn;13.4 days for the Moon
+around Earth, &plusmn;8.34 days for Callisto around Jupiter -- its own
+real ~16.7-day period, matching Callisto's actual orbital period almost
+exactly). Dragging the slider re-prefetches per body, incrementally
+(already-covered bytes are never re-fetched, and each body extends
+independently -- a fast-orbiting moon needs this far more often than a
+slow-orbiting outer planet). In practice this extension is often free:
+DE440's own densely-packed Chebyshev records mean a body's initial
+one-orbit fetch frequently already covers well beyond what scrubbing to
+its own edge needs (verified directly against the real `de440s.bsp`).
+
+A body whose real period can't be determined -- only the Sun itself, in
+this demo, since it has no single primary of its own to orbit in this
+two-body sense -- falls back to a fixed &plusmn;30-day window (still
+prefetched and shown with a live marker position, just with no orbit-arc
+line drawn for it, since there's no well-defined single orbit to trace).
 
 ## Orbit-arc sampling
 
@@ -174,6 +204,14 @@ it's slow (near apoapsis), for any body, at any span-to-period ratio,
 with no per-body tuning. (Real solar system motion is n-body, not
 exactly two-body, but the perturbations are negligible at the
 timescales that matter for a smooth-looking line.)
+
+Now that every arc's *span* is always exactly one real orbital period
+(see above), the original failure mode this was built to fix -- many
+periods aliased into one fixed-size window -- can't happen by
+construction any more; what adaptive sampling still buys is correctly
+resolving *eccentricity* within that single orbit (denser sampling near
+a fast periapsis passage, sparser near a slow apoapsis one), which a
+fixed-count scheme would still get wrong for any non-circular orbit.
 
 ## Bodies shown, and their real relative sizes
 
