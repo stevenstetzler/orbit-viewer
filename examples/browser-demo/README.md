@@ -54,8 +54,9 @@ without errors.
    body for the current time window (the "Time window" slider, &plusmn;1
    day up to &plusmn;10 years -- default &plusmn;30 days), then
    evaluates ordinary `spkez()` at up to 240 sample epochs to draw each
-   body's orbit arc, plus its live position as the "Reference epoch"
-   slider moves.
+   body's orbit arc *around the "Reference epoch" slider's current
+   position* (not frozen at the moment the kernel was opened), plus its
+   live marker position, every time that slider moves.
 5. Logs how many range reads it took and how many total bytes were
    actually touched, out of the file's real size -- so you can see the
    lazy-loading savings live, not just in `perf/report.md`. Widening
@@ -99,7 +100,19 @@ Verified directly: Earth's own Z-coordinate (which effectively
 only ~30 thousand km in ECLIPJ2000, a ~2000x reduction, at a sample
 epoch checked against the real `de440.bsp`.
 
-## Bodies shown
+## Orbit-arc span follows the reference epoch
+
+Each body's orbit-arc line spans &plusmn;the "Time window" value
+around wherever the "Reference epoch" slider is currently pointing,
+not a span fixed at the moment the kernel was opened -- drag that
+slider and every arc redraws around the new epoch (clamped to the
+edges of the actual prefetched range, so this never needs new
+network/file reads). This makes "Time window" do double duty: how much
+gets prefetched *and* how much trajectory each arc traces around your
+current view -- want to see just the last/next few days around some
+specific moment instead of the whole prefetched span? Narrow it.
+
+## Bodies shown, and their real relative sizes
 
 Sun (10), Mercury (199), Venus (299), Earth (399), Moon (301), Mars (4),
 Jupiter (5), Saturn (6), Uranus (7), Neptune (8), Pluto (9). Mercury/
@@ -108,6 +121,25 @@ them); the outer planets stay barycenter-based for *position* (their
 own offset from the barycenter isn't separately modeled -- see
 `perf/README.md`), though see "Centering the view" below for how their
 *orientation* still uses the real planet.
+
+Marker sizes are real physical body radii -- `BODY<id>_RADII` from
+`kernels/pck00011.tpc`, read via `bodyValues()` (spiceJS's
+`bodvrd_c`/`bodvcd_c` equivalent -- the modern name for what CSPICE
+historically called `bodvar_c`/`BODVAR`), not hand-picked constants.
+They're *not* rendered at the same km-per-scene-unit scale as orbital
+positions, though: at that scale every planet is many orders of
+magnitude smaller than a screen pixel (Earth's radius is
+~1/23,000th of its orbital distance) -- true-to-both-scales rendering
+is exactly why real orrery visualizations pick one scale or the other,
+never both. A square-root mapping is used for marker size instead of a
+linear one: it preserves the real *ordering* and relative proportion
+between bodies (Jupiter clearly, correctly bigger than Earth; Earth
+bigger than the Moon; the Sun clearly biggest of all) while
+compressing the real ~585x min/max radius spread (Pluto vs. the Sun)
+enough that the smallest bodies stay visible on screen and the Sun's
+marker doesn't grow large enough to swallow Mercury's orbit -- verified
+directly: the chosen scale puts the Sun's marker just inside Mercury's
+real perihelion distance, with margin.
 
 ## Centering the view
 

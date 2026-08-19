@@ -86,9 +86,11 @@
       <span id="windowLabel">&plusmn;30 d</span>
     </div>
     <p class="sub" style="margin:6px 0 0">
-      How much time around now to prefetch and plot. Widening this fetches
-      more of the file (still only the bytes needed for these bodies) --
-      already-fetched bytes are never re-fetched.
+      How much time around now to prefetch, and the span each orbit-arc
+      line covers around wherever the "Reference epoch" slider below is
+      currently pointing. Widening this fetches more of the file (still
+      only the bytes needed for these bodies) -- already-fetched bytes
+      are never re-fetched.
     </p>
 
     <h2>4. Reference epoch</h2>
@@ -96,7 +98,11 @@
       <span id="timeLabel">&ndash;</span>
     </div>
     <input id="timeSlider" type="range" min="-30" max="30" step="0.25" value="0" disabled style="width:100%" />
-    <p class="sub" style="margin:6px 0 0">Position within the time window above (UTC).</p>
+    <p class="sub" style="margin:6px 0 0">
+      Position within the time window above (UTC) -- the orbit-arc
+      lines re-center on this epoch as it moves, clipped to the edges
+      of the prefetched window above.
+    </p>
 
     <h2>Bodies shown</h2>
     <p class="sub" style="margin-bottom:8px">
@@ -127,7 +133,7 @@
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { load, str2et, et2utcCalendar, openRemoteSpk, spkez, kclear } from '../../src/browser.js';
+import { load, str2et, et2utcCalendar, openRemoteSpk, spkez, bodyValues, kclear } from '../../src/browser.js';
 
 const statusEl = document.getElementById('status');
 const fileInput = document.getElementById('fileInput');
@@ -152,6 +158,29 @@ function resetLog(line) {
 const AU_KM = 149597870.7;
 const DAY = 86400;
 
+// Marker size: real relative body radii (from BODY<id>_RADII, via
+// bodyValues() -- see the BODIES comment above), not hand-picked
+// constants -- but *not* to the same km-per-scene-unit scale
+// kmToScene() uses for orbital positions: at that scale every planet
+// is many orders of magnitude smaller than a screen
+// pixel (Earth's radius is ~1/23,000th of its orbital distance), and
+// literally true-to-both-scales rendering is what makes most orrery
+// visualizations either use a size scale or a distance scale, never
+// both. A sqrt mapping is used instead of linear: preserves the real
+// *ordering* and gives a real, non-arbitrary sense of relative size
+// (Jupiter clearly bigger than Earth, by the right rough proportion)
+// while compressing the ~585x real min/max radius spread (Pluto vs.
+// the Sun) enough that the smallest bodies stay visible. The anchor
+// (Earth's own marker size) is chosen, not just carried over from this
+// demo's old hand-picked size, so the Sun's marker clears Mercury's
+// real perihelion distance (~1.29 scene units at the position scale
+// below) with margin -- verified directly: at the old 0.13 anchor the
+// Sun's radius came out to ~1.36 units, slightly *larger* than that
+// perihelion, which would have rendered Mercury vanishing into the Sun
+// at closest approach.
+const EARTH_RADIUS_KM = 6378.1366;
+const RADIUS_SCENE_SCALE = 0.10 / Math.sqrt(EARTH_RADIUS_KM);
+
 // Hardcoded, real NAIF addresses -- both confirmed (via curl, see the
 // PR/commit notes) to send no Access-Control-Allow-Origin header, so a
 // browser fetch() of either always fails, deterministically, for every
@@ -174,31 +203,36 @@ const NAIF_SPK_URL = 'https://naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/pla
 const WINDOW_PRESETS_DAYS = [1, 7, 30, 90, 180, 365, 730, 1825, 3650];
 const DEFAULT_WINDOW_INDEX = 2; // 30 days, matching the slider's initial value
 
-// Bodies to render: NAIF ID, display name, color, marker radius, and the
-// body-fixed IAU_<NAME> frame Alt/Option+Click switches into (classic
-// text-PCK orientation, kernels/pck00011.tpc -- see bodyOrientation.js).
-// Mercury/Venus use their own body IDs (199/299), which DE440 actually
-// carries separate segments for; the outer planets don't have such a
-// segment (their own barycenter offset from the planet itself is
-// negligible), so they stay barycenter-based for *position* -- but the
-// IAU_<PLANET> frame is still keyed to the real planet ID (e.g. 599 for
-// Jupiter), since orientation constants only exist for the physical body,
-// never a barycenter (confirmed: pck00011.tpc has BODY599_POLE_RA, not
-// BODY5_POLE_RA) -- rotateState()/spkez() don't require the frame's
-// center to match target/observer, so this is fine: "shown at the
-// barycenter's position, oriented as the planet actually is."
+// Bodies to render: NAIF ID (position), display name, color, a fallback
+// marker radius (used only if real RADII data can't be found -- see
+// sceneRadiusFor()), the body-fixed IAU_<NAME> frame Alt/Option+Click
+// switches into, and `bodyId` -- the real physical body's NAIF ID,
+// used for both the IAU frame's constants and the real BODY<id>_RADII
+// lookup (bodyValues(), spiceJS's bodvrd_c/bodvcd_c equivalent -- the
+// modern replacement for the old CSPICE `bodvar_c`/`BODVAR` name).
+// Mercury/Venus use their own body IDs (199/299) as `target` too, which
+// DE440 actually carries separate segments for; the outer planets don't
+// have such a segment (their own barycenter offset from the planet
+// itself is negligible), so they stay barycenter-based for *position*
+// -- but `bodyId` is still the real planet (e.g. 599 for Jupiter),
+// since orientation *and* radius constants only exist for the physical
+// body, never a barycenter (confirmed: pck00011.tpc has BODY599_POLE_RA
+// and BODY599_RADII, not BODY5_...) -- rotateState()/spkez() don't
+// require the frame's center to match target/observer, so this is
+// fine: "shown at the barycenter's position, sized and oriented as the
+// planet actually is."
 const BODIES = [
-  { target: 10, name: 'Sun', color: 0xffd34d, radius: 5, iauFrame: 'IAU_SUN' },
-  { target: 199, name: 'Mercury', color: 0x9c9c9c, radius: 2, iauFrame: 'IAU_MERCURY' },
-  { target: 299, name: 'Venus', color: 0xe8c27a, radius: 2.4, iauFrame: 'IAU_VENUS' },
-  { target: 399, name: 'Earth', color: 0x4da6ff, radius: 2.6, iauFrame: 'IAU_EARTH' },
-  { target: 301, name: 'Moon', color: 0xd9d9d9, radius: 1.2, iauFrame: 'IAU_MOON' },
-  { target: 4, name: 'Mars (barycenter)', color: 0xd9583a, radius: 2.2, iauFrame: 'IAU_MARS' },
-  { target: 5, name: 'Jupiter (barycenter)', color: 0xe0b98a, radius: 3.6, iauFrame: 'IAU_JUPITER' },
-  { target: 6, name: 'Saturn (barycenter)', color: 0xead6a8, radius: 3.2, iauFrame: 'IAU_SATURN' },
-  { target: 7, name: 'Uranus (barycenter)', color: 0x9fd9e8, radius: 2.8, iauFrame: 'IAU_URANUS' },
-  { target: 8, name: 'Neptune (barycenter)', color: 0x5b7fe0, radius: 2.8, iauFrame: 'IAU_NEPTUNE' },
-  { target: 9, name: 'Pluto (barycenter)', color: 0xbfa6d9, radius: 1.4, iauFrame: 'IAU_PLUTO' },
+  { target: 10, bodyId: 10, name: 'Sun', color: 0xffd34d, fallbackRadius: 5, iauFrame: 'IAU_SUN' },
+  { target: 199, bodyId: 199, name: 'Mercury', color: 0x9c9c9c, fallbackRadius: 2, iauFrame: 'IAU_MERCURY' },
+  { target: 299, bodyId: 299, name: 'Venus', color: 0xe8c27a, fallbackRadius: 2.4, iauFrame: 'IAU_VENUS' },
+  { target: 399, bodyId: 399, name: 'Earth', color: 0x4da6ff, fallbackRadius: 2.6, iauFrame: 'IAU_EARTH' },
+  { target: 301, bodyId: 301, name: 'Moon', color: 0xd9d9d9, fallbackRadius: 1.2, iauFrame: 'IAU_MOON' },
+  { target: 4, bodyId: 499, name: 'Mars (barycenter)', color: 0xd9583a, fallbackRadius: 2.2, iauFrame: 'IAU_MARS' },
+  { target: 5, bodyId: 599, name: 'Jupiter (barycenter)', color: 0xe0b98a, fallbackRadius: 3.6, iauFrame: 'IAU_JUPITER' },
+  { target: 6, bodyId: 699, name: 'Saturn (barycenter)', color: 0xead6a8, fallbackRadius: 3.2, iauFrame: 'IAU_SATURN' },
+  { target: 7, bodyId: 799, name: 'Uranus (barycenter)', color: 0x9fd9e8, fallbackRadius: 2.8, iauFrame: 'IAU_URANUS' },
+  { target: 8, bodyId: 899, name: 'Neptune (barycenter)', color: 0x5b7fe0, fallbackRadius: 2.8, iauFrame: 'IAU_NEPTUNE' },
+  { target: 9, bodyId: 999, name: 'Pluto (barycenter)', color: 0xbfa6d9, fallbackRadius: 1.4, iauFrame: 'IAU_PLUTO' },
 ];
 const SSB = 0; // Solar System Barycenter -- the default view center
 
@@ -365,45 +399,88 @@ async function beginSession(remote, { sourceLabel, sourceSizeBytes, counters = n
 }
 
 /**
- * (Re)builds the marker + orbit-arc-line THREE objects for demo.bodies,
- * using the *current* view (demo.viewObserver/demo.viewFrame) -- no
- * prefetching here, just geometry, so this is cheap enough to call on
- * every legend click. The body currently acting as the view's own
- * center sits exactly at the scene origin by construction (its position
- * relative to itself is always zero) and gets no arc line (a single
- * point repeated at every sampled epoch isn't useful to draw).
- *
- * Also no arc lines at all -- for any body -- while locked to a
- * rotating IAU_<BODY> frame (demo.viewFrame !== INERTIAL_FRAME). Verified live:
- * a fixed sample budget (tens of points across the time window) is
- * far coarser than a fast-rotating body's own rotation period (e.g.
- * Jupiter's ~10h vs. ~12h between samples over a 30-day window), so
- * the connect-the-dots polyline aliases into a misleading "starburst"
- * that has nothing to do with the bodies' real trajectories -- each
- * individual sampled position is still exact, only a *sparse line
- * through* those samples is meaningless in a fast-rotating frame.
- * Live per-epoch markers (updateSceneForOffset(), unaffected by this)
- * stay exact regardless.
+ * A body's marker radius in scene units -- real BODY<id>_RADII data
+ * (see the RADIUS_SCENE_SCALE comment above), computed once and cached
+ * on the body object (`b.sceneRadius`), since it never changes across
+ * epochs/window/view changes, only across a brand new kernel session.
  */
-function buildMeshesForBodies(etStart, etEnd, arcSamples) {
+function sceneRadiusFor(b) {
+  if (b.sceneRadius != null) return b.sceneRadius;
+  try {
+    const radii = bodyValues(b.bodyId, 'RADII', demo.remote.pool);
+    const meanRadiusKm = (radii[0] + radii[1] + radii[2]) / 3;
+    b.sceneRadius = RADIUS_SCENE_SCALE * Math.sqrt(meanRadiusKm);
+  } catch (err) {
+    log(`  -> no real RADII for ${b.name} (${err.message}); using a placeholder marker size.`);
+    b.sceneRadius = b.fallbackRadius * 0.05;
+  }
+  return b.sceneRadius;
+}
+
+/**
+ * (Re)creates the marker THREE.Mesh for each of demo.bodies -- sized by
+ * sceneRadiusFor() (real body radii) and highlighted if it's the
+ * current view's own center. No prefetching here, just geometry, so
+ * this is cheap enough to call on every legend click; it does NOT set
+ * marker *position* (updateSceneForOffset() does that, every time,
+ * including right after this is called) or touch arc lines (rebuildArcs()
+ * below, independently).
+ */
+function ensureMarkers() {
   for (const b of demo.bodies) {
     if (b.marker) scene.remove(b.marker);
-    if (b.arcLine) scene.remove(b.arcLine);
-
     const isCenter = b.target === demo.viewObserver;
-    const geo = new THREE.SphereGeometry(b.radius * 0.05, 20, 16);
+    const geo = new THREE.SphereGeometry(sceneRadiusFor(b), 20, 16);
     const mat = new THREE.MeshStandardMaterial({
       color: b.color, emissive: b.color, emissiveIntensity: isCenter ? 1.2 : b.target === 10 ? 1.2 : 0.15,
     });
     b.marker = new THREE.Mesh(geo, mat);
     scene.add(b.marker);
-    b.arcLine = null;
+  }
+}
 
-    if (isCenter || demo.viewFrame !== INERTIAL_FRAME) continue;
+/**
+ * (Re)builds each body's orbit-arc line, centered on `centerEt` and
+ * spanning +-demo.halfWindowDays (the "Time window" control doing
+ * double duty as the arc's own span) -- clamped to demo.etStart/etEnd,
+ * the range actually prefetched, so this never needs new data no
+ * matter where `centerEt` lands (the arc just clips near an edge of
+ * the prefetched window rather than extending past it). Called after
+ * every "Reference epoch" slider move, so the arc always shows the
+ * trajectory *around wherever you're currently looking*, not frozen at
+ * the moment the kernel was first opened.
+ *
+ * No arc lines at all -- for any body -- while locked to a rotating
+ * IAU_<BODY> frame (demo.viewFrame !== INERTIAL_FRAME). Verified live:
+ * a fixed sample budget (tens of points across the time window) is far
+ * coarser than a fast-rotating body's own rotation period (e.g.
+ * Jupiter's ~10h vs. ~12h between samples over a 30-day window), so
+ * the connect-the-dots polyline aliases into a misleading "starburst"
+ * that has nothing to do with the bodies' real trajectories -- each
+ * individual sampled position is still exact, only a *sparse line
+ * through* those samples is meaningless in a fast-rotating frame. Live
+ * per-epoch markers (updateSceneForOffset(), unaffected by this) stay
+ * exact regardless.
+ */
+function rebuildArcs(centerEt) {
+  for (const b of demo.bodies) {
+    if (b.arcLine) {
+      scene.remove(b.arcLine);
+      b.arcLine = null;
+    }
+  }
+  if (demo.viewFrame !== INERTIAL_FRAME) return;
+
+  const halfSpan = demo.halfWindowDays * DAY;
+  const arcStart = Math.max(demo.etStart, centerEt - halfSpan);
+  const arcEnd = Math.min(demo.etEnd, centerEt + halfSpan);
+
+  for (const b of demo.bodies) {
+    if (b.target === demo.viewObserver) continue; // degenerate: always (0,0,0) relative to itself
     try {
       const arcPoints = [];
-      for (let i = 0; i < arcSamples; i++) {
-        const et = etStart + (i / (arcSamples - 1)) * (etEnd - etStart);
+      for (let i = 0; i < demo.arcSamples; i++) {
+        const et = arcStart + (i / (demo.arcSamples - 1)) * (arcEnd - arcStart);
         const { position } = spkez(b.target, demo.viewObserver, et, 'NONE', demo.viewFrame, demo.remote.pool);
         arcPoints.push(new THREE.Vector3(...kmToScene(position)));
       }
@@ -458,7 +535,7 @@ async function rebuildForWindow(halfWindowDays) {
   demo.etStart = etStart;
   demo.etEnd = etEnd;
   demo.arcSamples = arcSamples;
-  buildMeshesForBodies(etStart, etEnd, arcSamples);
+  ensureMarkers();
   buildLegend(bodiesState);
 
   timeSlider.disabled = false;
@@ -522,12 +599,13 @@ function setView(observerTarget, frameName, label) {
   demo.viewObserver = observerTarget;
   demo.viewFrame = frameName;
   demo.viewLabel = label;
-  buildMeshesForBodies(demo.etStart, demo.etEnd, demo.arcSamples);
+  ensureMarkers();
   updateSceneForOffset(Number(timeSlider.value));
   updateViewStatus();
   updateLegendActiveState();
 }
 
+/** Updates marker positions (and the orbit arcs -- see rebuildArcs()) for `offsetDays` from demo.et0, i.e. the "Reference epoch" slider's current position. */
 function updateSceneForOffset(offsetDays) {
   if (!demo) return;
   const et = demo.et0 + offsetDays * DAY;
@@ -549,6 +627,7 @@ function updateSceneForOffset(offsetDays) {
       distEl.textContent = `${auDist.toFixed(2)} AU`;
     }
   }
+  rebuildArcs(et);
 }
 
 timeSlider.addEventListener('input', () => {
