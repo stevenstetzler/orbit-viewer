@@ -217,17 +217,49 @@ Solar System Barycenter / `ECLIPJ2000` default.
 
 ## Shift+Click: precise single-body mode
 
-Shows *only* the clicked body and its real satellites (from
-`SATELLITES` in `index.html` -- a small hardcoded map, since DE440 is a
-solar-system-*planetary* ephemeris, not a satellite-system one; only
-Earth's Moon is actually present in this data at all -- Jupiter's/
-Saturn's/etc. real moons would need their own separate SPK, e.g.
-`jup365.bsp`, not part of this demo). Every other body is hidden from
-the 3D scene (the "Bodies shown" legend stays fully populated and
-clickable, so you can jump straight to a different body's view without
-backing out first). Any satellites aren't prefetched until you actually
-enter precise mode for their parent body -- lazy, on demand, same
-principle as everything else in this demo.
+Shows *only* the clicked body and its real satellites. DE440/DE440s
+are solar-system-*planetary* ephemerides, not satellite-system ones --
+Earth's Moon is the only satellite actually present in that data, so
+every other planet's moons come from a separate, dedicated satellite
+SPK (`mar099.bsp`, `jup365.bsp`, `ura184_part-3.bsp`, `nep105.bsp`,
+`plu060.bsp` -- see `kernels/sources.mjs`; `sat480.bsp` genuinely has
+none of Saturn's classic moons, so Saturn honestly reports "no
+satellite data" in precise mode). `SATELLITE_KERNEL_FOR_BODY` in
+`index.html` maps each planet to the satellite kernel that carries its
+moons -- the actual moon list for each is read live from
+`kernels/sources.mjs`'s own catalogue (`satellitesFromManifest()`),
+the same manifest `scripts/inspect-spk.mjs` builds by reading the real
+files, not hand-duplicated.
+
+Entering precise mode tries what's already loaded first (covers
+Earth's Moon for free, since it's bundled in de440/de440s already open
+as the main kernel), and only falls back to fetching the mapped
+satellite kernel -- through the local proxy's range cache, same as
+every other lazy fetch in this demo -- if the clicked body's moons
+aren't already available. Every other body is hidden from the 3D scene
+(the "Bodies shown" legend stays fully populated and clickable, so you
+can jump straight to a different body's view without backing out
+first). A satellite kernel opened this way is kept open and reused for
+the rest of the session -- switching back and forth between, say,
+Jupiter and Mars fetches `jup365.bsp` and `mar099.bsp` each exactly
+once, verified live: Jupiter fetches `jup365.bsp` (8 moons: the four
+Galilean plus Amalthea/Thebe/Adrastea/Metis) only on the *first*
+Shift+Click, Mars fetches `mar099.bsp` (Phobos + Deimos) only on its
+first Shift+Click, and returning to Jupiter shows all 8 moons again
+with no new fetch.
+
+Precise mode also samples orbit-arc lines at a much higher density
+(480 points, vs. the whole-system view's 24-240) than the system view
+-- a close moon's orbital period runs *days*, not years, so the
+system's own sample spacing (tuned for planet-scale periods) would
+alias into a tangled, self-intersecting line rather than a clean
+ellipse; this was caught by literally looking at a screenshot, not by
+any automated check. 480 samples resolves the Galilean moons cleanly;
+Jupiter's four innermost, fastest moons (7-16 hour periods) still show
+some faceting at this density -- their live marker positions stay
+exact regardless, same distinction already drawn for rotating-frame
+arcs above. Leaving precise mode restores the system view's own
+(cheaper) sample density.
 
 The scale changes too: instead of the whole-system AU-anchored scale
 (where every body's true radius would be sub-pixel), precise mode uses

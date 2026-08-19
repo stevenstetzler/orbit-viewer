@@ -172,6 +172,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { load, str2et, et2utcCalendar, openRemoteSpk, spkez, bodyValues, kclear } from '../../src/browser.js';
+import { KERNELS as KERNEL_MANIFEST } from '../../kernels/sources.mjs';
 
 const statusEl = document.getElementById('status');
 const fileInput = document.getElementById('fileInput');
@@ -236,6 +237,23 @@ const RADIUS_SCENE_SCALE = 0.10 / Math.sqrt(EARTH_RADIUS_KM);
 // rendering is exactly what's numerically sane.
 const PRECISE_BODY_RADIUS_UNITS = 1.0;
 
+// Precise mode's own arc-sample density, well above the system view's
+// (24-240, via arcSamplesForWindow() -- tuned for planets whose orbital
+// periods run YEARS, over a similarly wide window). A close moon's
+// period runs DAYS: sampling ~once/day (what the system's own density
+// gives over a +-30 day window) badly aliases against it -- verified
+// live, screenshotted: Jupiter's Galilean moons (1.8-16.7 day periods)
+// rendered as a tangled "spirograph" of self-intersecting loops, not
+// the real ellipses. 480 samples over that same window (an ~3h
+// interval) resolves the Galileans cleanly; Jupiter's four innermost,
+// fastest moons (Amalthea/Thebe/Adrastea/Metis, 7-16h periods) still
+// show some faceting at this density -- their live marker position (as
+// the "Reference epoch" slider moves) stays exact regardless, the same
+// distinction already drawn for rotating-frame views' suppressed arcs.
+// Precise-mode scenes are always a handful of bodies, so the extra
+// compute is cheap regardless of how many are shown.
+const PRECISE_ARC_SAMPLES = 480;
+
 // Hardcoded, real NAIF addresses -- both confirmed (via curl, see the
 // PR/commit notes) to send no Access-Control-Allow-Origin header, so a
 // browser fetch() of either always fails, deterministically, for every
@@ -280,9 +298,10 @@ const DEFAULT_WINDOW_INDEX = 2; // 30 days, matching the slider's initial value
 // at the whole-system AU scale it's visually indistinguishable from
 // Earth (their marker positions overlap; see the Earth legend row's
 // own distance readout elsewhere in this file's commit history). It's
-// still fully available, though: Shift+Click Earth (see SATELLITES
-// below) to see it in "precise" single-body mode, at a scale where its
-// ~60-Earth-radius separation is actually visible.
+// still fully available, though: Shift+Click Earth (see
+// SATELLITE_KERNEL_FOR_BODY below) to see it in "precise" single-body
+// mode, at a scale where its ~60-Earth-radius separation is actually
+// visible.
 const BODIES = [
   { target: 10, bodyId: 10, name: 'Sun', color: 0xffd34d, fallbackRadius: 5, iauFrame: 'IAU_SUN' },
   { target: 199, bodyId: 199, name: 'Mercury', color: 0x9c9c9c, fallbackRadius: 2, iauFrame: 'IAU_MERCURY' },
@@ -297,18 +316,72 @@ const BODIES = [
 ];
 
 /**
- * Natural satellites shown in "precise" (Shift+Click) mode for a given
- * body, keyed by `bodyId` -- NOT a general spiceJS feature, just this
- * demo's own hardcoded mapping of what DE440/DE440s actually carries:
- * only Earth's Moon (301) is present in this data at all. DE440 is a
- * solar-system-*planetary* ephemeris, not a satellite-system one --
- * Jupiter's/Saturn's/etc. real moons need their own separate SPK
- * kernel (e.g. jup365.bsp), not part of this demo or its data, so
- * precise mode on any other body shows just that body alone.
+ * Maps a "precise mode" center's real bodyId to the kernels/sources.mjs
+ * kernel most likely to carry its natural satellites -- consulted only
+ * as a *fallback* (see resolveSatellitesFor() below): whatever's
+ * already loaded is always tried first, which covers Earth's Moon in
+ * the ordinary case (bundled in de440/de440s) without ever touching
+ * this map. The mapped kernel is fetched -- lazily, only if a body
+ * with satellites is actually Shift+Clicked, and only once per session
+ * -- through the local range-caching proxy (see detectKernelProxy()),
+ * since NAIF itself can't be fetched directly from a browser (no
+ * Access-Control-Allow-Origin -- see examples/browser-demo/README.md).
+ * Without that proxy running, precise mode on these bodies just says
+ * so and shows the body alone, same as it always did.
+ *
+ * Saturn has no entry: the only Saturn-system file in the manifest
+ * (sat480) carries no classic moons at all -- confirmed against the
+ * real file, see kernels/sources.mjs's own comment on it.
+ *
+ * `only`, where present, restricts which of the kernel's real targets
+ * are offered: ura184-3 also carries Uranus's small/irregular outer
+ * moons (716-724), which have no real RADII in pck00011.tpc (checked
+ * directly) and orbit tens of millions of km out -- letting them in
+ * would both render as placeholder dots and blow out
+ * fitCameraForPrecise()'s auto-framing relative to the five actually
+ * well-known major moons this is meant to show.
  */
-const SATELLITES = {
-  399: [{ target: 301, bodyId: 301, name: 'Moon', color: 0xd9d9d9, iauFrame: 'IAU_MOON' }],
+const SATELLITE_KERNEL_FOR_BODY = {
+  // Moon's real `center` in the manifest is the Earth-Moon barycenter
+  // (3), not Earth's own target (399): Earth and Moon are DAF
+  // *siblings* -- both "rel 3" -- not parent/child, unlike every other
+  // body here (where the planet's own target already *is* the
+  // barycenter its moons are given relative to). `centerId` overrides
+  // which manifest `center` value identifies a body's satellites; it
+  // defaults to that body's own `target` (see resolveSatellitesFor()).
+  399: { kernelId: 'de440s', centerId: 3 },
+  499: { kernelId: 'mar099' },
+  599: { kernelId: 'jup365' },
+  799: { kernelId: 'ura184-3', only: [701, 702, 703, 704, 705] },
+  899: { kernelId: 'nep105' }, // Nereid only -- nep105 has no Triton (see kernels/sources.mjs)
+  999: { kernelId: 'plu060' },
 };
+
+const SATELLITE_COLORS = [0xd9d9d9, 0xffb37a, 0x8fd9c4, 0xe0a6ff, 0x7ac9ff, 0xffe27a, 0xff8fa6, 0xa6ffb3];
+
+/**
+ * Real satellites of a body, read from kernels/sources.mjs's own
+ * live-verified manifest for `kernelId` (see scripts/inspect-spk.mjs):
+ * every target whose `center` is `centerId`, except `excludeIds` --
+ * which must include *both* the clicked body's own `target` and its
+ * `bodyId`, not just `centerId`. Those three aren't always the same
+ * value: a satellite kernel's manifest entry for the planet itself
+ * (e.g. jup365's "599 rel 5") also has `center === centerId`, so
+ * without excluding it explicitly a planet would be listed as its own
+ * satellite. Confirmed live: this exact thing happened for Earth
+ * before this exclusion existed (de440s's "399 rel 3" alongside
+ * Moon's "301 rel 3" -- Earth showed up as its own 1 satellite), and
+ * would have for every other mapped planet too (mar099's "499 rel 4",
+ * ura184-3's "799 rel 7", nep105's "899 rel 8", plu060's "999 rel 9"),
+ * not just Earth.
+ */
+function satellitesFromManifest(kernelId, centerId, excludeIds, only) {
+  const entry = KERNEL_MANIFEST[kernelId];
+  if (!entry) return [];
+  return (entry.targets ?? [])
+    .filter((t) => t.center === centerId && !excludeIds.includes(t.id) && (!only || only.includes(t.id)))
+    .map((t, i) => ({ target: t.id, bodyId: t.id, name: t.name, color: SATELLITE_COLORS[i % SATELLITE_COLORS.length] }));
+}
 
 const SSB = 0; // Solar System Barycenter -- the default view center
 
@@ -382,9 +455,10 @@ function resetCameraToDefault() {
  * Frames the camera around the current (precise-mode) scene's real
  * extent -- computed from actual marker positions/radii just placed,
  * not a guess, since this varies hugely body-to-body: a lone body with
- * no satellite data (e.g. Mars, in this demo's data -- see SATELLITES)
- * needs a close-up around just its own ~1-unit radius, while Earth's
- * real Moon needs enough room for a ~60-body-radius gap.
+ * no satellite data (e.g. Saturn, in this demo's data -- see
+ * SATELLITE_KERNEL_FOR_BODY) needs a close-up around just its own
+ * ~1-unit radius, while Earth's real Moon needs enough room for a
+ * ~60-body-radius gap.
  */
 function fitCameraForPrecise() {
   let maxExtent = demo.scale.markerRadius(demo.bodies[0]); // the precise-mode center's own radius, always present
@@ -422,6 +496,7 @@ let demo = null;
 let windowChangeInFlight = false;
 let modeChangeInFlight = false;
 let sceneUpdateSeq = 0; // see updateSceneForOffset()'s staleness guard
+let proxyCatalogue = null; // Map<kernelId, entry> once detectKernelProxy() finds one; null otherwise
 
 function kmToScene(posKm) {
   // km -> AU, then a fixed display scale so the whole DE440 range is
@@ -535,6 +610,15 @@ async function beginSession(remote, { sourceLabel, sourceSizeBytes, counters = n
     remote, et0, sourceLabel, sourceSizeBytes, counters, halfWindowDays: null,
     bodies: [], systemBodies: [], mode: 'system', preciseBodyId: null, scale: SYSTEM_SCALE,
     viewObserver: SSB, viewFrame: INERTIAL_FRAME, viewLabel: 'Solar System Barycenter',
+    // The "active" remote/bounds pair drives 3D-scene rendering
+    // (rebuildArcs(), updateSceneForOffset()'s marker loop,
+    // extendPrefetch()) and, in 'precise' mode, can be a *different*
+    // kernel than `remote` (a satellite kernel -- see
+    // resolveSatellitesFor()); systemEtStart/systemEtEnd are `remote`'s
+    // own bounds, restored into etStart/etEnd whenever precise mode
+    // exits back to 'system' (see setView()).
+    activeRemote: remote, etStart: null, etEnd: null, systemEtStart: null, systemEtEnd: null,
+    satelliteRemotes: new Map(), // kernelId -> openRemoteSpk() result, fetched at most once per session
   };
   updateViewStatus();
 
@@ -634,7 +718,7 @@ function rebuildArcs(centerEt) {
       const arcPoints = [];
       for (let i = 0; i < demo.arcSamples; i++) {
         const et = arcStart + (i / (demo.arcSamples - 1)) * (arcEnd - arcStart);
-        const { position } = spkez(b.target, demo.viewObserver, et, 'NONE', demo.viewFrame, demo.remote.pool);
+        const { position } = spkez(b.target, demo.viewObserver, et, 'NONE', demo.viewFrame, demo.activeRemote.pool);
         arcPoints.push(new THREE.Vector3(...demo.scale.posToScene(position)));
       }
       const arcGeo = new THREE.BufferGeometry().setFromPoints(arcPoints);
@@ -668,7 +752,7 @@ async function extendPrefetch(newStart, newEnd) {
   const before = demo.counters ? { ...demo.counters } : null;
   for (const b of demo.bodies) {
     try {
-      await demo.remote.prefetch({ target: b.target, observer: SSB, etStart: newStart, etEnd: newEnd });
+      await demo.activeRemote.prefetch({ target: b.target, observer: SSB, etStart: newStart, etEnd: newEnd });
     } catch (err) {
       log(`  -> couldn't extend prefetch for ${b.name} (${err.message})`);
     }
@@ -694,6 +778,7 @@ async function rebuildForWindow(halfWindowDays) {
   demo.mode = 'system';
   demo.preciseBodyId = null;
   demo.scale = SYSTEM_SCALE;
+  demo.activeRemote = demo.remote;
   if (wasPrecise) resetCameraToDefault();
 
   const etStart = demo.et0 - halfWindowDays * DAY;
@@ -732,7 +817,10 @@ async function rebuildForWindow(halfWindowDays) {
   demo.halfWindowDays = halfWindowDays;
   demo.etStart = etStart;
   demo.etEnd = etEnd;
+  demo.systemEtStart = etStart;
+  demo.systemEtEnd = etEnd;
   demo.arcSamples = arcSamples;
+  demo.systemArcSamples = arcSamples;
   ensureMarkers();
   buildLegend(bodiesState);
   buildPreciseLegend([]);
@@ -832,6 +920,10 @@ async function setView(observerTarget, frameName, label) {
     demo.mode = 'system';
     demo.preciseBodyId = null;
     demo.scale = SYSTEM_SCALE;
+    demo.activeRemote = demo.remote;
+    demo.etStart = demo.systemEtStart;
+    demo.etEnd = demo.systemEtEnd;
+    demo.arcSamples = demo.systemArcSamples;
     demo.bodies = demo.systemBodies;
     buildPreciseLegend([]);
     resetCameraToDefault();
@@ -847,29 +939,114 @@ async function setView(observerTarget, frameName, label) {
 
 /**
  * "Precise" single-body mode (Shift+Click): centers on `spec`, shows
- * only it and its real satellites (SATELLITES[spec.bodyId], often
- * empty -- see that constant's comment), and switches to a scale
+ * only it and its real satellites (resolveSatellitesFor(), often empty
+ * -- see SATELLITE_KERNEL_FOR_BODY's comment), and switches to a scale
  * anchored to `spec`'s own real physical radius (makePreciseScale())
  * instead of the whole-system AU scale -- true relative size/distance
  * for a single system, numerically sane at this scale (unlike the
  * AU-anchored system view, where every planet's radius is many orders
  * of magnitude below a screen pixel).
  */
-async function enterPreciseMode(spec) {
-  if (!demo) return;
-  const satelliteSpecs = SATELLITES[spec.bodyId] || [];
-  log(`Entering precise mode: ${spec.name}` +
-    (satelliteSpecs.length ? ` + ${satelliteSpecs.length} satellite(s)...` : ' (no satellite data in this kernel)...'));
+/**
+ * Opens (or reuses, from demo.satelliteRemotes) an openRemoteSpk()
+ * session for `kernelId` through the local range-caching proxy.
+ * Structural discovery only -- a couple of ~64 KiB range reads even
+ * for a multi-gigabyte file -- until something is actually prefetched
+ * from it. Requires the proxy (see detectKernelProxy()): NAIF itself
+ * sends no Access-Control-Allow-Origin, so a browser can't fetch these
+ * cross-origin any other way.
+ */
+async function openSatelliteKernel(kernelId) {
+  if (demo.satelliteRemotes.has(kernelId)) return demo.satelliteRemotes.get(kernelId);
+  const entry = proxyCatalogue.get(kernelId);
+  log(`  Fetching ${entry.file} (${entry.size}) through the local proxy -- needed once, then cached for this session...`);
+  const remote = await openRemoteSpk(entry.url);
+  demo.satelliteRemotes.set(kernelId, remote);
+  return remote;
+}
 
-  const included = [{ ...spec, isPreciseCenter: true }];
-  for (const sat of satelliteSpecs) {
+/**
+ * Resolves precise mode's satellites for `spec`, trying two sources in
+ * order:
+ *
+ * 1. Whatever's already loaded (demo.remote) -- covers Earth's Moon in
+ *    the ordinary case (bundled in de440/de440s), or any body if the
+ *    user's own main kernel happens to already carry its moons (e.g.
+ *    they picked jup365.bsp directly via the file picker).
+ * 2. The kernel SATELLITE_KERNEL_FOR_BODY maps `spec.bodyId` to,
+ *    fetched through the local proxy if one is running (openSatelliteKernel()) --
+ *    self-sufficient: every satellite SPK in the manifest carries its
+ *    own copy of the Sun/Earth/EMB/planet-barycenter chain to the SSB
+ *    (confirmed in kernels/sources.mjs), so this needs nothing from
+ *    demo.remote at all.
+ *
+ * @returns {{ remote: object, satellites: object[], etStart: number, etEnd: number }}
+ *   `remote` is whichever of the two ended up being used (or demo.remote,
+ *   unchanged, if neither had anything) -- the caller uses it as
+ *   demo.activeRemote for the rest of this precise-mode session.
+ */
+async function resolveSatellitesFor(spec) {
+  const mapping = SATELLITE_KERNEL_FOR_BODY[spec.bodyId];
+  const candidates = mapping
+    ? satellitesFromManifest(mapping.kernelId, mapping.centerId ?? spec.target, [spec.target, spec.bodyId], mapping.only)
+    : [];
+  if (!candidates.length) {
+    return { remote: demo.remote, satellites: [], etStart: demo.systemEtStart, etEnd: demo.systemEtEnd };
+  }
+
+  const fromMain = [];
+  for (const sat of candidates) {
     try {
-      await demo.remote.prefetch({ target: sat.target, observer: SSB, etStart: demo.etStart, etEnd: demo.etEnd });
-      included.push({ ...sat });
-    } catch (err) {
-      log(`  -> couldn't prefetch satellite ${sat.name}: ${err.message}`);
+      await demo.remote.prefetch({ target: sat.target, observer: SSB, etStart: demo.systemEtStart, etEnd: demo.systemEtEnd });
+      fromMain.push({ ...sat });
+    } catch {
+      // Not in the loaded kernel -- try the mapped satellite kernel below.
     }
   }
+  if (fromMain.length) {
+    return { remote: demo.remote, satellites: fromMain, etStart: demo.systemEtStart, etEnd: demo.systemEtEnd };
+  }
+
+  if (!proxyCatalogue || !proxyCatalogue.has(mapping.kernelId)) {
+    log(`  -> ${spec.name}'s satellites aren't in the loaded kernel, and no local proxy is running to fetch ` +
+      `${mapping.kernelId}.bsp from -- run \`npm run serve-example\` to see them.`);
+    return { remote: demo.remote, satellites: [], etStart: demo.systemEtStart, etEnd: demo.systemEtEnd };
+  }
+
+  const halfSpan = demo.halfWindowDays * DAY;
+  const etStart = demo.et0 - halfSpan;
+  const etEnd = demo.et0 + halfSpan;
+  let satRemote;
+  try {
+    satRemote = await openSatelliteKernel(mapping.kernelId);
+    await satRemote.prefetch({ target: spec.target, observer: SSB, etStart, etEnd });
+  } catch (err) {
+    log(`  -> couldn't open ${mapping.kernelId}.bsp for ${spec.name}'s satellites (${err.message})`);
+    return { remote: demo.remote, satellites: [], etStart: demo.systemEtStart, etEnd: demo.systemEtEnd };
+  }
+
+  const fromSatKernel = [];
+  for (const sat of candidates) {
+    try {
+      await satRemote.prefetch({ target: sat.target, observer: SSB, etStart, etEnd });
+      fromSatKernel.push({ ...sat });
+    } catch (err) {
+      log(`  -> couldn't prefetch ${sat.name} (${err.message})`);
+    }
+  }
+  return { remote: satRemote, satellites: fromSatKernel, etStart, etEnd };
+}
+
+async function enterPreciseMode(spec) {
+  if (!demo) return;
+  log(`Entering precise mode: ${spec.name}...`);
+
+  const { remote: precRemote, satellites, etStart, etEnd } = await resolveSatellitesFor(spec);
+  log(satellites.length
+    ? `  -> ${satellites.length} satellite(s): ${satellites.map((s) => s.name).join(', ')}`
+    : `  -> no satellite data available for ${spec.name} in this session.`);
+
+  const included = [{ ...spec, isPreciseCenter: true }, ...satellites];
 
   const centerRadiusKm = meanRadiusKmFor(included[0]); // cache lands on the copy demo.bodies will actually hold
   if (centerRadiusKm == null) {
@@ -885,6 +1062,10 @@ async function enterPreciseMode(spec) {
   demo.viewLabel = spec.name;
   demo.bodies = included;
   demo.scale = makePreciseScale(centerRadiusKm);
+  demo.activeRemote = precRemote;
+  demo.etStart = etStart;
+  demo.etEnd = etEnd;
+  demo.arcSamples = PRECISE_ARC_SAMPLES;
   sunLight.position.set(0, 0, 0); // this system's own center stands in as "the star" for lighting purposes
 
   ensureMarkers();
@@ -953,7 +1134,7 @@ async function updateSceneForOffset(offsetDays) {
   for (const b of demo.bodies) {
     let position;
     try {
-      ({ position } = spkez(b.target, demo.viewObserver, et, 'NONE', demo.viewFrame, demo.remote.pool));
+      ({ position } = spkez(b.target, demo.viewObserver, et, 'NONE', demo.viewFrame, demo.activeRemote.pool));
     } catch (err) {
       log(`  -> couldn't place ${b.name} relative to the current view (${err.message})`);
       continue;
@@ -983,7 +1164,7 @@ async function updateSceneForOffset(offsetDays) {
       const distEl = document.getElementById(`pdist-${b.target}`);
       if (!distEl) continue;
       try {
-        const { position } = spkez(b.target, demo.viewObserver, et, 'NONE', demo.viewFrame, demo.remote.pool);
+        const { position } = spkez(b.target, demo.viewObserver, et, 'NONE', demo.viewFrame, demo.activeRemote.pool);
         distEl.textContent = `${Math.hypot(...position).toFixed(0)} km`;
       } catch (err) {
         distEl.textContent = '';
@@ -1112,6 +1293,12 @@ async function detectKernelProxy() {
     return; // a plain static server -- the file picker below still works
   }
   if (!catalogue || !Array.isArray(catalogue.kernels) || catalogue.kernels.length === 0) return;
+
+  // Keyed by kernel id (e.g. 'jup365', matching kernels/sources.mjs and
+  // SATELLITE_KERNEL_FOR_BODY above) -- resolveSatellitesFor() consults
+  // this to fetch a satellite kernel on demand when precise mode needs
+  // one and the main kernel doesn't already have it.
+  proxyCatalogue = new Map(catalogue.kernels.map((entry) => [entry.id, entry]));
 
   for (const entry of catalogue.kernels) {
     const li = document.createElement('li');
