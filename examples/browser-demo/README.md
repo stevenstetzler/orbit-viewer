@@ -82,6 +82,23 @@ a top-level navigation the browser handles itself, never exposing
 bytes to page JS -- which is exactly why this demo's real loading path
 is "download once, then pick the file."
 
+## Why the default view uses ECLIPJ2000, not plain J2000
+
+DE440's segments are natively stored in "J2000", which despite the
+name is the mean-*equator*-at-J2000 frame (EME2000/ICRF) -- tilted by
+Earth's ~23.4-degree obliquity relative to the ecliptic, not aligned
+with it. Rendering that frame directly makes the (near-coplanar)
+planetary orbits look visibly inclined, which is real but not the
+usual "looking down at the solar system" view people expect by
+default. The default (non-body-locked) view instead rotates every
+position into `ECLIPJ2000` -- J2000 rotated onto the ecliptic plane, a
+fixed rotation with no time-dependence -- via `spkez()`'s own `ref`
+parameter (the same one `examples/spk.mjs` already demonstrates).
+Verified directly: Earth's own Z-coordinate (which effectively
+*defines* the ecliptic plane) is ~57 million km in native J2000 but
+only ~30 thousand km in ECLIPJ2000, a ~2000x reduction, at a sample
+epoch checked against the real `de440.bsp`.
+
 ## Bodies shown
 
 Sun (10), Mercury (199), Venus (299), Earth (399), Moon (301), Mars (4),
@@ -106,8 +123,8 @@ was already prefetched relative to the SSB, which is exactly the chain
 orientation to that body's own rotating `IAU_<BODY>` frame (via
 `spkez()`'s `ref` parameter, using the classic text-PCK orientation
 formula and `kernels/pck00011.tpc`'s real constants -- see
-`src/bodyOrientation.js`) instead of the fixed, non-rotating J2000
-frame every other view uses. Orbit-arc lines are hidden while a
+`src/bodyOrientation.js`) instead of the fixed, non-rotating
+`ECLIPJ2000` frame every other view uses. Orbit-arc lines are hidden while a
 rotating frame is active: this demo's fixed sample budget (tens of
 points across the time window) is far coarser than most bodies' own
 rotation periods (Jupiter's is ~10 hours), so a connect-the-dots line

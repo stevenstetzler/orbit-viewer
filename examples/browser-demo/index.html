@@ -102,10 +102,11 @@
     <p class="sub" style="margin-bottom:8px">
       Click a body to center the view on it. <b>Alt/Option+Click</b> to
       also lock the view to that body's own rotating <code>IAU_&lt;BODY&gt;</code>
-      frame, instead of the fixed (non-rotating) J2000 orientation --
-      orbit-arc lines are hidden in a rotating frame (a coarse time
-      sample can't meaningfully trace a fast rotation; the live marker
-      positions stay exact regardless).
+      frame, instead of the fixed (non-rotating) <code>ECLIPJ2000</code>
+      orientation every other view uses -- orbit-arc lines are hidden
+      in a rotating frame (a coarse time sample can't meaningfully
+      trace a fast rotation; the live marker positions stay exact
+      regardless).
     </p>
     <div id="viewStatus"><span class="label">Viewing from: &ndash;</span></div>
     <ul id="legend"></ul>
@@ -199,7 +200,20 @@ const BODIES = [
   { target: 8, name: 'Neptune (barycenter)', color: 0x5b7fe0, radius: 2.8, iauFrame: 'IAU_NEPTUNE' },
   { target: 9, name: 'Pluto (barycenter)', color: 0xbfa6d9, radius: 1.4, iauFrame: 'IAU_PLUTO' },
 ];
-const SSB = 0; // Solar System Barycenter -- the default view center/frame
+const SSB = 0; // Solar System Barycenter -- the default view center
+
+// The default *inertial* (non-rotating) view frame. NOT the DE440
+// segments' own native frame -- that's plain "J2000", which despite the
+// name is the mean-*equator*-at-J2000 frame (EME2000/ICRF), tilted by
+// Earth's ~23.4-degree obliquity relative to the ecliptic -- so
+// rendering it directly would show the (near-coplanar) planetary
+// orbits as visibly inclined, which is real but not what a "looking
+// down at the solar system" default view should look like. ECLIPJ2000
+// is J2000 rotated onto the ecliptic plane instead (a fixed rotation,
+// no time-dependence, no PCK data needed -- see
+// src/data/inertialFrames.js) -- confirmed via examples/spk.mjs, which
+// already uses it the same way for spkezr()'s `ref` parameter.
+const INERTIAL_FRAME = 'ECLIPJ2000';
 
 /** More samples for a wider window (a decade needs more than a day does), capped for render cost. */
 function arcSamplesForWindow(halfWindowDays) {
@@ -263,8 +277,13 @@ function kmToScene(posKm) {
   const auY = posKm[1] / AU_KM;
   const auZ = posKm[2] / AU_KM;
   const scale = 4.2; // scene units per AU
-  // SPICE's J2000 frame is XY-ish ecliptic/equatorial with Z as the pole;
-  // three.js's default "up" is Y, so swap Y/Z for a natural top-down view.
+  // Positions arrive already rotated into whatever frame is currently
+  // active (see spkez()'s `ref` calls below) -- for the default inertial
+  // view that's ECLIPJ2000, whose Z axis *is* the ecliptic pole by
+  // definition, so the planets' near-coplanar orbits render flat; for a
+  // body-fixed IAU_<BODY> view it's that body's own rotational pole
+  // instead. Either way, three.js's default "up" is Y, so swap Y/Z for
+  // a natural top-down view.
   return [auX * scale, auZ * scale, -auY * scale];
 }
 
@@ -335,7 +354,7 @@ async function beginSession(remote, { sourceLabel, sourceSizeBytes, counters = n
 
   demo = {
     remote, et0, sourceLabel, sourceSizeBytes, counters, halfWindowDays: null, bodies: [],
-    viewObserver: SSB, viewFrame: null, viewLabel: 'Solar System Barycenter',
+    viewObserver: SSB, viewFrame: INERTIAL_FRAME, viewLabel: 'Solar System Barycenter',
   };
   updateViewStatus();
 
@@ -355,7 +374,7 @@ async function beginSession(remote, { sourceLabel, sourceSizeBytes, counters = n
  * point repeated at every sampled epoch isn't useful to draw).
  *
  * Also no arc lines at all -- for any body -- while locked to a
- * rotating IAU_<BODY> frame (demo.viewFrame !== null). Verified live:
+ * rotating IAU_<BODY> frame (demo.viewFrame !== INERTIAL_FRAME). Verified live:
  * a fixed sample budget (tens of points across the time window) is
  * far coarser than a fast-rotating body's own rotation period (e.g.
  * Jupiter's ~10h vs. ~12h between samples over a 30-day window), so
@@ -380,7 +399,7 @@ function buildMeshesForBodies(etStart, etEnd, arcSamples) {
     scene.add(b.marker);
     b.arcLine = null;
 
-    if (isCenter || demo.viewFrame !== null) continue;
+    if (isCenter || demo.viewFrame !== INERTIAL_FRAME) continue;
     try {
       const arcPoints = [];
       for (let i = 0; i < arcSamples; i++) {
@@ -467,10 +486,10 @@ function buildLegend(bodiesState) {
     dist.id = `dist-${b.target}`;
     li.append(swatch, name, dist);
     li.addEventListener('click', (evt) => {
-      const wantFrame = evt.altKey ? b.iauFrame : null;
-      // Click the active body again to reset back to the SSB/J2000 default.
+      const wantFrame = evt.altKey ? b.iauFrame : INERTIAL_FRAME;
+      // Click the active body again to reset back to the SSB/ECLIPJ2000 default.
       if (demo.viewObserver === b.target && demo.viewFrame === wantFrame) {
-        setView(SSB, null, 'Solar System Barycenter');
+        setView(SSB, INERTIAL_FRAME, 'Solar System Barycenter');
       } else {
         setView(b.target, wantFrame, b.name);
       }
@@ -489,12 +508,12 @@ function updateLegendActiveState() {
 }
 
 function updateViewStatus() {
-  if (!demo || demo.viewObserver === SSB) {
-    viewStatusLabel.textContent = 'Viewing from: Solar System Barycenter (J2000, non-rotating)';
-  } else {
-    viewStatusLabel.textContent = `Viewing from: ${demo.viewLabel}` +
-      (demo.viewFrame ? ` (locked to ${demo.viewFrame}, rotating)` : ' (J2000, non-rotating)');
-  }
+  if (!demo) return;
+  const orientation = demo.viewFrame === INERTIAL_FRAME
+    ? `${INERTIAL_FRAME}, non-rotating`
+    : `locked to ${demo.viewFrame}, rotating`;
+  const label = demo.viewObserver === SSB ? 'Solar System Barycenter' : demo.viewLabel;
+  viewStatusLabel.textContent = `Viewing from: ${label} (${orientation})`;
 }
 
 /** Re-center (and optionally re-orient) the view -- no re-prefetch needed, every already-prefetched body can already be used as an observer or a frame reference. */
