@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>spiceJS live demo: DE440 in the browser</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #05070d; color: #d7dce5; font: 14px/1.4 system-ui, sans-serif; }
+  #app { display: flex; height: 100%; }
+  #sidebar {
+    width: 340px; flex: 0 0 auto; box-sizing: border-box; padding: 16px;
+    overflow-y: auto; background: #0b0e17; border-right: 1px solid #1c2230;
+  }
+  #viewport { flex: 1 1 auto; position: relative; }
+  #viewport canvas { display: block; }
+  h1 { font-size: 16px; margin: 0 0 4px; color: #fff; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: #8892a6; margin: 20px 0 8px; }
+  p.sub { margin: 0 0 16px; color: #8892a6; }
+  a { color: #7fb2ff; }
+  button {
+    background: #2a5adf; color: #fff; border: none; border-radius: 4px;
+    padding: 8px 12px; font: inherit; cursor: pointer;
+  }
+  button:disabled { background: #2a3245; color: #626c80; cursor: default; }
+  input[type=file] { display: block; margin: 8px 0; font-size: 12px; color: #8892a6; }
+  #status {
+    white-space: pre-wrap; font: 11px/1.5 ui-monospace, monospace; background: #05070d;
+    border: 1px solid #1c2230; border-radius: 4px; padding: 8px; height: 220px; overflow-y: auto;
+  }
+  #legend { list-style: none; margin: 0; padding: 0; }
+  #legend li { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+  #legend .swatch { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }
+  #legend .name { flex: 1 1 auto; }
+  #legend .dist { color: #8892a6; font-variant-numeric: tabular-nums; }
+  #timeRow { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+  #timeSlider { flex: 1 1 auto; }
+  #timeLabel { font-variant-numeric: tabular-nums; white-space: nowrap; color: #8892a6; font-size: 12px; }
+  #overlayHint {
+    position: absolute; left: 16px; bottom: 12px; color: #626c80; font-size: 11px;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="sidebar">
+    <h1>spiceJS live demo</h1>
+    <p class="sub">DE440 planetary ephemeris, read lazily straight out of a
+      real <code>.bsp</code> kernel file, entirely in this tab.</p>
+
+    <h2>1. Load a kernel</h2>
+    <p class="sub" style="margin-bottom:8px">
+      Pick a real SPK file from disk (e.g.
+      <a href="https://naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/planets/de440s.bsp" target="_blank" rel="noopener">de440s.bsp</a>,
+      ~32&nbsp;MB, or the full <code>de440.bsp</code>). Nothing is uploaded
+      anywhere -- the file never leaves this tab. Only the small byte ranges
+      spiceJS actually needs are read from it, via
+      <code>openRemoteSpk()</code>'s lazy loader.
+    </p>
+    <input id="fileInput" type="file" accept=".bsp" />
+    <div id="status">Waiting for a kernel file&hellip;</div>
+
+    <h2>2. Reference epoch</h2>
+    <div id="timeRow">
+      <span id="timeLabel">&ndash;</span>
+    </div>
+    <input id="timeSlider" type="range" min="-30" max="30" step="0.25" value="0" disabled style="width:100%" />
+    <p class="sub" style="margin:6px 0 0">&plusmn;30 days around today (UTC, from your system clock).</p>
+
+    <h2>Bodies shown</h2>
+    <ul id="legend"></ul>
+  </div>
+  <div id="viewport">
+    <div id="overlayHint">Drag to orbit &middot; scroll to zoom</div>
+  </div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.169.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { load, str2et, et2utcCalendar, openRemoteSpk, spkez, kclear } from '../../src/browser.js';
+
+const statusEl = document.getElementById('status');
+const fileInput = document.getElementById('fileInput');
+const timeSlider = document.getElementById('timeSlider');
+const timeLabel = document.getElementById('timeLabel');
+const legendEl = document.getElementById('legend');
+
+function log(line) {
+  statusEl.textContent += (statusEl.textContent.endsWith('\n') || statusEl.textContent === '' ? '' : '\n') + line;
+  statusEl.scrollTop = statusEl.scrollHeight;
+  console.log('[spicejs-demo]', line);
+}
+function resetLog(line) {
+  statusEl.textContent = line;
+}
+
+// AU, for scaling km positions down to a sane Three.js scene size.
+const AU_KM = 149597870.7;
+const DAY = 86400;
+const HALF_WINDOW_DAYS = 30;
+
+// Bodies to render: NAIF ID, display name, color, orbit-arc sample count.
+// Barycenters are used for the outer planets (matching how DE440 itself
+// stores them -- see docs/lazy-loading.md and perf/README.md), Sun/Mercury/
+// Venus/Earth/Moon/Mars use their own body IDs, all relative to the SSB (0).
+const BODIES = [
+  { target: 10, name: 'Sun', color: 0xffd34d, radius: 5, arcSamples: 0 },
+  { target: 1, name: 'Mercury (barycenter)', color: 0x9c9c9c, radius: 2 },
+  { target: 2, name: 'Venus (barycenter)', color: 0xe8c27a, radius: 2.4 },
+  { target: 399, name: 'Earth', color: 0x4da6ff, radius: 2.6 },
+  { target: 301, name: 'Moon', color: 0xd9d9d9, radius: 1.2 },
+  { target: 4, name: 'Mars (barycenter)', color: 0xd9583a, radius: 2.2 },
+  { target: 5, name: 'Jupiter (barycenter)', color: 0xe0b98a, radius: 3.6 },
+  { target: 6, name: 'Saturn (barycenter)', color: 0xead6a8, radius: 3.2 },
+  { target: 7, name: 'Uranus (barycenter)', color: 0x9fd9e8, radius: 2.8 },
+  { target: 8, name: 'Neptune (barycenter)', color: 0x5b7fe0, radius: 2.8 },
+  { target: 9, name: 'Pluto (barycenter)', color: 0xbfa6d9, radius: 1.4 },
+];
+const OBSERVER = 0; // Solar System Barycenter
+const ARC_SAMPLES = 61; // ~daily over the +-30 day window
+
+// ---------------------------------------------------------------------
+// three.js scene setup (runs immediately; populated once a kernel loads)
+// ---------------------------------------------------------------------
+const viewport = document.getElementById('viewport');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x05070d);
+
+const camera = new THREE.PerspectiveCamera(50, viewport.clientWidth / viewport.clientHeight, 0.01, 1000);
+camera.position.set(0, 22, 34);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(viewport.clientWidth, viewport.clientHeight);
+viewport.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+const sunLight = new THREE.PointLight(0xffffff, 2, 0, 0);
+scene.add(sunLight);
+
+const grid = new THREE.PolarGridHelper(30, 8, 8, 64, 0x1c2230, 0x141924);
+scene.add(grid);
+
+window.addEventListener('resize', () => {
+  camera.aspect = viewport.clientWidth / viewport.clientHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(viewport.clientWidth, viewport.clientHeight);
+});
+
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+
+// ---------------------------------------------------------------------
+// Demo state, rebuilt each time a kernel file is picked.
+// ---------------------------------------------------------------------
+let demo = null; // { remote, et0, bodies: [{ ...BODIES[i], marker, arcPositions: Float64Array[N][3] }] }
+
+function kmToScene(posKm) {
+  // km -> AU, then a fixed display scale so the whole DE440 range is
+  // visually usable (real AU units would put Neptune ~30 units out and
+  // everything inside 1 AU indistinguishable at the origin).
+  const auX = posKm[0] / AU_KM;
+  const auY = posKm[1] / AU_KM;
+  const auZ = posKm[2] / AU_KM;
+  const scale = 4.2; // scene units per AU
+  // SPICE's J2000 frame is XY-ish ecliptic/equatorial with Z as the pole;
+  // three.js's default "up" is Y, so swap Y/Z for a natural top-down view.
+  return [auX * scale, auZ * scale, -auY * scale];
+}
+
+async function clearDemo() {
+  if (demo) {
+    for (const b of demo.bodies) {
+      scene.remove(b.marker);
+      if (b.arcLine) scene.remove(b.arcLine);
+    }
+    demo = null;
+  }
+  kclear(); // forget any kernels loaded into the global pool by a previous file
+}
+
+async function loadKernelAndBuildScene(file) {
+  await clearDemo();
+  resetLog(`Loading leapseconds kernel...`);
+
+  const lskUrl = new URL('../../kernels/naif0012.tls', import.meta.url).href;
+  await load(lskUrl);
+  log(`Leapseconds kernel loaded from ${lskUrl}`);
+
+  const et0 = str2et(new Date().toISOString());
+  log(`Reference epoch (now, UTC): ${et2utcCalendar(et0)}  (ET ${et0.toFixed(3)} s)`);
+
+  const etStart = et0 - HALF_WINDOW_DAYS * DAY;
+  const etEnd = et0 + HALF_WINDOW_DAYS * DAY;
+
+  log(`Opening "${file.name}" (${(file.size / 1e6).toFixed(1)} MB) as a lazily-fetched SPK kernel...`);
+  let requestCount = 0;
+  let bytesRead = 0;
+  const resolveRange = async (_url, startByte, endByteExclusive) => {
+    requestCount += 1;
+    bytesRead += endByteExclusive - startByte;
+    const slice = file.slice(startByte, endByteExclusive);
+    return new Uint8Array(await slice.arrayBuffer());
+  };
+  const remote = await openRemoteSpk(file.name, { fileLength: file.size, resolveRange });
+
+  const bodiesState = [];
+  for (const spec of BODIES) {
+    log(`Prefetching ${spec.name} (${spec.target}) rel. SSB over +-${HALF_WINDOW_DAYS} days...`);
+    try {
+      await remote.prefetch({ target: spec.target, observer: OBSERVER, etStart, etEnd });
+    } catch (err) {
+      log(`  -> skipped (${err.message})`);
+      continue;
+    }
+    bodiesState.push({ ...spec });
+  }
+  log(`Prefetch done: ${requestCount} HTTP-shaped range reads, ${(bytesRead / 1e6).toFixed(2)} MB of ` +
+    `"${file.name}" actually read (out of ${(file.size / 1e6).toFixed(1)} MB total).`);
+
+  // Build markers + orbit-arc lines.
+  for (const b of bodiesState) {
+    const geo = new THREE.SphereGeometry(b.radius * 0.05, 20, 16);
+    const mat = new THREE.MeshStandardMaterial({ color: b.color, emissive: b.color, emissiveIntensity: b.target === 10 ? 1.2 : 0.15 });
+    b.marker = new THREE.Mesh(geo, mat);
+    scene.add(b.marker);
+
+    const arcPoints = [];
+    for (let i = 0; i < ARC_SAMPLES; i++) {
+      const et = etStart + (i / (ARC_SAMPLES - 1)) * (etEnd - etStart);
+      const { position } = spkez(b.target, OBSERVER, et, 'NONE', null, remote.pool);
+      arcPoints.push(new THREE.Vector3(...kmToScene(position)));
+    }
+    const arcGeo = new THREE.BufferGeometry().setFromPoints(arcPoints);
+    const arcMat = new THREE.LineBasicMaterial({ color: b.color, transparent: true, opacity: 0.45 });
+    b.arcLine = new THREE.Line(arcGeo, arcMat);
+    scene.add(b.arcLine);
+  }
+
+  demo = { remote, et0, etStart, etEnd, bodies: bodiesState };
+  buildLegend(bodiesState);
+  timeSlider.disabled = false;
+  timeSlider.value = '0';
+  updateSceneForOffset(0);
+  log('Scene built. Drag the slider to move through the +-30 day window.');
+}
+
+function buildLegend(bodiesState) {
+  legendEl.innerHTML = '';
+  for (const b of bodiesState) {
+    const li = document.createElement('li');
+    const swatch = document.createElement('span');
+    swatch.className = 'swatch';
+    swatch.style.background = '#' + b.color.toString(16).padStart(6, '0');
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = b.name;
+    const dist = document.createElement('span');
+    dist.className = 'dist';
+    dist.id = `dist-${b.target}`;
+    li.append(swatch, name, dist);
+    legendEl.appendChild(li);
+  }
+}
+
+function updateSceneForOffset(offsetDays) {
+  if (!demo) return;
+  const et = demo.et0 + offsetDays * DAY;
+  timeLabel.textContent = `${et2utcCalendar(et)}  (${offsetDays >= 0 ? '+' : ''}${offsetDays.toFixed(2)} d)`;
+  for (const b of demo.bodies) {
+    const { position } = spkez(b.target, OBSERVER, et, 'NONE', null, demo.remote.pool);
+    const [x, y, z] = kmToScene(position);
+    b.marker.position.set(x, y, z);
+    if (b.target === 10) sunLight.position.set(x, y, z);
+    const distEl = document.getElementById(`dist-${b.target}`);
+    if (distEl) {
+      const auDist = Math.hypot(...position) / AU_KM;
+      distEl.textContent = `${auDist.toFixed(2)} AU`;
+    }
+  }
+}
+
+timeSlider.addEventListener('input', () => {
+  updateSceneForOffset(Number(timeSlider.value));
+});
+
+fileInput.addEventListener('change', async () => {
+  const file = fileInput.files && fileInput.files[0];
+  if (!file) return;
+  fileInput.disabled = true;
+  try {
+    await loadKernelAndBuildScene(file);
+  } catch (err) {
+    log(`ERROR: ${err.message}`);
+    console.error(err);
+  } finally {
+    fileInput.disabled = false;
+  }
+});
+
+log('Ready. Choose a .bsp file above to begin.');
+</script>
+</body>
+</html>
