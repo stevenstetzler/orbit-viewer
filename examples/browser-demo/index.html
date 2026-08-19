@@ -28,6 +28,14 @@
     white-space: pre-wrap; font: 11px/1.5 ui-monospace, monospace; background: #05070d;
     border: 1px solid #1c2230; border-radius: 4px; padding: 8px; height: 220px; overflow-y: auto;
   }
+  #proxyList li {
+    display: flex; align-items: baseline; gap: 8px; margin: 3px -8px; padding: 6px 8px;
+    border-radius: 4px; cursor: pointer; border: 1px solid transparent;
+  }
+  #proxyList li:hover { background: #141a26; border-color: #1c2230; }
+  #proxyList .pname { color: #d7dce5; font-weight: 600; }
+  #proxyList .psize { color: #8892a6; font-variant-numeric: tabular-nums; margin-left: auto; white-space: nowrap; }
+  #proxyList .pdesc { display: block; color: #626c80; font-size: 11px; margin-top: 2px; }
   #legend, #preciseLegend { list-style: none; margin: 0; padding: 0; }
   #legend li {
     display: flex; align-items: center; gap: 8px; margin: 2px -8px; padding: 4px 8px;
@@ -62,6 +70,23 @@
     <h1>spiceJS live demo</h1>
     <p class="sub">DE440 planetary ephemeris, read lazily straight out of a
       real <code>.bsp</code> kernel file, entirely in this tab.</p>
+
+    <!-- Only shown when this page is being served by
+         `npm run serve-example`, which puts a range-caching proxy in
+         front of NAIF at /kernels/remote/ -- no CORS problem (same
+         origin), no download step (only the byte ranges each query
+         touches are ever fetched, then cached on disk). Detected at
+         load time by probing that endpoint; a plain static server just
+         won't show this section. -->
+    <div id="proxySection" style="display:none">
+      <h2>Load from the local kernel proxy</h2>
+      <p class="sub" style="margin-bottom:8px">
+        Served by <code>npm run serve-example</code> -- each of these
+        streams straight from NAIF on demand, so even a multi-gigabyte
+        kernel costs a few hundred KB to open.
+      </p>
+      <ul id="proxyList" style="list-style:none;margin:0;padding:0"></ul>
+    </div>
 
     <h2>1. Get a kernel</h2>
     <p class="sub" style="margin-bottom:8px">
@@ -159,6 +184,8 @@ const legendEl = document.getElementById('legend');
 const preciseLegendEl = document.getElementById('preciseLegend');
 const preciseLegendWrapEl = document.getElementById('preciseLegendWrap');
 const viewStatusEl = document.getElementById('viewStatus');
+const proxySectionEl = document.getElementById('proxySection');
+const proxyListEl = document.getElementById('proxyList');
 const viewStatusLabel = document.querySelector('#viewStatus .label');
 
 function log(line) {
@@ -1052,7 +1079,73 @@ tryNaifBtn.addEventListener('click', async () => {
   }
 });
 
+/**
+ * Open a kernel served by the local range-caching proxy (see
+ * scripts/serve-example.mjs). Identical to the file-picker path from
+ * openRemoteSpk()'s point of view -- it's an ordinary same-origin URL
+ * that honours Range requests -- except nothing had to be downloaded
+ * first: the proxy fetches only the blocks covering the bytes this
+ * page asks for, and keeps them on disk for next time.
+ */
+async function loadFromProxy(entry) {
+  const counters = { requestCount: 0, bytesRead: 0 };
+  const resolveRange = async (url, startByte, endByteExclusive) => {
+    counters.requestCount += 1;
+    counters.bytesRead += endByteExclusive - startByte;
+    const response = await fetch(url, { headers: { Range: `bytes=${startByte}-${endByteExclusive - 1}` } });
+    if (!response.ok) throw new Error(`proxy returned HTTP ${response.status} ${response.statusText}`);
+    return new Uint8Array(await response.arrayBuffer());
+  };
+  log(`Opening ${entry.file} (${entry.size}) through the local proxy -- no download needed...`);
+  const remote = await openRemoteSpk(entry.url, { fileLength: entry.bytes, resolveRange });
+  await beginSession(remote, { sourceLabel: entry.file, sourceSizeBytes: entry.bytes, counters });
+}
+
+/** Probe /kernels/remote/; if it answers, we're under `npm run serve-example` and can offer one-click loading. */
+async function detectKernelProxy() {
+  let catalogue;
+  try {
+    const response = await fetch('/kernels/remote/', { headers: { accept: 'application/json' } });
+    if (!response.ok) return;
+    catalogue = await response.json();
+  } catch {
+    return; // a plain static server -- the file picker below still works
+  }
+  if (!catalogue || !Array.isArray(catalogue.kernels) || catalogue.kernels.length === 0) return;
+
+  for (const entry of catalogue.kernels) {
+    const li = document.createElement('li');
+    const name = document.createElement('span');
+    name.className = 'pname';
+    name.textContent = entry.id;
+    const size = document.createElement('span');
+    size.className = 'psize';
+    size.textContent = entry.size;
+    const desc = document.createElement('span');
+    desc.className = 'pdesc';
+    desc.textContent = entry.description;
+    li.append(name, size, desc);
+    li.addEventListener('click', async () => {
+      if (li.dataset.busy) return;
+      li.dataset.busy = '1';
+      try {
+        await loadFromProxy(entry);
+      } catch (err) {
+        log(`ERROR: ${err.message}`);
+        console.error(err);
+      } finally {
+        delete li.dataset.busy;
+      }
+    });
+    proxyListEl.appendChild(li);
+  }
+  proxySectionEl.style.display = '';
+  log(`Local kernel proxy detected: ${catalogue.kernels.length} kernels available with no download step. ` +
+    `Click one above, or use the file picker below.`);
+}
+
 log('Ready. Download a kernel and choose it above to begin (see "1. Get a kernel").');
+detectKernelProxy();
 </script>
 </body>
 </html>

@@ -12,18 +12,35 @@ view -- see "Click, Control+Click, Alt/Option+Click, Shift+Click" below.
 
 ## Running it
 
-This needs to be served over `http://` or `https://`, not opened as a
-`file://` URL (ES module imports and `fetch()`-backed relative asset
-loads -- the leapseconds kernel -- don't work under `file://`). From
-the repo root:
+From the repo root:
+
+```sh
+npm run serve-example
+```
+
+Then open **http://localhost:8080/examples/browser-demo/**.
+
+That server does two things: serves the repo statically, and proxies
+every kernel in `kernels/sources.mjs` at `/kernels/remote/<file>.bsp`
+with HTTP Range support and an on-disk sparse cache. The page detects
+the proxy automatically and shows a **"Load from the local kernel
+proxy"** list at the top -- click any kernel and it loads immediately,
+fetching only the byte ranges the query touches (measured: 23 ranged
+reads, 1.47 MB of `de440s.bsp`'s 32.7 MB, and nothing at all on a
+reload). No download step, and no CORS problem, because the kernel is
+now same-origin.
+
+Any static server works too -- the page needs `http://`/`https://`
+rather than `file://` for ES modules and relative `fetch()`, but
+nothing more:
 
 ```sh
 npx http-server -p 8080
 # or: python3 -m http.server 8080
 ```
 
-Then open **http://localhost:8080/examples/browser-demo/** in a
-browser.
+Without the proxy you just won't see the kernel list, and load a `.bsp`
+through the file picker instead.
 
 ## Getting a kernel file
 
