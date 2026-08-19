@@ -142,11 +142,11 @@
       rotating <code>IAU_&lt;BODY&gt;</code> frame instead -- orbit-arc
       lines are hidden there (a coarse time sample can't meaningfully
       trace a fast rotation; live marker positions stay exact
-      regardless). <b>Shift+Click</b> enters a "precise" single-body
-      mode: centers on just that body and its real satellites (if
-      any), true-to-scale by its own physical radius rather than the
-      whole-system AU scale. Click the active body again (same
-      modifier) to go back.
+      regardless). <b>Command/Meta+Click</b> (the Windows/Super key on
+      non-Mac keyboards) enters a "precise" single-body mode: centers
+      on just that body and its real satellites (if any), true-to-scale
+      by its own physical radius rather than the whole-system AU scale.
+      Click the active body again (same modifier) to go back.
     </p>
     <div id="viewStatus"><span class="label">Viewing from: &ndash;</span></div>
     <ul id="legend"></ul>
@@ -225,7 +225,7 @@ const DAY = 86400;
 const EARTH_RADIUS_KM = 6378.1366;
 const RADIUS_SCENE_SCALE = 0.10 / Math.sqrt(EARTH_RADIUS_KM);
 
-// "Precise" single-body mode (Shift+Click): the clicked body's own
+// "Precise" single-body mode (Command/Meta+Click): the clicked body's own
 // real radius, in scene units -- every position and every marker
 // radius (including its satellites') is then a single, true, linear
 // km-to-scene-unit scale anchored to this, so relative sizes *and*
@@ -236,23 +236,6 @@ const RADIUS_SCENE_SCALE = 0.10 / Math.sqrt(EARTH_RADIUS_KM);
 // used instead; here, zoomed into a single body, true-to-scale
 // rendering is exactly what's numerically sane.
 const PRECISE_BODY_RADIUS_UNITS = 1.0;
-
-// Precise mode's own arc-sample density, well above the system view's
-// (24-240, via arcSamplesForWindow() -- tuned for planets whose orbital
-// periods run YEARS, over a similarly wide window). A close moon's
-// period runs DAYS: sampling ~once/day (what the system's own density
-// gives over a +-30 day window) badly aliases against it -- verified
-// live, screenshotted: Jupiter's Galilean moons (1.8-16.7 day periods)
-// rendered as a tangled "spirograph" of self-intersecting loops, not
-// the real ellipses. 480 samples over that same window (an ~3h
-// interval) resolves the Galileans cleanly; Jupiter's four innermost,
-// fastest moons (Amalthea/Thebe/Adrastea/Metis, 7-16h periods) still
-// show some faceting at this density -- their live marker position (as
-// the "Reference epoch" slider moves) stays exact regardless, the same
-// distinction already drawn for rotating-frame views' suppressed arcs.
-// Precise-mode scenes are always a handful of bodies, so the extra
-// compute is cheap regardless of how many are shown.
-const PRECISE_ARC_SAMPLES = 480;
 
 // Hardcoded, real NAIF addresses -- both confirmed (via curl, see the
 // PR/commit notes) to send no Access-Control-Allow-Origin header, so a
@@ -298,7 +281,7 @@ const DEFAULT_WINDOW_INDEX = 2; // 30 days, matching the slider's initial value
 // at the whole-system AU scale it's visually indistinguishable from
 // Earth (their marker positions overlap; see the Earth legend row's
 // own distance readout elsewhere in this file's commit history). It's
-// still fully available, though: Shift+Click Earth (see
+// still fully available, though: Command/Meta+Click Earth (see
 // SATELLITE_KERNEL_FOR_BODY below) to see it in "precise" single-body
 // mode, at a scale where its ~60-Earth-radius separation is actually
 // visible.
@@ -322,7 +305,7 @@ const BODIES = [
  * already loaded is always tried first, which covers Earth's Moon in
  * the ordinary case (bundled in de440/de440s) without ever touching
  * this map. The mapped kernel is fetched -- lazily, only if a body
- * with satellites is actually Shift+Clicked, and only once per session
+ * with satellites is actually Command/Meta+Clicked, and only once per session
  * -- through the local range-caching proxy (see detectKernelProxy()),
  * since NAIF itself can't be fetched directly from a browser (no
  * Access-Control-Allow-Origin -- see examples/browser-demo/README.md).
@@ -398,9 +381,78 @@ const SSB = 0; // Solar System Barycenter -- the default view center
 // already uses it the same way for spkezr()'s `ref` parameter.
 const INERTIAL_FRAME = 'ECLIPJ2000';
 
-/** More samples for a wider window (a decade needs more than a day does), capped for render cost. */
-function arcSamplesForWindow(halfWindowDays) {
-  return Math.max(24, Math.min(240, Math.round(halfWindowDays * 2)));
+// ---------------------------------------------------------------------
+// Adaptive orbit-arc sampling
+// ---------------------------------------------------------------------
+// The previous scheme used a fixed sample count spread evenly across
+// the arc's whole time span (more samples for a wider window, capped
+// for render cost) -- correct only by accident, when the span happens
+// to be within about one order of magnitude of the body's own orbital
+// period (which is all whole-system planet arcs over the default
+// +-30-day window are). It breaks in both directions once that's not
+// true: too FEW samples once the span covers many periods of a body
+// moving fast relative to the window (verified live, screenshotted:
+// Jupiter's Galilean moons, 1.8-16.7 day periods, rendered as a
+// tangled "spirograph" over a 60-day precise-mode span at the old
+// fixed ~60-sample budget -- and the exact same failure mode hits the
+// whole-system view too, just for different bodies: Mercury's 88-day
+// period means a +-10-year window traces almost 40 orbits, badly
+// aliased at the old scheme's 240-sample cap); too MANY (wasted
+// render budget, spread uselessly thin) for a slow body over a narrow
+// window.
+//
+// This instead measures each body's REAL angular rate directly from
+// its own state vectors -- no orbital period, no extra GM kernel
+// needed. For two-body (Keplerian) motion, specific angular momentum
+// h = r x v is exactly conserved, so the instantaneous angular rate at
+// any sampled point is h/|r|^2; sampling based on the actual angle
+// swept between consecutive points (rather than a fixed time step)
+// naturally lands more points where a body is moving fast (near
+// periapsis) and fewer where it's moving slowly (near apoapsis), for
+// ANY body, at ANY span-to-period ratio, with no per-body tuning.
+// Real solar system motion is n-body, not exactly two-body, but the
+// perturbations are negligible at the timescales relevant to a
+// smooth-looking line.
+
+const ARC_MAX_STEP_RAD = (10 * Math.PI) / 180; // no two consecutive plotted points more than 10 degrees apart, as seen from the observer
+const ARC_SEED_COUNT = 24; // evenly-spaced starting points, before adaptive refinement -- guards against the refinement's one real blind spot: it only ever looks *between* two already-sampled points, so if by coincidence two adjacent seeds land at a similar phase (the window is close to an exact multiple of the body's period), whatever happens between them is invisible to it. More, evenly-spread seeds make that coincidence unlikely; it isn't ruled out.
+const ARC_MAX_SAMPLES = 400; // hard cap on total points per body per arc, win or lose -- bounds both render cost and the O(n^2) refinement scan below (400^2 = 1.6e5 comparisons, done off already-prefetched bytes with no I/O -- well under a millisecond)
+
+function angleBetweenVectors(p1, p2) {
+  const d1 = Math.hypot(p1[0], p1[1], p1[2]);
+  const d2 = Math.hypot(p2[0], p2[1], p2[2]);
+  if (d1 === 0 || d2 === 0) return 0;
+  const dot = (p1[0] * p2[0] + p1[1] * p2[1] + p1[2] * p2[2]) / (d1 * d2);
+  return Math.acos(Math.max(-1, Math.min(1, dot)));
+}
+
+/**
+ * Samples `target`'s position relative to `observer` across [et0, et1],
+ * adaptively: starts from ARC_SEED_COUNT evenly-spaced points, then
+ * repeatedly bisects whichever consecutive pair currently sweeps the
+ * widest angle (as seen from the observer) until every gap is under
+ * ARC_MAX_STEP_RAD or ARC_MAX_SAMPLES is reached. Returns an array of
+ * `{ et, position }` in time order.
+ */
+function sampleArcAdaptive(target, observer, et0, et1, frame, pool) {
+  const at = (et) => ({ et, position: spkez(target, observer, et, 'NONE', frame, pool).position });
+
+  const samples = [];
+  for (let i = 0; i < ARC_SEED_COUNT; i++) {
+    samples.push(at(et0 + (i / (ARC_SEED_COUNT - 1)) * (et1 - et0)));
+  }
+
+  while (samples.length < ARC_MAX_SAMPLES) {
+    let worstIdx = -1;
+    let worstAngle = ARC_MAX_STEP_RAD;
+    for (let i = 0; i < samples.length - 1; i++) {
+      const angle = angleBetweenVectors(samples[i].position, samples[i + 1].position);
+      if (angle > worstAngle) { worstAngle = angle; worstIdx = i; }
+    }
+    if (worstIdx < 0) break; // every gap is already under threshold
+    samples.splice(worstIdx + 1, 0, at((samples[worstIdx].et + samples[worstIdx + 1].et) / 2));
+  }
+  return samples;
 }
 
 // ---------------------------------------------------------------------
@@ -715,12 +767,8 @@ function rebuildArcs(centerEt) {
   for (const b of demo.bodies) {
     if (b.target === demo.viewObserver) continue; // degenerate: always (0,0,0) relative to itself
     try {
-      const arcPoints = [];
-      for (let i = 0; i < demo.arcSamples; i++) {
-        const et = arcStart + (i / (demo.arcSamples - 1)) * (arcEnd - arcStart);
-        const { position } = spkez(b.target, demo.viewObserver, et, 'NONE', demo.viewFrame, demo.activeRemote.pool);
-        arcPoints.push(new THREE.Vector3(...demo.scale.posToScene(position)));
-      }
+      const samples = sampleArcAdaptive(b.target, demo.viewObserver, arcStart, arcEnd, demo.viewFrame, demo.activeRemote.pool);
+      const arcPoints = samples.map((s) => new THREE.Vector3(...demo.scale.posToScene(s.position)));
       const arcGeo = new THREE.BufferGeometry().setFromPoints(arcPoints);
       const arcMat = new THREE.LineBasicMaterial({ color: b.color, transparent: true, opacity: 0.45 });
       b.arcLine = new THREE.Line(arcGeo, arcMat);
@@ -783,7 +831,6 @@ async function rebuildForWindow(halfWindowDays) {
 
   const etStart = demo.et0 - halfWindowDays * DAY;
   const etEnd = demo.et0 + halfWindowDays * DAY;
-  const arcSamples = arcSamplesForWindow(halfWindowDays);
 
   const before = demo.counters ? { ...demo.counters } : null;
   const bodiesState = [];
@@ -819,8 +866,6 @@ async function rebuildForWindow(halfWindowDays) {
   demo.etEnd = etEnd;
   demo.systemEtStart = etStart;
   demo.systemEtEnd = etEnd;
-  demo.arcSamples = arcSamples;
-  demo.systemArcSamples = arcSamples;
   ensureMarkers();
   buildLegend(bodiesState);
   buildPreciseLegend([]);
@@ -910,7 +955,7 @@ function updateViewStatus() {
  * Re-center (and optionally re-orient) the whole-system view -- no
  * re-prefetch needed, every already-prefetched body can already be
  * used as an observer or a frame reference. Always drops 'precise'
- * mode back to 'system' first if it was active, since every non-Shift
+ * mode back to 'system' first if it was active, since every non-precise-mode
  * click means "go back to the whole-system view" (at this new center).
  */
 async function setView(observerTarget, frameName, label) {
@@ -923,7 +968,6 @@ async function setView(observerTarget, frameName, label) {
     demo.activeRemote = demo.remote;
     demo.etStart = demo.systemEtStart;
     demo.etEnd = demo.systemEtEnd;
-    demo.arcSamples = demo.systemArcSamples;
     demo.bodies = demo.systemBodies;
     buildPreciseLegend([]);
     resetCameraToDefault();
@@ -938,7 +982,7 @@ async function setView(observerTarget, frameName, label) {
 }
 
 /**
- * "Precise" single-body mode (Shift+Click): centers on `spec`, shows
+ * "Precise" single-body mode (Command/Meta+Click): centers on `spec`, shows
  * only it and its real satellites (resolveSatellitesFor(), often empty
  * -- see SATELLITE_KERNEL_FOR_BODY's comment), and switches to a scale
  * anchored to `spec`'s own real physical radius (makePreciseScale())
@@ -1065,7 +1109,6 @@ async function enterPreciseMode(spec) {
   demo.activeRemote = precRemote;
   demo.etStart = etStart;
   demo.etEnd = etEnd;
-  demo.arcSamples = PRECISE_ARC_SAMPLES;
   sunLight.position.set(0, 0, 0); // this system's own center stands in as "the star" for lighting purposes
 
   ensureMarkers();
@@ -1082,9 +1125,13 @@ async function exitPreciseMode() {
 }
 
 /**
- * Click (or Alt/Control/Shift+Click) on a "Bodies shown" legend row --
+ * Click (or Alt/Control/Command+Click) on a "Bodies shown" legend row --
  * see this file's "Bodies shown" hint text for what each combination
- * does. Shift takes priority if held with another modifier.
+ * does. Command/Meta takes priority if held with another modifier.
+ * (Not Shift: browsers already overload Shift+Click themselves --
+ * e.g. range-extending a selection -- so precise mode uses
+ * evt.metaKey instead, which is Cmd on macOS and the Windows/Super key
+ * elsewhere, neither of which browsers claim for click handling.)
  */
 function handleBodyClick(b, evt) {
   if (!demo || modeChangeInFlight) return;
@@ -1092,7 +1139,7 @@ function handleBodyClick(b, evt) {
   const done = () => { modeChangeInFlight = false; };
   const fail = (err) => { log(`ERROR: ${err.message}`); console.error(err); };
 
-  if (evt.shiftKey) {
+  if (evt.metaKey) {
     const alreadyThisPrecise = demo.mode === 'precise' && demo.preciseBodyId === b.bodyId;
     (alreadyThisPrecise ? exitPreciseMode() : enterPreciseMode(b)).catch(fail).finally(done);
     return;

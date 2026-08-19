@@ -7,8 +7,9 @@ via `File.slice()`, never a full upload or a full parse -- to plot ten
 Solar System bodies over an adjustable window around *now*, rendered
 with [three.js](https://threejs.org/). Click a body to re-center the
 view on it, in either a fixed or that body's own rotating frame, or
-Shift+Click it to drop into a true-to-scale single-body-and-its-moons
-view -- see "Click, Control+Click, Alt/Option+Click, Shift+Click" below.
+Command+Click it (the Windows/Super key on non-Mac keyboards) to drop
+into a true-to-scale single-body-and-its-moons view -- see "Click,
+Control+Click, Alt/Option+Click, Command+Click" below.
 
 ## Running it
 
@@ -73,10 +74,11 @@ without errors.
 4. Calls `prefetch({ target, observer: 0, etStart, etEnd })` once per
    body for the current time window (the "Time window" slider, &plusmn;1
    day up to &plusmn;10 years -- default &plusmn;30 days), then
-   evaluates ordinary `spkez()` at up to 240 sample epochs to draw each
-   body's orbit arc *around the "Reference epoch" slider's current
-   position* (not frozen at the moment the kernel was opened), plus its
-   live marker position, every time that slider moves.
+   evaluates ordinary `spkez()` at however many sample epochs each
+   body's own real angular rate calls for (see "Orbit-arc sampling"
+   below) to draw its orbit arc *around the "Reference epoch" slider's
+   current position* (not frozen at the moment the kernel was opened),
+   plus its live marker position, every time that slider moves.
 5. Logs how many range reads it took and how many total bytes were
    actually touched, out of the file's real size -- so you can see the
    lazy-loading savings live, not just in `perf/report.md`. Widening
@@ -141,6 +143,38 @@ edge needed zero new bytes for the real `de440.bsp`); a genuinely new
 fetch only showed up when testing a much wider &plusmn;10-year window
 scrubbed to *its* edge (7 new range reads, 0.79 MB).
 
+## Orbit-arc sampling
+
+Each body's orbit-arc line is sampled **adaptively**, based on that
+body's own real angular rate, not a fixed point count spread evenly
+across the arc's time span. A fixed count is only right by accident,
+when the span happens to be within about an order of magnitude of the
+body's own orbital period -- which is all whole-system arcs are, at
+the default &plusmn;30-day window. It breaks in both directions once
+that's not true: a fast-moving body over a span covering many of its
+own orbits gets *too few* samples (verified live, screenshotted:
+Jupiter's Galilean moons -- 1.8-16.7 day periods -- rendered as a
+tangled, self-intersecting "spirograph" over a 60-day precise-mode
+span at a fixed ~60-sample budget; the same failure hits the
+whole-system view too, for different bodies -- Mercury's 88-day period
+means a &plusmn;10-year window traces almost 40 orbits), while a
+slow-moving body over a narrow span gets *too many*, wasted spread
+uselessly thin.
+
+Instead, each arc starts from a small number of evenly-spaced seed
+points, then repeatedly bisects whichever consecutive pair of points
+currently sweeps the widest angle (as seen from the observer) until
+every gap is under a fixed angular threshold or a hard sample cap is
+hit. This needs no orbital period and no extra GM kernel: specific
+angular momentum (`r &times; v`) is exactly conserved for two-body
+motion, so measuring the actual angle swept between two sampled points
+-- rather than assuming a fixed time step -- naturally puts more
+points where a body is moving fast (near periapsis) and fewer where
+it's slow (near apoapsis), for any body, at any span-to-period ratio,
+with no per-body tuning. (Real solar system motion is n-body, not
+exactly two-body, but the perturbations are negligible at the
+timescales that matter for a smooth-looking line.)
+
 ## Bodies shown, and their real relative sizes
 
 Sun (10), Mercury (199), Venus (299), Earth (399), Mars (4), Jupiter
@@ -152,7 +186,7 @@ though see "Alt/Option+Click" below for how their *orientation* still
 uses the real planet. The Moon isn't in this default list even though
 DE440 carries it -- at the whole-system AU scale its marker position
 is visually indistinguishable from Earth's own (they'd overlap
-completely); **Shift+Click Earth** (see below) to see it at a scale
+completely); **Command+Click Earth** (see below) to see it at a scale
 where it's actually visible.
 
 Marker sizes are real physical body radii -- `BODY<id>_RADII` from
@@ -174,7 +208,7 @@ marker doesn't grow large enough to swallow Mercury's orbit -- verified
 directly: the chosen scale puts the Sun's marker just inside Mercury's
 real perihelion distance, with margin.
 
-## Click, Control+Click, Alt/Option+Click, Shift+Click
+## Click, Control+Click, Alt/Option+Click, Command+Click
 
 Every legend row supports four click variants, all built on the same
 underlying idea: every position becomes `spkez(otherBody, clickedBody,
@@ -193,13 +227,13 @@ needs to compute any pairwise state between two of them.
   using the classic text-PCK orientation formula and
   `kernels/pck00011.tpc`'s real constants -- see
   `src/bodyOrientation.js`). Orbit-arc lines are hidden while a
-  rotating frame is active: this demo's fixed sample budget (tens of
-  points across the time window) is far coarser than most bodies' own
-  rotation periods (Jupiter's is ~10 hours), so a connect-the-dots line
-  through those samples would alias into a meaningless tangle -- each
-  individual sampled *position* is still exact, only a sparse *line*
-  through them isn't meaningful in a fast-rotating frame. Live marker
-  positions stay exact regardless.
+  rotating frame is active: the frame itself is spinning around the
+  clicked body every rotation period (Jupiter's is ~10 hours), so an
+  "orbit" line drawn in it would just retrace that spin rather than
+  show anything about the other bodies' real trajectories -- not a
+  sampling problem (see "Orbit-arc sampling" below), just not a
+  meaningful thing to draw here. Live marker positions stay exact
+  regardless.
 
   Note: for the outer planets, the *position* used is still the
   barycenter (no separate planet-body segment exists in DE440 for
@@ -210,12 +244,12 @@ needs to compute any pairwise state between two of them.
   doesn't require the frame's center to match the target/observer IDs,
   so this is a perfectly ordinary "shown at the barycenter's position,
   oriented as the planet actually rotates" view.
-- **Shift+Click**: enters "precise" single-body mode -- see below.
+- **Command+Click**: enters "precise" single-body mode -- see below.
 
 Click the active body again with the same modifier to go back to the
 Solar System Barycenter / `ECLIPJ2000` default.
 
-## Shift+Click: precise single-body mode
+## Command+Click: precise single-body mode
 
 Shows *only* the clicked body and its real satellites. DE440/DE440s
 are solar-system-*planetary* ephemerides, not satellite-system ones --
@@ -244,22 +278,19 @@ the rest of the session -- switching back and forth between, say,
 Jupiter and Mars fetches `jup365.bsp` and `mar099.bsp` each exactly
 once, verified live: Jupiter fetches `jup365.bsp` (8 moons: the four
 Galilean plus Amalthea/Thebe/Adrastea/Metis) only on the *first*
-Shift+Click, Mars fetches `mar099.bsp` (Phobos + Deimos) only on its
-first Shift+Click, and returning to Jupiter shows all 8 moons again
+Command+Click, Mars fetches `mar099.bsp` (Phobos + Deimos) only on its
+first Command+Click, and returning to Jupiter shows all 8 moons again
 with no new fetch.
 
-Precise mode also samples orbit-arc lines at a much higher density
-(480 points, vs. the whole-system view's 24-240) than the system view
--- a close moon's orbital period runs *days*, not years, so the
-system's own sample spacing (tuned for planet-scale periods) would
-alias into a tangled, self-intersecting line rather than a clean
-ellipse; this was caught by literally looking at a screenshot, not by
-any automated check. 480 samples resolves the Galilean moons cleanly;
-Jupiter's four innermost, fastest moons (7-16 hour periods) still show
-some faceting at this density -- their live marker positions stay
-exact regardless, same distinction already drawn for rotating-frame
-arcs above. Leaving precise mode restores the system view's own
-(cheaper) sample density.
+Precise mode uses the same adaptive orbit-arc sampling as the
+whole-system view (see "Orbit-arc sampling" above) -- no separate
+tuning needed for close, fast-orbiting moons vs. the whole system's
+year-scale planets, since the sampler measures each body's own real
+angular rate directly rather than assuming one. Jupiter's four
+innermost, fastest moons (7-16 hour periods) still show some faceting
+at the sampler's hard cap in a very wide window -- their live marker
+positions stay exact regardless, same distinction already drawn for
+rotating-frame arcs above.
 
 The scale changes too: instead of the whole-system AU-anchored scale
 (where every body's true radius would be sub-pixel), precise mode uses
@@ -273,7 +304,7 @@ or out past its farthest satellite's orbit) -- verified live: Mars
 (no satellite data) frames as a comfortably-sized lone sphere; Earth +
 Moon frames with the Moon's real, distant orbit fully visible.
 
-Click the `#viewStatus` bar (or the active body again with Shift) to
+Click the `#viewStatus` bar (or the active body again with Command/Meta) to
 leave precise mode.
 
 ## Notes
@@ -281,7 +312,7 @@ leave precise mode.
 - Whole-system positions are converted from km to AU and then to a
   fixed scene scale (4.2 units/AU) so the whole range from Mercury to
   Pluto is visible at once; precise mode uses a different, real-radius-
-  anchored scale instead (see "Shift+Click" above). Both are display
+  anchored scale instead (see "Command+Click" above). Both are display
   choices, not something spiceJS itself does.
 - three.js is loaded from a CDN (unpkg, pinned to 0.169.0) via an
   import map -- swap that for a local copy if you need this to work
