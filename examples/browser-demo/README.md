@@ -84,11 +84,50 @@ is "download once, then pick the file."
 
 ## Bodies shown
 
-Sun (10), Mercury (1), Venus (2), Earth (399), Moon (301), Mars (4),
-Jupiter (5), Saturn (6), Uranus (7), Neptune (8), Pluto (9) -- outer
-bodies (Mercury through Pluto barycenters, except Earth/Moon
-themselves) use their barycenter IDs, matching how DE440 actually
-stores them (see `perf/README.md`).
+Sun (10), Mercury (199), Venus (299), Earth (399), Moon (301), Mars (4),
+Jupiter (5), Saturn (6), Uranus (7), Neptune (8), Pluto (9). Mercury/
+Venus use their own body IDs (DE440 carries dedicated segments for
+them); the outer planets stay barycenter-based for *position* (their
+own offset from the barycenter isn't separately modeled -- see
+`perf/README.md`), though see "Centering the view" below for how their
+*orientation* still uses the real planet.
+
+## Centering the view
+
+Click a body in the "Bodies shown" legend to re-center the whole scene
+on it -- every position becomes `spkez(otherBody, clickedBody, et)`
+instead of `spkez(otherBody, 0, et)`, so e.g. clicking Earth shows a
+geocentric view (Sun ~1 AU away, other planets at their true distance
+from Earth, not the Sun). This needs no new prefetching: every body
+was already prefetched relative to the SSB, which is exactly the chain
+`spkez()` needs to compute *any* pairwise state between two of them.
+
+**Alt/Option+Click** goes further: it also locks the view's
+orientation to that body's own rotating `IAU_<BODY>` frame (via
+`spkez()`'s `ref` parameter, using the classic text-PCK orientation
+formula and `kernels/pck00011.tpc`'s real constants -- see
+`src/bodyOrientation.js`) instead of the fixed, non-rotating J2000
+frame every other view uses. Orbit-arc lines are hidden while a
+rotating frame is active: this demo's fixed sample budget (tens of
+points across the time window) is far coarser than most bodies' own
+rotation periods (Jupiter's is ~10 hours), so a connect-the-dots line
+through those samples would alias into a meaningless tangle -- each
+individual sampled *position* is still exact, only a sparse *line*
+through them isn't meaningful in a fast-rotating frame. The live
+marker positions (as the "Reference epoch" slider moves) stay exact
+regardless. Click the active body again (with the same modifier) to
+reset back to the Solar System Barycenter / J2000 default.
+
+Note: for the outer planets, the *position* used is still the
+barycenter (no separate planet-body segment exists in DE440 for them),
+but the `IAU_<BODY>` frame is keyed to the real planet (e.g. `IAU_JUPITER`'s
+orientation constants are `BODY599_POLE_RA` etc., not `BODY5_...` --
+confirmed against `pck00011.tpc`, which has no orientation data for
+barycenters at all). `spkez()`'s frame rotation doesn't require the
+frame's center to match the target/observer IDs, so this is a
+perfectly ordinary "shown at the barycenter's position, oriented as
+the planet actually rotates" view -- not an approximation glued on for
+this demo specifically.
 
 ## Notes
 
