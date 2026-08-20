@@ -58,6 +58,15 @@
   #timeRow { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
   #timeSlider { flex: 1 1 auto; }
   #timeLabel { font-variant-numeric: tabular-nums; white-space: nowrap; color: #8892a6; font-size: 12px; }
+  .controlGrid { display: grid; grid-template-columns: auto 1fr; gap: 6px 10px; align-items: center; margin: 8px 0 16px; }
+  .controlGrid label { color: #8892a6; font-size: 12px; }
+  select {
+    background: #141a26; color: #d7dce5; border: 1px solid #1c2230; border-radius: 4px;
+    padding: 4px 6px; font: inherit; width: 100%;
+  }
+  select:disabled { color: #626c80; }
+  #legend .rowActions, #preciseLegend .rowActions { display: flex; gap: 4px; flex: 0 0 auto; }
+  #legend .rowActions button { padding: 2px 7px; font-size: 10px; }
   #overlayHint {
     position: absolute; left: 16px; bottom: 12px; color: #626c80; font-size: 11px;
     pointer-events: none;
@@ -123,20 +132,34 @@
       not prefetched yet).
     </p>
 
-    <h2>Bodies shown</h2>
-    <p class="sub" style="margin-bottom:8px">
-      <b>Click</b> a body to center the view on it (non-rotating
-      <code>ECLIPJ2000</code>, same as <b>Control+Click</b>).
-      <b>Alt/Option+Click</b> locks the view to that body's own
-      rotating <code>IAU_&lt;BODY&gt;</code> frame instead -- orbit-arc
-      lines are hidden there (the frame itself is spinning, so an
-      "orbit" drawn in it would just retrace that spin, not anything
-      about the other bodies' real trajectories; live marker positions
-      stay exact regardless). <b>Command/Meta+Click</b> (the Windows/Super key on
-      non-Mac keyboards) enters a "precise" single-body mode: centers
-      on just that body and its real satellites (if any), true-to-scale
-      by its own physical radius rather than the whole-system AU scale.
-      Click the active body again (same modifier) to go back.
+    <h2>View controls</h2>
+    <div class="controlGrid">
+      <label for="centerSelect">Center</label>
+      <select id="centerSelect" disabled></select>
+      <label for="frameSelect">Frame</label>
+      <select id="frameSelect" disabled></select>
+      <label for="rotatingCheckbox">Rotating</label>
+      <input id="rotatingCheckbox" type="checkbox" disabled />
+      <label for="orbitSelect">Orbit</label>
+      <select id="orbitSelect" disabled>
+        <option value="ellipse">Ellipse</option>
+        <option value="trajectory">Trajectory</option>
+      </select>
+    </div>
+    <p class="sub" style="margin:0 0 16px">
+      <b>Center</b> and <b>Frame</b> pick bodies independently (e.g.
+      positions relative to Earth, oriented as Jupiter rotates is a
+      valid combination); <b>Rotating</b> decides whether Frame's own
+      <code>IAU_&lt;BODY&gt;</code> orientation is actually used, or
+      the fixed, non-rotating <code>ECLIPJ2000</code> instead.
+      <b>Orbit</b> switches each shown body's arc between an idealized
+      two-body <b>Ellipse</b> (exact right now, always closed) and its
+      real sampled <b>Trajectory</b> over one orbit of whichever body
+      you're centered on -- auto-selected (Ellipse at the Solar System
+      Barycenter, Trajectory anywhere else) but changeable any time.
+      Each row below also has <b>Look</b> (aim the camera at that body
+      without changing any of the above) and <b>From</b> (set Center
+      and Frame to that body at once).
     </p>
     <div id="viewStatus"><span class="label">Viewing from: &ndash;</span></div>
     <ul id="legend"></ul>
@@ -169,6 +192,10 @@ const fileInput = document.getElementById('fileInput');
 const tryNaifBtn = document.getElementById('tryNaifBtn');
 const timeSlider = document.getElementById('timeSlider');
 const timeLabel = document.getElementById('timeLabel');
+const centerSelect = document.getElementById('centerSelect');
+const frameSelect = document.getElementById('frameSelect');
+const rotatingCheckbox = document.getElementById('rotatingCheckbox');
+const orbitSelect = document.getElementById('orbitSelect');
 const legendEl = document.getElementById('legend');
 const preciseLegendEl = document.getElementById('preciseLegend');
 const preciseLegendWrapEl = document.getElementById('preciseLegendWrap');
@@ -281,6 +308,37 @@ const BODIES = [
   { target: 8, bodyId: 899, name: 'Neptune (barycenter)', color: 0x5b7fe0, fallbackRadius: 2.8, iauFrame: 'IAU_NEPTUNE' },
   { target: 9, bodyId: 999, name: 'Pluto (barycenter)', color: 0xbfa6d9, fallbackRadius: 1.4, iauFrame: 'IAU_PLUTO' },
 ];
+
+/**
+ * Fills the CENTER and FRAME <select> elements from BODIES (static
+ * data, so this runs once at module init -- see the bottom of this
+ * file). CENTER also gets a "Solar System Barycenter" option (value
+ * `'SSB'`, the default); FRAME doesn't -- the SSB has no rotating
+ * frame of its own, so there's nothing meaningful to offer there (see
+ * the ROTATING checkbox: FRAME's value is simply inert until it's
+ * checked).
+ */
+function populateViewControls() {
+  const ssbOption = document.createElement('option');
+  ssbOption.value = 'SSB';
+  ssbOption.textContent = 'Solar System Barycenter';
+  centerSelect.appendChild(ssbOption);
+  for (const b of BODIES) {
+    const opt = document.createElement('option');
+    opt.value = String(b.target);
+    opt.textContent = b.name;
+    centerSelect.appendChild(opt);
+  }
+  centerSelect.value = 'SSB';
+
+  for (const b of BODIES) {
+    const opt = document.createElement('option');
+    opt.value = b.iauFrame;
+    opt.textContent = b.iauFrame;
+    frameSelect.appendChild(opt);
+  }
+  frameSelect.value = BODIES[0].iauFrame; // arbitrary until ROTATING is checked
+}
 
 /**
  * Maps a "precise mode" center's real bodyId to the kernels/sources.mjs
@@ -497,7 +555,108 @@ function computeOrbitalEllipse(targetId, primaryId, et, pool) {
   const qHat = new THREE.Vector3().crossVectors(hHat, pHat).normalize();
   const b = a * Math.sqrt(Math.max(0, 1 - e * e));
 
-  return { a, e, b, pHat, qHat };
+  return { a, e, b, pHat, qHat, mu };
+}
+
+/** Kepler's third law, `P = 2*pi*sqrt(a^3/mu)`, from computeOrbitalEllipse()'s own `{ a, mu }` -- used by trajectory mode (below) to size its shared sampling window to CENTER's own real orbital period, without a second vis-viva computation. */
+function periodFromEllipse({ a, mu }) {
+  return 2 * Math.PI * Math.sqrt((a * a * a) / mu);
+}
+
+// ---------------------------------------------------------------------
+// Trajectory mode: real sampled positions, adaptively
+// ---------------------------------------------------------------------
+// An alternative to the analytic ellipse above (see the ORBIT control):
+// each body's *actual* position relative to CENTER, sampled across one
+// of CENTER's own real orbital periods -- not an idealized two-body
+// shape, the real (perturbed, n-body) relative motion, useful
+// specifically once you've moved off the Sun (an ellipse translated
+// from each body's own primary is still exact at the current instant,
+// but "what does the sky actually trace out over one lap around here"
+// is a genuinely different, real question an ellipse doesn't answer).
+//
+// The cost: unlike the ellipse (one state, at the current epoch, per
+// body), this needs each displayed body's *whole* trajectory window
+// prefetched -- potentially a lot of data if CENTER is a slow outer
+// planet (a multi-century window for every body shown).
+//
+// Sampled adaptively rather than at a fixed point count, for the same
+// reason this demo's very first trajectory-sampling design needed it
+// (see git history): a fast body's real motion sampled over a much
+// slower CENTER's period would otherwise alias into a tangled,
+// self-intersecting mess (e.g. Mercury's ~88-day orbit sampled over
+// one ~165-year Neptune year is nearly 700 real orbits). Specific
+// angular momentum (`r x v`) is exactly conserved for two-body motion,
+// so measuring the actual angle swept between two sampled points --
+// rather than assuming a fixed time step -- naturally lands more
+// points where a body is moving fast and fewer where it's slow, for
+// any body, at any span-to-period ratio, with no per-body tuning.
+
+const ARC_MAX_STEP_RAD = (10 * Math.PI) / 180; // no two consecutive plotted points more than 10 degrees apart, as seen from the observer
+const ARC_SEED_COUNT = 24; // evenly-spaced starting points, before adaptive refinement -- guards against the refinement's one real blind spot: it only ever looks *between* two already-sampled points, so if by coincidence two adjacent seeds land at a similar phase, whatever happens between them is invisible to it. More, evenly-spread seeds make that coincidence unlikely; it isn't ruled out.
+const ARC_MAX_SAMPLES = 400; // hard cap on total points per body per arc -- bounds render cost and the O(n^2) refinement scan below (400^2 = 1.6e5 comparisons, trivial once bytes are already prefetched)
+const TRAJECTORY_FALLBACK_HALF_SPAN_DAYS = 30; // CENTER = SSB has no orbital period; only reached if ORBIT is force-set to Trajectory there (see rebuildArcs())
+
+function angleBetweenVectors(p1, p2) {
+  const d1 = Math.hypot(p1[0], p1[1], p1[2]);
+  const d2 = Math.hypot(p2[0], p2[1], p2[2]);
+  if (d1 === 0 || d2 === 0) return 0;
+  const dot = (p1[0] * p2[0] + p1[1] * p2[1] + p1[2] * p2[2]) / (d1 * d2);
+  return Math.acos(Math.max(-1, Math.min(1, dot)));
+}
+
+/**
+ * Samples `target`'s position relative to `observer` across [et0, et1],
+ * adaptively: starts from ARC_SEED_COUNT evenly-spaced points, then
+ * repeatedly bisects whichever consecutive pair currently sweeps the
+ * widest angle (as seen from the observer) until every gap is under
+ * ARC_MAX_STEP_RAD or ARC_MAX_SAMPLES is reached. Returns an array of
+ * `{ et, position }` in time order.
+ */
+function sampleArcAdaptive(target, observer, et0, et1, frame, pool) {
+  const at = (et) => ({ et, position: spkez(target, observer, et, 'NONE', frame, pool).position });
+
+  const samples = [];
+  for (let i = 0; i < ARC_SEED_COUNT; i++) {
+    samples.push(at(et0 + (i / (ARC_SEED_COUNT - 1)) * (et1 - et0)));
+  }
+
+  while (samples.length < ARC_MAX_SAMPLES) {
+    let worstIdx = -1;
+    let worstAngle = ARC_MAX_STEP_RAD;
+    for (let i = 0; i < samples.length - 1; i++) {
+      const angle = angleBetweenVectors(samples[i].position, samples[i + 1].position);
+      if (angle > worstAngle) { worstAngle = angle; worstIdx = i; }
+    }
+    if (worstIdx < 0) break; // every gap is already under threshold
+    samples.splice(worstIdx + 1, 0, at((samples[worstIdx].et + samples[worstIdx + 1].et) / 2));
+  }
+  return samples;
+}
+
+/**
+ * The shared trajectory-mode sampling window, `[et - P/2, et + P/2]`,
+ * where `P` is CENTER's (`demo.viewObserver`'s) own real orbital
+ * period around the Sun -- computed via computeOrbitalEllipse() +
+ * periodFromEllipse() using `centerBody`'s state at `et` (its own
+ * coverage must already include `et`; callers ensure this first, same
+ * as any other body -- see updateSceneForOffset()). Falls back to a
+ * fixed +-30-day window if CENTER is the SSB itself (no orbital period
+ * -- only reachable if ORBIT is manually forced to Trajectory there)
+ * or if the period computation otherwise fails.
+ */
+function trajectoryWindow(centerBody, et) {
+  if (centerBody != null) {
+    try {
+      const ellipse = computeOrbitalEllipse(centerBody.target, SUN_TARGET, et, demo.activeRemote.pool);
+      const halfPeriod = periodFromEllipse(ellipse) / 2;
+      return [et - halfPeriod, et + halfPeriod];
+    } catch (err) {
+      log(`  -> couldn't determine ${centerBody.name}'s real orbital period (${err.message}); using a fallback +-${TRAJECTORY_FALLBACK_HALF_SPAN_DAYS}-day window.`);
+    }
+  }
+  const halfSpan = TRAJECTORY_FALLBACK_HALF_SPAN_DAYS * DAY;
+  return [et - halfSpan, et + halfSpan];
 }
 
 // ---------------------------------------------------------------------
@@ -730,16 +889,25 @@ async function beginSession(remote, { sourceLabel, sourceSizeBytes, counters = n
     remote, et0, sourceLabel, sourceSizeBytes, counters,
     bodies: [], systemBodies: [], mode: 'system', preciseBodyId: null, scale: SYSTEM_SCALE,
     viewObserver: SSB, viewFrame: INERTIAL_FRAME, viewLabel: 'Solar System Barycenter',
+    // ORBIT control state: 'ellipse' (default, analytic two-body
+    // curve) or 'trajectory' (real sampled data over CENTER's own
+    // orbital period -- see trajectoryWindow()/rebuildArcs()).
+    // trajectoryWindow is [etStart, etEnd], recomputed once per
+    // updateSceneForOffset() tick when orbitMode is 'trajectory'.
+    orbitMode: 'ellipse', trajectoryWindow: null,
+    // Look At (lookAtBody()): the target id the camera keeps re-aiming
+    // at across reference-epoch scrubs, independent of CENTER/FRAME;
+    // null means "no explicit look-at target" (camera stays wherever
+    // it was left, same as today).
+    lookAtTarget: null,
     // The "active" remote drives 3D-scene rendering (rebuildArcs(),
     // updateSceneForOffset()'s marker loop, ensureBodyCoverage()) and,
     // in 'precise' mode, can be a *different* kernel than `remote` (a
     // satellite kernel -- see resolveSatellitesFor()). Each body in
     // demo.bodies carries its own b.dataStart/b.dataEnd (see
     // prefetchBodyProbe()/ensureBodyCoverage()) -- just whatever epoch
-    // range has actually been scrubbed to, not a shared window: orbit
-    // arcs are analytic ellipses now (computeOrbitalEllipse()),
-    // recomputed from a single state at a time, not sampled real
-    // trajectory data over a span.
+    // range has actually been visited (a single point for ellipse
+    // mode, a whole window for trajectory mode).
     activeRemote: remote,
     satelliteRemotes: new Map(), // kernelId -> openRemoteSpk() result, fetched at most once per session
   };
@@ -796,33 +964,39 @@ function ensureMarkers() {
 }
 
 /**
- * (Re)builds each body's orbit-arc line as an exact analytic ellipse
- * (computeOrbitalEllipse()) around `centerEt`, in `b.primaryId`'s own
- * rest frame -- translated into the *current view* by the primary's
- * own position relative to `demo.viewObserver` at `centerEt` (zero
- * whenever the primary already IS the current view's center, which is
- * always true in precise mode -- see enterPreciseMode()). This
- * translation is only exact instantaneously (both the primary and the
- * observer are themselves moving), so a body's ellipse only lines up
- * exactly with its live marker position right at `centerEt`; it's a
- * closed analytic curve either way, so it never looks aliased or
- * broken as you scrub, just subtly re-angled frame to frame -- an
- * honest trade-off for a whole-system default view centered on the
- * SSB rather than any one body's own real primary. Called after every
- * "Reference epoch" slider move, so each ellipse reflects the body's
- * *actual current* osculating orbit, not one frozen at the moment the
- * kernel was first opened.
+ * (Re)builds each body's orbit-arc line around `centerEt`, in one of
+ * two modes (the ORBIT control, `demo.orbitMode`):
+ *
+ * - `'ellipse'`: the exact analytic ellipse (computeOrbitalEllipse())
+ *   around `b.primaryId`, translated into the *current view* by the
+ *   primary's own position relative to `demo.viewObserver` at
+ *   `centerEt` (zero whenever the primary already IS the current
+ *   view's center -- always true in precise mode, and whenever CENTER
+ *   is that body's own real primary). This translation is only exact
+ *   instantaneously (both the primary and the observer are themselves
+ *   moving), so a body's ellipse only lines up exactly with its live
+ *   marker position right at `centerEt`; it's a closed analytic curve
+ *   either way, so it never looks aliased or broken as you scrub, just
+ *   subtly re-angled frame to frame.
+ * - `'trajectory'`: `b`'s own *real* position relative to
+ *   `demo.viewObserver`, sampled adaptively (sampleArcAdaptive()) over
+ *   the shared window `demo.trajectoryWindow` computed once per tick
+ *   by updateSceneForOffset() -- see trajectoryWindow(). No primary or
+ *   translation needed: it's the real relative motion directly.
  *
  * A body with no real primary to orbit (b.primaryId == null -- only
- * the Sun, in this demo) gets no arc line at all. Its live marker
- * position (updateSceneForOffset(), unaffected by this) still stays
- * exact regardless.
+ * the Sun, in this demo) gets no ellipse-mode arc; trajectory mode
+ * doesn't need a primary at all, so it's unaffected. Live marker
+ * positions (updateSceneForOffset(), unaffected by any of this) stay
+ * exact regardless of ORBIT mode. Called after every "Reference epoch"
+ * slider move, so each arc reflects the body's *actual current* state,
+ * not one frozen at the moment the kernel was first opened.
  *
- * No arc lines at all -- for any body -- while locked to a rotating
- * IAU_<BODY> frame (demo.viewFrame !== INERTIAL_FRAME): the frame
- * itself is spinning around the clicked body every rotation period, so
- * an "orbit" line drawn in it would just retrace that spin rather than
- * show anything about the other bodies' real trajectories.
+ * No arc lines at all -- for any body, in either mode -- while locked
+ * to a rotating IAU_<BODY> frame (demo.viewFrame !== INERTIAL_FRAME):
+ * the frame itself is spinning around the clicked body every rotation
+ * period, so an "orbit" line drawn in it would just retrace that spin
+ * rather than show anything about the other bodies' real trajectories.
  */
 function rebuildArcs(centerEt) {
   for (const b of demo.bodies) {
@@ -832,6 +1006,24 @@ function rebuildArcs(centerEt) {
     }
   }
   if (demo.viewFrame !== INERTIAL_FRAME) return;
+
+  if (demo.orbitMode === 'trajectory') {
+    const [windowStart, windowEnd] = demo.trajectoryWindow;
+    for (const b of demo.bodies) {
+      if (b.target === demo.viewObserver) continue;
+      try {
+        const samples = sampleArcAdaptive(b.target, demo.viewObserver, windowStart, windowEnd, demo.viewFrame, demo.activeRemote.pool);
+        const arcPoints = samples.map((s) => new THREE.Vector3(...demo.scale.posToScene(s.position)));
+        const arcGeo = new THREE.BufferGeometry().setFromPoints(arcPoints);
+        const arcMat = new THREE.LineBasicMaterial({ color: b.color, transparent: true, opacity: 0.45 });
+        b.arcLine = new THREE.Line(arcGeo, arcMat);
+        scene.add(b.arcLine);
+      } catch (err) {
+        log(`  -> couldn't draw ${b.name}'s trajectory (${err.message})`);
+      }
+    }
+    return;
+  }
 
   for (const b of demo.bodies) {
     if (b.target === demo.viewObserver) continue; // degenerate: always (0,0,0) relative to itself
@@ -857,22 +1049,23 @@ function rebuildArcs(centerEt) {
 }
 
 /**
- * Extends `b`'s own prefetched coverage to include `et`, if it doesn't
- * already -- prefetch() is incremental, so bytes already covering the
- * previous range are never re-fetched, only the new edge is. Called
- * per body from updateSceneForOffset() on every "Reference epoch"
- * slider move; since the orbit-arc line is now an analytic ellipse
- * recomputed from a single state (computeOrbitalEllipse()), not
- * sampled real trajectory data over a span, there's no period-derived
- * margin to maintain any more -- just whatever epoch has actually been
- * scrubbed to, growing b.dataStart/b.dataEnd as needed. In practice a
- * single DAF record's own real coverage (days to weeks, for DE440/
- * satellite SPKs) already gives this a fair amount of built-in slack.
+ * Extends `b`'s own prefetched coverage to include `[etStart, etEnd]`
+ * (a single point, `etStart === etEnd`, for ellipse-mode/marker-only
+ * callers; a whole trajectory window for trajectory mode), if it
+ * doesn't already -- prefetch() is incremental, so bytes already
+ * covering the previous range are never re-fetched, only the new edge
+ * is. Called per body from updateSceneForOffset() on every "Reference
+ * epoch" slider move. In practice a single DAF record's own real
+ * coverage (days to weeks, for DE440/satellite SPKs) already gives a
+ * single-point call a fair amount of built-in slack; a whole-window
+ * trajectory-mode call is real, potentially large, prefetching --
+ * more so for a slow CENTER body, whose period sizes the window for
+ * *every* displayed body, not just itself.
  */
-async function ensureBodyCoverage(b, et) {
-  if (et >= b.dataStart && et <= b.dataEnd) return;
-  const newStart = Math.min(b.dataStart, et);
-  const newEnd = Math.max(b.dataEnd, et);
+async function ensureBodyCoverage(b, etStart, etEnd) {
+  if (etStart >= b.dataStart && etEnd <= b.dataEnd) return;
+  const newStart = Math.min(b.dataStart, etStart);
+  const newEnd = Math.max(b.dataEnd, etEnd);
   const before = demo.counters ? { ...demo.counters } : null;
   await demo.activeRemote.prefetch({ target: b.target, observer: SSB, etStart: newStart, etEnd: newEnd });
   b.dataStart = newStart;
@@ -939,7 +1132,7 @@ async function buildScene() {
       // every body, which is exactly what's needed to compute *any*
       // pairwise (target, observer) state between them afterwards, not
       // just relative to the SSB itself. Switching the view center
-      // (setView() below) never needs a re-prefetch as a result.
+      // (applyViewSettings() below) never needs a re-prefetch as a result.
       await prefetchBodyProbe(demo.remote, body, SUN_TARGET);
     } catch (err) {
       log(`  -> skipped (${err.message})`);
@@ -963,6 +1156,15 @@ async function buildScene() {
   buildPreciseLegend([]);
 
   timeSlider.disabled = false;
+  centerSelect.disabled = false;
+  frameSelect.disabled = false;
+  rotatingCheckbox.disabled = false;
+  orbitSelect.disabled = false;
+  centerSelect.value = 'SSB';
+  rotatingCheckbox.checked = false;
+  orbitSelect.value = 'ellipse';
+  demo.orbitMode = 'ellipse';
+  demo.lookAtTarget = null;
   await updateSceneForOffset(Number(timeSlider.value));
   log(`Scene built -- each body's orbit-arc line is its own exact two-body orbit ellipse. Drag the "Reference epoch" slider to explore.`);
 }
@@ -982,8 +1184,28 @@ function buildLegend(bodiesState) {
     const dist = document.createElement('span');
     dist.className = 'dist';
     dist.id = `dist-${b.target}`;
-    li.append(swatch, name, dist);
-    li.addEventListener('click', (evt) => handleBodyClick(b, evt));
+
+    const actions = document.createElement('span');
+    actions.className = 'rowActions';
+    const lookBtn = document.createElement('button');
+    lookBtn.type = 'button';
+    lookBtn.className = 'secondary';
+    lookBtn.textContent = 'Look';
+    lookBtn.title = `Look at ${b.name} (keeps Center/Frame/Rotating/Orbit as they are)`;
+    lookBtn.addEventListener('click', (evt) => { evt.stopPropagation(); lookAtBody(b); });
+    const fromBtn = document.createElement('button');
+    fromBtn.type = 'button';
+    fromBtn.className = 'secondary';
+    fromBtn.textContent = 'From';
+    fromBtn.title = `View from ${b.name} (sets Center and Frame to ${b.name})`;
+    fromBtn.addEventListener('click', (evt) => {
+      evt.stopPropagation();
+      viewFromBody(b).catch((err) => { log(`ERROR: ${err.message}`); console.error(err); });
+    });
+    actions.append(lookBtn, fromBtn);
+
+    li.append(swatch, name, dist, actions);
+    li.addEventListener('click', (evt) => handlePreciseModeClick(b, evt));
     legendEl.appendChild(li);
   }
   updateLegendActiveState();
@@ -1014,8 +1236,9 @@ function updateLegendActiveState() {
   if (!demo || demo.viewObserver === SSB) return;
   // Legend rows are keyed by `target` (see buildLegend()), and
   // demo.viewObserver is always set to the clicked body's `target` in
-  // both 'system' and 'precise' mode (see setView()/enterPreciseMode()),
-  // so this lookup works identically for both -- no need to special-case
+  // both 'system' and 'precise' mode (see applyViewSettings()/
+  // enterPreciseMode()), so this lookup works identically for both --
+  // no need to special-case
   // `bodyId` (which for the barycenter-positioned outer planets differs
   // from `target`, but was never what the legend row is keyed by).
   const activeLi = document.getElementById(`legend-${demo.viewObserver}`);
@@ -1036,17 +1259,33 @@ function updateViewStatus() {
     ? `${INERTIAL_FRAME}, non-rotating`
     : `locked to ${demo.viewFrame}, rotating`;
   const label = demo.viewObserver === SSB ? 'Solar System Barycenter' : demo.viewLabel;
-  viewStatusLabel.textContent = `Viewing from: ${label} (${orientation})`;
+  const orbit = demo.orbitMode === 'trajectory' ? 'trajectory' : 'ellipse';
+  const lookAt = demo.lookAtTarget != null && demo.lookAtTarget !== demo.viewObserver
+    ? `, looking at ${demo.systemBodies.find((b) => b.target === demo.lookAtTarget)?.name ?? demo.lookAtTarget}`
+    : '';
+  viewStatusLabel.textContent = `Viewing from: ${label} (${orientation} · orbit: ${orbit}${lookAt})`;
 }
 
 /**
- * Re-center (and optionally re-orient) the whole-system view -- no
- * re-prefetch needed, every already-prefetched body can already be
- * used as an observer or a frame reference. Always drops 'precise'
- * mode back to 'system' first if it was active, since every non-precise-mode
- * click means "go back to the whole-system view" (at this new center).
+ * Reads the CENTER/FRAME/ROTATING/ORBIT controls' current values and
+ * pushes them into demo.viewObserver/viewFrame/viewLabel/orbitMode,
+ * then re-renders -- the one place all four controls funnel through
+ * (their own 'change' listeners below, and viewFromBody()). No
+ * re-prefetch needed for the observer/frame change itself -- every
+ * already-prefetched body can already be used as either. Always drops
+ * 'precise' mode back to 'system' first if it was active, since any
+ * system-view control change means "go back to the whole-system view"
+ * (at whatever CENTER/FRAME/ROTATING/ORBIT is now set).
+ *
+ * ORBIT auto-switch: whenever CENTER's value transitions to/from the
+ * SSB (either direction), ORBIT is *defaulted* to 'ellipse'/
+ * 'trajectory' respectively -- "by default, render as Ellipse in the
+ * default Solar System Barycenter view; if View From is changed from
+ * the SSB to a body, convert Orbit to Trajectory." It's a default, not
+ * a lock: the ORBIT select's own value can still be changed
+ * independently afterward, this only fires on a CENTER transition.
  */
-async function setView(observerTarget, frameName, label) {
+async function applyViewSettings() {
   if (!demo) return;
   if (demo.mode === 'precise') {
     clearBodies();
@@ -1057,14 +1296,76 @@ async function setView(observerTarget, frameName, label) {
     demo.bodies = demo.systemBodies; // already carries its own per-body primaryId/dataStart/dataEnd -- nothing to restore separately
     buildPreciseLegend([]);
     resetCameraToDefault();
+    centerSelect.disabled = false;
+    frameSelect.disabled = false;
+    rotatingCheckbox.disabled = false;
+    orbitSelect.disabled = false;
   }
-  demo.viewObserver = observerTarget;
-  demo.viewFrame = frameName;
-  demo.viewLabel = label;
+
+  const newObserver = centerSelect.value === 'SSB' ? SSB : Number(centerSelect.value);
+  const wasSSB = demo.viewObserver === SSB;
+  const isSSB = newObserver === SSB;
+  if (wasSSB !== isSSB) {
+    orbitSelect.value = isSSB ? 'ellipse' : 'trajectory';
+  }
+
+  demo.viewObserver = newObserver;
+  demo.viewFrame = rotatingCheckbox.checked ? frameSelect.value : INERTIAL_FRAME;
+  demo.viewLabel = isSSB ? 'Solar System Barycenter' : (BODIES.find((b) => b.target === newObserver)?.name ?? '');
+  demo.orbitMode = orbitSelect.value;
+
   ensureMarkers();
   await updateSceneForOffset(Number(timeSlider.value));
   updateViewStatus();
   updateLegendActiveState();
+}
+
+/**
+ * "View From" (per-legend-row button): sets CENTER and FRAME to `b`
+ * at once ("change the current FRAME/CENTER value to BODY") and
+ * clears any active Look At target, so the camera's default framing
+ * (the origin -- which is now `b`, since it's the new center) takes
+ * over ("default the LOOK AT to BODY"). ROTATING is left as whatever
+ * it already was -- View From only ever sets *which* body FRAME
+ * refers to, not whether it's actually used.
+ */
+function viewFromBody(b) {
+  if (!demo) return Promise.resolve();
+  centerSelect.value = String(b.target);
+  frameSelect.value = b.iauFrame;
+  demo.lookAtTarget = null;
+  return applyViewSettings();
+}
+
+/**
+ * "Look At" (per-legend-row button): "in the current FRAME/ROTATING/
+ * CENTER, position the camera to look at the selected body" -- does
+ * NOT touch CENTER/FRAME/ROTATING/ORBIT at all, just re-targets the
+ * camera at `b`'s current scene position, translating camera.position
+ * by the same delta so the existing viewing angle/distance is
+ * preserved rather than snapping to a fixed framing. Remembers
+ * `b.target` as demo.lookAtTarget so later reference-epoch scrubs keep
+ * re-aiming at it as it moves (see updateSceneForOffset()) --
+ * otherwise a looked-at body would drift out of view as soon as you
+ * scrub.
+ */
+function lookAtBody(b) {
+  if (!demo) return;
+  demo.lookAtTarget = b.target;
+  reaimCameraAtLookAtTarget();
+  updateViewStatus();
+}
+
+/** Shared by lookAtBody() and updateSceneForOffset()'s per-tick re-aim. No-op if there's no active look-at target, or it isn't currently in demo.bodies (e.g. a satellite left behind after leaving precise mode). */
+function reaimCameraAtLookAtTarget() {
+  if (!demo || demo.lookAtTarget == null) return;
+  const b = demo.bodies.find((body) => body.target === demo.lookAtTarget);
+  if (!b || !b.marker) return;
+  const newTarget = b.marker.position;
+  const delta = newTarget.clone().sub(controls.target);
+  controls.target.copy(newTarget);
+  camera.position.add(delta);
+  controls.update();
 }
 
 /**
@@ -1200,7 +1501,20 @@ async function enterPreciseMode(spec) {
   demo.bodies = included;
   demo.scale = makePreciseScale(centerRadiusKm);
   demo.activeRemote = precRemote;
+  // Precise mode always uses the analytic-ellipse rendering, and never
+  // an active Look At target, regardless of what the (now-disabled --
+  // see below) View controls were left at in the whole-system view.
+  demo.orbitMode = 'ellipse';
+  demo.lookAtTarget = null;
   sunLight.position.set(0, 0, 0); // this system's own center stands in as "the star" for lighting purposes
+
+  // The View controls don't apply to precise mode (a fully separate
+  // feature -- see applyViewSettings()'s own precise-mode teardown,
+  // which re-enables these on the way back out).
+  centerSelect.disabled = true;
+  frameSelect.disabled = true;
+  rotatingCheckbox.disabled = true;
+  orbitSelect.disabled = true;
 
   ensureMarkers();
   buildPreciseLegend(included.filter((b) => !b.isPreciseCenter));
@@ -1210,38 +1524,30 @@ async function enterPreciseMode(spec) {
   updateLegendActiveState();
 }
 
-/** Leaves 'precise' mode, back to the whole-system SSB/ECLIPJ2000 default. */
+/** Leaves 'precise' mode, back to the whole-system Solar System Barycenter view -- ROTATING/FRAME/ORBIT stay whatever they already were (independent controls; see applyViewSettings()), only CENTER changes here. */
 async function exitPreciseMode() {
-  await setView(SSB, INERTIAL_FRAME, 'Solar System Barycenter');
+  centerSelect.value = 'SSB';
+  await applyViewSettings();
 }
 
 /**
- * Click (or Alt/Control/Command+Click) on a "Bodies shown" legend row --
- * see this file's "Bodies shown" hint text for what each combination
- * does. Command/Meta takes priority if held with another modifier.
- * (Not Shift: browsers already overload Shift+Click themselves --
- * e.g. range-extending a selection -- so precise mode uses
- * evt.metaKey instead, which is Cmd on macOS and the Windows/Super key
- * elsewhere, neither of which browsers claim for click handling.)
+ * Command/Meta+Click on a "Bodies shown" legend row toggles "precise"
+ * single-body mode for that body (unchanged from before this file's
+ * View controls existed -- see enterPreciseMode()/exitPreciseMode()).
+ * Plain clicks on the row itself do nothing now; use its own Look/From
+ * buttons instead (see buildLegend()). (Not Shift: browsers already
+ * overload Shift+Click themselves -- e.g. range-extending a selection
+ * -- so precise mode uses evt.metaKey instead, which is Cmd on macOS
+ * and the Windows/Super key elsewhere, neither of which browsers claim
+ * for click handling.)
  */
-function handleBodyClick(b, evt) {
-  if (!demo || modeChangeInFlight) return;
+function handlePreciseModeClick(b, evt) {
+  if (!demo || modeChangeInFlight || !evt.metaKey) return;
   modeChangeInFlight = true;
   const done = () => { modeChangeInFlight = false; };
   const fail = (err) => { log(`ERROR: ${err.message}`); console.error(err); };
-
-  if (evt.metaKey) {
-    const alreadyThisPrecise = demo.mode === 'precise' && demo.preciseBodyId === b.bodyId;
-    (alreadyThisPrecise ? exitPreciseMode() : enterPreciseMode(b)).catch(fail).finally(done);
-    return;
-  }
-
-  const wantFrame = evt.altKey ? b.iauFrame : INERTIAL_FRAME;
-  const alreadyThisView = demo.mode === 'system' && demo.viewObserver === b.target && demo.viewFrame === wantFrame;
-  (alreadyThisView
-    ? setView(SSB, INERTIAL_FRAME, 'Solar System Barycenter')
-    : setView(b.target, wantFrame, b.name)
-  ).catch(fail).finally(done);
+  const alreadyThisPrecise = demo.mode === 'precise' && demo.preciseBodyId === b.bodyId;
+  (alreadyThisPrecise ? exitPreciseMode() : enterPreciseMode(b)).catch(fail).finally(done);
 }
 
 /**
@@ -1249,10 +1555,20 @@ function handleBodyClick(b, evt) {
  * for `offsetDays` from demo.et0, i.e. the "Reference epoch" slider's
  * current position. Async: may extend the prefetch (see
  * ensureBodyCoverage()) first, per body, for whichever currently-shown
- * bodies don't yet have data covering this epoch -- different bodies
- * hit this at different times depending on how far you've scrubbed
- * relative to what's already been visited, so each is checked and
- * extended independently.
+ * bodies don't yet have data covering what's now needed -- different
+ * bodies hit this at different times depending on how far you've
+ * scrubbed relative to what's already been visited, so each is checked
+ * and extended independently.
+ *
+ * In trajectory mode (demo.orbitMode === 'trajectory', and only in the
+ * inertial frame -- same restriction ellipse-mode arcs have), CENTER's
+ * own coverage is ensured first (a single-point probe, to read its
+ * state for the period computation), then `demo.trajectoryWindow` is
+ * (re)computed from it (trajectoryWindow()) and every *other* body's
+ * `ensureBodyCoverage()` call uses that whole window instead of just
+ * `et` -- rebuildArcs() reads `demo.trajectoryWindow` back out to know
+ * what it can safely sample.
+ *
  * `sceneUpdateSeq` guards against a slower, stale call finishing
  * *after* a newer one and clobbering its result -- expected when this
  * fires on every "Reference epoch" 'input' event during a fast drag,
@@ -1264,9 +1580,26 @@ async function updateSceneForOffset(offsetDays) {
   const et = demo.et0 + offsetDays * DAY;
   timeLabel.textContent = `${et2utcCalendar(et)}  (${offsetDays >= 0 ? '+' : ''}${offsetDays.toFixed(2)} d)`;
 
+  const trajectoryActive = demo.orbitMode === 'trajectory' && demo.viewFrame === INERTIAL_FRAME;
+  if (trajectoryActive) {
+    const centerBody = demo.bodies.find((b) => b.target === demo.viewObserver) ?? null;
+    if (centerBody) {
+      try {
+        await ensureBodyCoverage(centerBody, et, et);
+      } catch (err) {
+        log(`  -> couldn't extend prefetch for ${centerBody.name} (${err.message})`);
+      }
+      if (mySeq !== sceneUpdateSeq) return;
+    }
+    demo.trajectoryWindow = trajectoryWindow(centerBody, et);
+  } else {
+    demo.trajectoryWindow = null;
+  }
+
   for (const b of demo.bodies) {
+    const [needStart, needEnd] = trajectoryActive && b.target !== demo.viewObserver ? demo.trajectoryWindow : [et, et];
     try {
-      await ensureBodyCoverage(b, et);
+      await ensureBodyCoverage(b, needStart, needEnd);
     } catch (err) {
       log(`  -> couldn't extend prefetch for ${b.name} (${err.message})`);
     }
@@ -1285,6 +1618,8 @@ async function updateSceneForOffset(offsetDays) {
     b.marker.position.set(x, y, z);
     if (demo.mode === 'system' && b.target === 10) sunLight.position.set(x, y, z);
   }
+
+  reaimCameraAtLookAtTarget(); // keeps an active Look At target (see lookAtBody()) framed as it moves
 
   // Legend AU readouts: always demo.systemBodies (informational even
   // for bodies not currently drawn in 3D -- see 'precise' mode above).
@@ -1327,6 +1662,18 @@ timeSlider.addEventListener('input', () => {
     console.error(err);
   });
 });
+
+// All four View controls funnel through the same applyViewSettings()
+// -- see its own doc comment for the CENTER-transition ORBIT
+// auto-switch.
+for (const control of [centerSelect, frameSelect, rotatingCheckbox, orbitSelect]) {
+  control.addEventListener('change', () => {
+    applyViewSettings().catch((err) => {
+      log(`ERROR: ${err.message}`);
+      console.error(err);
+    });
+  });
+}
 
 viewStatusEl.addEventListener('click', () => {
   if (demo && demo.mode === 'precise') {
@@ -1449,6 +1796,7 @@ async function detectKernelProxy() {
     `Click one above, or use the file picker below.`);
 }
 
+populateViewControls();
 log('Ready. Download a kernel and choose it above to begin (see "1. Get a kernel").');
 detectKernelProxy();
 </script>

@@ -5,11 +5,12 @@ running in an actual browser: pick a real `.bsp` SPK kernel from disk,
 and spiceJS reads only the byte ranges it actually needs out of it --
 via `File.slice()`, never a full upload or a full parse -- to plot ten
 Solar System bodies over an adjustable window around *now*, rendered
-with [three.js](https://threejs.org/). Click a body to re-center the
-view on it, in either a fixed or that body's own rotating frame, or
-Command+Click it (the Windows/Super key on non-Mac keyboards) to drop
-into a true-to-scale single-body-and-its-moons view -- see "Click,
-Control+Click, Alt/Option+Click, Command+Click" below.
+with [three.js](https://threejs.org/). Four explicit controls (Center,
+Frame, Rotating, Orbit) and two per-body actions (Look, From) drive the
+view, or Command+Click a body (the Windows/Super key on non-Mac
+keyboards) to drop into a true-to-scale single-body-and-its-moons view
+-- see "View controls: Center, Frame, Rotating, Orbit, Look, From"
+below.
 
 ## Running it
 
@@ -122,7 +123,7 @@ Verified directly: Earth's own Z-coordinate (which effectively
 only ~30 thousand km in ECLIPJ2000, a ~2000x reduction, at a sample
 epoch checked against the real `de440.bsp`.
 
-## Orbit-arc shape: an exact two-body ellipse
+## Orbit-arc shape: an exact two-body ellipse, or a real sampled trajectory
 
 Earlier versions of this demo drew each orbit-arc line from *sampled
 real trajectory data* -- first over one shared time window applied to
@@ -135,8 +136,18 @@ needed prefetching a whole orbit's worth of data ahead of time, and
 both were still just an approximation of a curve, sampled at finitely
 many points.
 
-The current design skips sampling a trajectory at all: each orbit-arc
-line is the **exact analytic ellipse** implied by the body's own real
+The **Orbit** control picks between two ways of drawing that line,
+and its default depends on **Center**: `Ellipse` at the Solar System
+Barycenter (the whole-system default), `Trajectory` anywhere else --
+auto-selected the moment Center changes, though it's still yours to
+override at any time (e.g. force `Ellipse` back on while centered on
+Mars, or force `Trajectory` on at the SSB, which falls back to a fixed
+&plusmn;30-day window since the SSB has no orbital period of its own
+to size one from).
+
+**Ellipse** (described in the rest of this section) skips sampling a
+trajectory at all: each orbit-arc line is the **exact analytic ellipse**
+implied by the body's own real
 state (position, velocity) and `GM` at the *current* reference epoch,
 via the standard two-body orbital-mechanics identities:
 
@@ -205,6 +216,24 @@ closed curve regardless, just subtly re-angled frame to frame as you
 scrub. Verified live: re-centering on Mars still renders Earth's real
 heliocentric ellipse correctly, translated into Mars's own view.
 
+**Trajectory** mode reintroduces real sampled data, deliberately --
+useful specifically once the vantage point has moved off the Sun/SSB,
+where the tidy ellipse of *one* body stops being the interesting shape
+and what the whole system actually traces out from here (retrograde
+loops and all, the same effect that makes Mars appear to loop
+backwards as seen from Earth) becomes the point. Every displayed body
+except Center itself is sampled directly, adaptively (`spkez(body,
+Center, et, 'NONE', Frame, pool)` at as many points as its angular
+motion needs to stay smooth, capped at 400 samples/body), over one
+shared window `[et - P/2, et + P/2]`, where `P` is *Center's own* real
+heliocentric orbital period -- reusing the same vis-viva math as the
+ellipse case, just to size a sampling window instead of a closed-form
+curve. Because the window is real and shared, it's also real
+prefetching cost: centering on a slow-moving outer planet like Neptune
+or Pluto means fetching a multi-century span for *every* other shown
+body, not just an instant's worth -- worth knowing before scrubbing
+around with Trajectory active on one of them.
+
 ## Bodies shown, and their real relative sizes
 
 Sun (10), Mercury (199), Venus (299), Earth (399), Mars (4), Jupiter
@@ -212,9 +241,9 @@ Sun (10), Mercury (199), Venus (299), Earth (399), Mars (4), Jupiter
 their own body IDs (DE440 carries dedicated segments for them); the
 outer planets stay barycenter-based for *position* (their own offset
 from the barycenter isn't separately modeled -- see `perf/README.md`),
-though see "Alt/Option+Click" below for how their *orientation* still
-uses the real planet. The Moon isn't in this default list even though
-DE440 carries it -- at the whole-system AU scale its marker position
+though see "View controls" above for how their *orientation* (Frame +
+Rotating) still uses the real planet. The Moon isn't in this default
+list even though DE440 carries it -- at the whole-system AU scale its marker position
 is visually indistinguishable from Earth's own (they'd overlap
 completely); **Command+Click Earth** (see below) to see it at a scale
 where it's actually visible.
@@ -238,45 +267,63 @@ marker doesn't grow large enough to swallow Mercury's orbit -- verified
 directly: the chosen scale puts the Sun's marker just inside Mercury's
 real perihelion distance, with margin.
 
-## Click, Control+Click, Alt/Option+Click, Command+Click
+## View controls: Center, Frame, Rotating, Orbit, Look, From
 
-Every legend row supports four click variants, all built on the same
-underlying idea: every position becomes `spkez(otherBody, clickedBody,
-et, 'NONE', someFrame, pool)` instead of `spkez(otherBody, 0, et, ...)`
--- so e.g. clicking Earth shows a geocentric view (Sun ~1 AU away,
-other planets at their true distance from Earth, not the Sun). None of
-these need new prefetching for the *system-wide* bodies: every one was
-already prefetched relative to the SSB, exactly the chain `spkez()`
-needs to compute any pairwise state between two of them.
+Four selects/checkboxes above the legend drive the whole-system view,
+all built on the same underlying idea: every position becomes
+`spkez(otherBody, Center, et, 'NONE', Frame, pool)` instead of
+`spkez(otherBody, 0, et, ...)` -- so e.g. centering on Earth shows a
+geocentric view (Sun ~1 AU away, other planets at their true distance
+from Earth, not the Sun). None of these need new prefetching for the
+*system-wide* bodies' positions: every one was already prefetched
+relative to the SSB, exactly the chain `spkez()` needs to compute any
+pairwise state between two of them (Trajectory mode is the exception --
+see "Orbit-arc shape" above).
 
-- **Click** / **Control+Click** (the same thing): centers on that
-  body, in the fixed, non-rotating `ECLIPJ2000` frame every other
-  system-wide view uses.
-- **Alt/Option+Click**: centers on that body, locked instead to its
-  own rotating `IAU_<BODY>` frame (via `spkez()`'s `ref` parameter,
-  using the classic text-PCK orientation formula and
-  `kernels/pck00011.tpc`'s real constants -- see
-  `src/bodyOrientation.js`). Orbit-arc lines are hidden while a
-  rotating frame is active: the frame itself is spinning around the
-  clicked body every rotation period (Jupiter's is ~10 hours), so an
-  "orbit" line drawn in it would just retrace that spin rather than
-  show anything about the other bodies' real trajectories -- just not
-  a meaningful thing to draw here. Live marker positions stay exact
-  regardless.
+- **Center**: which body's position is the origin -- Solar System
+  Barycenter (default) or any of the ten shown bodies.
+- **Frame**: which body's `IAU_<BODY>` orientation to use *if*
+  Rotating is checked (via `spkez()`'s `ref` parameter, using the
+  classic text-PCK orientation formula and `kernels/pck00011.tpc`'s
+  real constants -- see `src/bodyOrientation.js`). Independent of
+  Center -- e.g. Center=Earth with Frame=`IAU_JUPITER` is a perfectly
+  ordinary "positions relative to Earth, oriented as Jupiter rotates"
+  view, since `spkez()`'s frame rotation doesn't require the frame's
+  center to match the target/observer IDs.
+- **Rotating**: unchecked (default) uses the fixed, non-rotating
+  `ECLIPJ2000` frame every system-wide view starts in; checked locks
+  the view to Frame's own rotating `IAU_<BODY>` orientation instead.
+  Orbit-arc lines are hidden while Rotating is checked: the frame
+  itself is spinning around Frame's body every rotation period
+  (Jupiter's is ~10 hours), so an "orbit" line drawn in it would just
+  retrace that spin rather than show anything about the other bodies'
+  real trajectories -- just not a meaningful thing to draw here. Live
+  marker positions stay exact regardless.
 
   Note: for the outer planets, the *position* used is still the
   barycenter (no separate planet-body segment exists in DE440 for
   them), but the `IAU_<BODY>` frame is keyed to the real planet (e.g.
   `IAU_JUPITER`'s orientation constants are `BODY599_POLE_RA` etc., not
   `BODY5_...` -- confirmed against `pck00011.tpc`, which has no
-  orientation data for barycenters at all). `spkez()`'s frame rotation
-  doesn't require the frame's center to match the target/observer IDs,
-  so this is a perfectly ordinary "shown at the barycenter's position,
-  oriented as the planet actually rotates" view.
-- **Command+Click**: enters "precise" single-body mode -- see below.
+  orientation data for barycenters at all).
+- **Orbit**: `Ellipse` or `Trajectory` -- see "Orbit-arc shape" above.
+- **Look** (per legend row): re-aims the camera at that body without
+  touching Center/Frame/Rotating/Orbit at all -- purely a camera move,
+  preserving the current viewing angle/distance. Stays framed on that
+  body as you scrub the reference-epoch slider afterward.
+- **From** (per legend row): sets Center *and* Frame to that body in
+  one step (Rotating and Orbit are left as they were, except Orbit's
+  own SSB-in/SSB-out auto-switch below), and clears any active Look
+  target.
+- **Command+Click** a body: enters "precise" single-body mode -- see
+  below. All six controls above are disabled while precise mode is
+  active (it's a separate feature, unaffected by any of them) and
+  re-enabled on exit.
 
-Click the active body again with the same modifier to go back to the
-Solar System Barycenter / `ECLIPJ2000` default.
+Changing Center to or from the Solar System Barycenter auto-switches
+Orbit to match (`Ellipse` at the SSB, `Trajectory` anywhere else) --
+just a default, not a lock: Orbit stays independently changeable
+afterward.
 
 ## Command+Click: precise single-body mode
 
