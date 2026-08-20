@@ -688,12 +688,40 @@ function siderealPeriodSeconds(targetId, et, pool) {
 // curve -- relative acceleration spikes and `dt` shrinks to preserve
 // local detail, with no separate per-arc tuning needed. A per-step
 // *pace floor* guarantees the arc still reaches the far edge of its own
-// window within ARC_MAX_SAMPLES regardless -- see
+// window within its sample budget regardless -- and that budget is
+// itself scaled per body, to how many loops its own window implies
+// (arcSampleBudget()), not one flat cap shared by every body -- see
 // trajectoryStepSeconds()/sampleArcAdaptive() below.
 
-const ARC_MAX_SAMPLES = 400; // hard cap on total points per body per arc -- bounds render/prefetch cost regardless of how small the dynamic step comes out
+const ARC_MAX_SAMPLES = 2000; // absolute ceiling on points per body per arc, regardless of loop count -- bounds worst-case render/prefetch/compute cost
+const ARC_MIN_SAMPLES = 100; // floor on the per-body budget below (see arcSampleBudget()) -- comfortably above what a fast, low-loop-count body (Mercury/Venus/Mars, all well under 100 today) already needs on its own, so the budget never *truncates* a body that wasn't hitting any cap to begin with
+const ARC_SAMPLES_PER_LOOP = 24; // target sample density per implied "lap" of CENTER around the Sun within a body's own window -- see arcSampleBudget()
 const TRAJECTORY_STEP_EPSILON_KM = 0.01 * AU_KM; // epsilon: the max positional error per step the dt formula solves for, in the same spatial units as position
 const TRAJECTORY_FALLBACK_HALF_SPAN_DAYS = 30; // used only if a period computation genuinely fails (e.g. an unbound osculating state, or missing prefetch coverage) or (Synodic only) a body's period happens to exactly match CENTER's (infinite synodic period)
+
+/**
+ * How many points sampleArcAdaptive() may spend on one body's arc,
+ * scaled to how many times CENTER itself laps the Sun within that
+ * body's own window (`windowSpan / centerPeriodSeconds`) -- a rough
+ * proxy for how many small retrograde loops the *relative* trajectory
+ * traces (one per CENTER lap), which is what actually needs resolving,
+ * not the displayed body's own (possibly much longer or shorter) period.
+ * A flat cap shared by every body wastes budget on a body that needs
+ * few loops (Jupiter, ~12 within its own Sidereal window centered on
+ * Earth, converges under 300 points) while starving one that needs many
+ * (Neptune, ~164) -- this scales each body's own ceiling instead,
+ * clamped to [ARC_MIN_SAMPLES, ARC_MAX_SAMPLES]. Falls back to the flat
+ * ARC_MAX_SAMPLES ceiling if `centerPeriodSeconds` is `null` (CENTER has
+ * no real period of its own to lap-count against -- the SSB, or the Sun
+ * as CENTER, only reachable with ORBIT manually forced to Trajectory
+ * there).
+ */
+function arcSampleBudget(windowSpanSeconds, centerPeriodSeconds) {
+  if (!(centerPeriodSeconds > 0)) return ARC_MAX_SAMPLES;
+  const impliedLoops = windowSpanSeconds / centerPeriodSeconds;
+  const target = Math.ceil(Math.max(1, impliedLoops) * ARC_SAMPLES_PER_LOOP);
+  return Math.min(ARC_MAX_SAMPLES, Math.max(ARC_MIN_SAMPLES, target));
+}
 
 /**
  * A body's own instantaneous two-body heliocentric acceleration,
@@ -758,14 +786,20 @@ function trajectoryStepSeconds(targetId, centerId, et, pool) {
  * all -- caught live, exactly this way, centered on Earth viewing the
  * outer planets in Sidereal mode.
  *
+ * `maxSamples` (default ARC_MAX_SAMPLES) is normally the per-body
+ * budget arcSampleBudget() computes, scaled to how many loops this
+ * particular body's window actually implies -- see its own comment for
+ * why a single flat cap shared by every body wastes budget on some and
+ * starves others.
+ *
  * Returns an array of `{ et, position }` in time order.
  */
-function sampleArcAdaptive(target, observer, et0, et1, frame, pool) {
+function sampleArcAdaptive(target, observer, et0, et1, frame, pool, maxSamples = ARC_MAX_SAMPLES) {
   const at = (et) => ({ et, position: spkez(target, observer, et, 'NONE', frame, pool).position });
   const samples = [at(et0)];
   let et = et0;
-  while (samples.length < ARC_MAX_SAMPLES && et < et1) {
-    const stepsLeft = ARC_MAX_SAMPLES - samples.length;
+  while (samples.length < maxSamples && et < et1) {
+    const stepsLeft = maxSamples - samples.length;
     const paceFloor = (et1 - et) / stepsLeft;
     const curvatureDt = trajectoryStepSeconds(target, observer, et, pool);
     const dt = curvatureDt > 0 ? Math.max(curvatureDt, paceFloor) : paceFloor;
@@ -1171,11 +1205,13 @@ function ensureMarkers() {
  *   subtly re-angled frame to frame.
  * - `'trajectory'`: `b`'s own *real* position relative to
  *   `demo.viewObserver`, sampled with a curvature-based dynamic step
- *   (sampleArcAdaptive() -- see trajectoryStepSeconds()) over `b`'s own
- *   window (sized per the PERIOD control, `demo.periodMode`),
- *   `demo.trajectoryWindows.get(b.target)`, computed once per tick by
- *   updateSceneForOffset() -- see trajectoryWindowForBody(). No primary
- *   or translation needed: it's the real relative motion directly.
+ *   (sampleArcAdaptive() -- see trajectoryStepSeconds()), up to a
+ *   per-body sample budget scaled to how many loops its own window
+ *   implies (arcSampleBudget()), over `b`'s own window (sized per the
+ *   PERIOD control, `demo.periodMode`), `demo.trajectoryWindows.get(b.target)`,
+ *   computed once per tick by updateSceneForOffset() -- see
+ *   trajectoryWindowForBody(). No primary or translation needed: it's
+ *   the real relative motion directly.
  *
  * A body with no real primary to orbit (b.primaryId == null -- only
  * the Sun, in this demo) gets no ellipse-mode arc; trajectory mode
@@ -1201,13 +1237,26 @@ function rebuildArcs(centerEt) {
   if (demo.viewFrame !== INERTIAL_FRAME) return;
 
   if (demo.orbitMode === 'trajectory') {
+    // CENTER's own period, once per tick -- arcSampleBudget() uses it to
+    // scale each body's own sample ceiling to how many loops its window
+    // actually implies, rather than one flat cap wasting budget on a
+    // body that needs few (Jupiter) while starving one that needs many
+    // (Neptune). `null` (CENTER has no real period of its own -- the
+    // SSB, or the Sun as CENTER) falls back to the flat ceiling.
+    let centerPeriod = null;
+    try {
+      centerPeriod = siderealPeriodSeconds(demo.viewObserver, centerEt, demo.activeRemote.pool);
+    } catch {
+      // Falls back to arcSampleBudget()'s own flat-ceiling default.
+    }
     for (const b of demo.bodies) {
       if (b.target === demo.viewObserver) continue;
       const window = demo.trajectoryWindows?.get(b.target);
       if (!window) continue; // no synodic window computed for this body this tick -- see updateSceneForOffset()
       const [windowStart, windowEnd] = window;
       try {
-        const samples = sampleArcAdaptive(b.target, demo.viewObserver, windowStart, windowEnd, demo.viewFrame, demo.activeRemote.pool);
+        const maxSamples = arcSampleBudget(windowEnd - windowStart, centerPeriod);
+        const samples = sampleArcAdaptive(b.target, demo.viewObserver, windowStart, windowEnd, demo.viewFrame, demo.activeRemote.pool, maxSamples);
         const arcPoints = samples.map((s) => new THREE.Vector3(...demo.scale.posToScene(s.position)));
         const arcGeo = new THREE.BufferGeometry().setFromPoints(arcPoints);
         const arcMat = new THREE.LineBasicMaterial({ color: b.color, transparent: true, opacity: 0.45 });

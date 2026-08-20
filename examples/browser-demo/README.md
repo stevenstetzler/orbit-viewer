@@ -295,22 +295,47 @@ Mercury's real, eccentric orbit (relative to Earth): `dt` comes out to
 ~59 hours near perihelion vs. ~89 hours near aphelion, tracking Mercury's
 own ~1.5x perihelion/aphelion distance ratio.
 
-Capped at 400 samples/body, but every step is also clamped to a **pace
-floor** -- the larger of the curvature step and the exact, evenly-spaced
-step still needed to reach the window's far edge using only the samples
-left in budget -- so the arc always reaches that far edge and always
-passes through (or very near) the body's actual current position,
-degrading gracefully toward plain uniform sampling if it has to rather
-than stopping short. This matters most exactly where it's easy to miss:
-centered on Earth, an outer planet's own Sidereal window can span
-decades, but the *step* the curvature formula wants is dominated by
-Earth's own fast motion (`a_Center`), not the far slower outer planet's
--- without the pace floor, marching at Earth-scale steps never got
-anywhere near covering a Neptune-scale window within 400 samples,
-leaving a visibly incomplete arc that didn't reach the planet's own
-marker at all. Verified live: every outer planet's arc, centered on
-Earth in Sidereal mode, now reaches its own window's far edge exactly
-and spans "now."
+Every step is also clamped to a **pace floor** -- the larger of the
+curvature step and the exact, evenly-spaced step still needed to reach
+the window's far edge using only the samples left in budget -- so the
+arc always reaches that far edge and always passes through (or very
+near) the body's actual current position, degrading gracefully toward
+plain uniform sampling if it has to rather than stopping short. This
+matters most exactly where it's easy to miss: centered on Earth, an
+outer planet's own Sidereal window can span decades, but the *step* the
+curvature formula wants is dominated by Earth's own fast motion
+(`a_Center`), not the far slower outer planet's -- without the pace
+floor, marching at Earth-scale steps never got anywhere near covering a
+Neptune-scale window within budget, leaving a visibly incomplete arc
+that didn't reach the planet's own marker at all. Verified live: every
+outer planet's arc, centered on Earth in Sidereal mode, now reaches its
+own window's far edge exactly and spans "now."
+
+The sample **budget** itself isn't one flat number shared by every
+body, either: it's scaled to how many times CENTER itself laps the Sun
+within that body's own window -- a rough proxy for how many small
+retrograde loops the *relative* trajectory actually traces (one per
+CENTER lap, the real thing that needs resolving, not the displayed
+body's own often much longer or shorter period). A flat cap wastes
+budget on a body that implies few loops while starving one that implies
+many: measured live, centered on Earth in Sidereal mode, Jupiter's
+window implies ~12 loops, Neptune's ~164 -- a shared 400-point cap gave
+Jupiter a smooth ~34 points/loop but Neptune only ~2.4, badly aliased.
+Each body's own budget now targets ~24 points/loop (`ceil(loops * 24)`),
+clamped to [100, 2000] (the floor keeps a handful of fast, low-loop
+bodies -- Mercury, Venus, Mars, none of which were ever hitting even the
+old flat cap -- untouched; the ceiling bounds worst-case cost). Verified
+live: Jupiter now settles at 282 points (~24/loop, matching its own
+natural resolution almost exactly, and *fewer* than the old flat 400);
+Saturn at 704 (~24/loop); Uranus and Neptune both hit the 2000-point
+ceiling (~24 and ~12 points/loop respectively -- Neptune's own ~164
+implied loops need more than the ceiling allows for the full target
+density, a real, accepted trade-off against render/compute cost, still
+a 5x improvement over the old flat cap). The added compute cost is
+real: measured live, a full trajectory-mode re-render centered on Earth
+(the single most expensive case, since Earth's own fast motion drives
+every other body's implied loop count up) takes ~200ms of synchronous
+work -- noticeable on a slider drag, not a hang.
 
 Because each window is real (and, in Synodic mode, can be very long for
 a body whose period is close to Center's own -- a near-1:1 resonance
