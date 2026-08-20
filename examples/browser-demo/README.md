@@ -223,20 +223,42 @@ and what the whole system actually traces out from here (retrograde
 loops and all, the same effect that makes Mars appear to loop
 backwards as seen from Earth) becomes the point. Every displayed body
 except Center itself is sampled directly (`spkez(body, Center, et,
-'NONE', Frame, pool)`), each over its **own** window `[et - S/2, et +
-S/2]`, where `S` is that body's *synodic* period against Center -- not
-Center's own heliocentric period, which is the wrong lap length for
-anything except a body that happens to share it. The synodic-period
-identity is the classic one, usually written for Earth specifically
-(`S = T_Earth*T_planet / |T_planet - T_Earth|`), generalized here since
-Center can be any displayed body, not just Earth:
-`S = T_Center*T_body / |T_body - T_Center|`, both periods from the same
-vis-viva math the ellipse case uses. Centered on Mars, Jupiter's own
-~12-year period alone would give far too short a window to show a full
-relative lap around Mars, and Mercury's would give far too long --
-verified against real astronomical values: this demo's own computed
-Mars/Earth synodic period comes out to ~780.1 days, matching the
-well-known real figure.
+'NONE', Frame, pool)`), each over its **own** window `[et - P/2, et +
+P/2]` -- what counts as one full lap, `P`, is picked by the **Period**
+control:
+
+- **Sidereal** (default): each body's own real orbital period,
+  independent of Center entirely -- the time to complete one full orbit
+  relative to a fixed, non-rotating reference. Computed from vis-viva
+  using the body's state *relative to the SSB itself* (not the Sun),
+  since `mu` still needs the Sun's `GM` as its dominant-mass term either
+  way, and (unlike computing this relative to the Sun) this makes the
+  Sun's own state well-defined too -- see below.
+- **Synodic**: each body's period *relative to Center* instead -- the
+  classic two-body synodic-period identity, usually written for Earth
+  specifically (`S = T_Earth*T_planet / |T_planet - T_Earth|`),
+  generalized here since Center can be any displayed body:
+  `S = T_Center*T_body / |T_body - T_Center|`. Centered on Mars,
+  Jupiter's own ~12-year sidereal period alone would give far too short
+  a window to show a full relative lap around Mars, and Mercury's would
+  give far too long -- Synodic answers "how long until this body's
+  position *relative to here* repeats" instead. Verified against real
+  astronomical values: this demo's own computed Mars/Earth synodic
+  period comes out to ~780 days (Sidereal periods computed relative to
+  the SSB, not the Sun, carry a little more numerical noise than the
+  ellipse case's Sun-relative ones -- close, not exact, to the textbook
+  780.1). As Center's own period grows very large (approaching the SSB
+  itself, which has none), Synodic mathematically reduces to Sidereal,
+  so no special-casing is needed for Center = SSB either.
+
+Neither mode has a meaningful "period" for the **Sun** itself: it isn't
+orbiting anything in the two-body sense, so both throw a clear, expected
+error and fall back to a fixed &plusmn;30-day window for the Sun's own
+arc specifically (same treatment Ellipse mode already gives it -- "no
+real primary to orbit," just applied to periods here). This replaced an
+earlier, more confusing version of the same fallback that computed the
+Sun's period *relative to itself* (identically zero -- "rectilinear
+orbit, zero angular momentum") instead of relative to the SSB.
 
 Sampled at a per-body time step `dt ~= 0.01 AU / |v_body - v_Center|`
 (both velocities relative to the SSB, at the window's reference epoch)
@@ -244,13 +266,14 @@ rather than a fixed point count -- fast relative motion (near
 conjunction/opposition, or very different orbital speeds) gets a fine
 step, slow relative motion (near-identical orbits) gets a coarse one,
 capped at 400 samples/body either way. Because each window is real
-(and, for a body whose period is close to Center's own, can be very
-long -- a near-1:1 resonance drives the synodic period toward
-infinity), it's also real prefetching cost, per body: centering on a
-slow-moving outer planet like Neptune or Pluto means a real, sometimes
-large, prefetch for whichever other body's synodic period against it
-happens to be long -- worth knowing before scrubbing around with
-Trajectory active there.
+(and, in Synodic mode, can be very long for a body whose period is
+close to Center's own -- a near-1:1 resonance drives the synodic period
+toward infinity; in Sidereal mode, a slow real body like Pluto has a
+real ~249-year window regardless of Center), it's also real prefetching
+cost, per body -- worth knowing before scrubbing around with Trajectory
+active on a kernel with limited real temporal coverage (e.g. `de440s`
+only covers 1849-2150, so Pluto's own +-124.5-year Sidereal window can
+push right up against that edge depending on "now").
 
 ## Bodies shown, and their real relative sizes
 
@@ -325,6 +348,8 @@ see "Orbit-arc shape" above).
   `BODY5_...` -- confirmed against `pck00011.tpc`, which has no
   orientation data for barycenters at all).
 - **Orbit**: `Ellipse` or `Trajectory` -- see "Orbit-arc shape" above.
+- **Period** (Trajectory only): `Sidereal` (default) or `Synodic` --
+  see "Orbit-arc shape" above.
 - **Look** (per legend row): re-aims the camera at that body without
   touching Center/Frame/Rotating/Orbit at all -- purely a camera move,
   preserving the current viewing angle/distance. Stays framed on that
@@ -334,7 +359,7 @@ see "Orbit-arc shape" above).
   own SSB-in/SSB-out auto-switch below), and clears any active Look
   target.
 - **Command+Click** a body: enters "precise" single-body mode -- see
-  below. All six controls above are disabled while precise mode is
+  below. All seven controls above are disabled while precise mode is
   active (it's a separate feature, unaffected by any of them) and
   re-enabled on exit.
 
@@ -342,6 +367,16 @@ Changing Center to or from the Solar System Barycenter auto-switches
 Orbit to match (`Ellipse` at the SSB, `Trajectory` anywhere else) --
 just a default, not a lock: Orbit stays independently changeable
 afterward.
+
+The background circular grid spans 1000 AU (in scene units -- see
+`SCENE_UNITS_PER_AU`), deliberately oversized so it stays visible as a
+spatial reference no matter how far a view ends up zoomed or panned out
+-- Trajectory mode centered on a distant outer planet can put other
+bodies' relative distances well past the default view's own scale. The
+camera's far clipping plane was widened to match (otherwise the grid
+itself would just be invisibly clipped) -- verified live: scroll-zoomed
+out past the grid's *old* far-plane limit (1000 scene units, ~238 AU)
+to ~1200 scene units and confirmed the grid still renders.
 
 ## Command+Click: precise single-body mode
 

@@ -145,6 +145,11 @@
         <option value="ellipse">Ellipse</option>
         <option value="trajectory">Trajectory</option>
       </select>
+      <label for="periodSelect">Period</label>
+      <select id="periodSelect" disabled>
+        <option value="sidereal">Sidereal</option>
+        <option value="synodic">Synodic</option>
+      </select>
     </div>
     <p class="sub" style="margin:0 0 16px">
       <b>Center</b> and <b>Frame</b> pick bodies independently (e.g.
@@ -157,9 +162,13 @@
       real sampled <b>Trajectory</b> over one orbit of whichever body
       you're centered on -- auto-selected (Ellipse at the Solar System
       Barycenter, Trajectory anywhere else) but changeable any time.
-      Each row below also has <b>Look</b> (aim the camera at that body
-      without changing any of the above) and <b>From</b> (set Center
-      and Frame to that body at once).
+      <b>Period</b> (Trajectory only) picks what "one orbit" means per
+      body: <b>Sidereal</b> (each body's own real orbital period) or
+      <b>Synodic</b> (each body's period relative to Center instead --
+      how long its position relative to here takes to repeat). Each row
+      below also has <b>Look</b> (aim the camera at that body without
+      changing any of the above) and <b>From</b> (set Center and Frame
+      to that body at once).
     </p>
     <div id="viewStatus"><span class="label">Viewing from: &ndash;</span></div>
     <ul id="legend"></ul>
@@ -196,6 +205,7 @@ const centerSelect = document.getElementById('centerSelect');
 const frameSelect = document.getElementById('frameSelect');
 const rotatingCheckbox = document.getElementById('rotatingCheckbox');
 const orbitSelect = document.getElementById('orbitSelect');
+const periodSelect = document.getElementById('periodSelect');
 const legendEl = document.getElementById('legend');
 const preciseLegendEl = document.getElementById('preciseLegend');
 const preciseLegendWrapEl = document.getElementById('preciseLegendWrap');
@@ -216,6 +226,7 @@ function resetLog(line) {
 // AU, for scaling km positions down to a sane Three.js scene size.
 const AU_KM = 149597870.7;
 const DAY = 86400;
+const SCENE_UNITS_PER_AU = 4.2; // shared by kmToScene() (below) and the background grid's radius (see three.js scene setup)
 
 // Marker size: real relative body radii (from BODY<id>_RADII, via
 // bodyValues() -- see the BODIES comment above), not hand-picked
@@ -563,40 +574,106 @@ function periodFromEllipse({ a, mu }) {
   return 2 * Math.PI * Math.sqrt((a * a * a) / mu);
 }
 
+/**
+ * A body's own **sidereal** period: the time to complete one full orbit
+ * relative to a fixed, non-rotating reference -- here `targetId`'s own
+ * state *relative to the SSB itself*, not relative to the Sun (unlike
+ * computeOrbitalEllipse(), used for the exact instantaneous ellipse
+ * elsewhere). Vis-viva only needs `a` (semi-major axis) for a period,
+ * not the full orbital-plane geometry computeOrbitalEllipse() also
+ * derives -- so this never throws on a "rectilinear orbit" (zero
+ * angular momentum), only on a genuinely unbound state.
+ *
+ * The SSB itself has no GM of its own (it's a massless mathematical
+ * point, not a body with mass) -- `mu` still needs an approximating
+ * "primary" mass for the two-body vis-viva formula to mean anything, so
+ * this uses the Sun's GM (from `kernels/gm_de440.tpc`, same source
+ * computeOrbitalEllipse() uses) plus `targetId`'s own, same reduced
+ * two-body mu approximation as everywhere else in this demo -- accurate
+ * to the extent the Sun dominates the system's mass (>99.8%; verified
+ * against known real periods: Earth comes out ~367.3 days vs the real
+ * 365.25, Jupiter ~4313.7 vs 4332.6, both within ~0.5%).
+ *
+ * The Sun itself is the one deliberate exception, always throwing:
+ * unlike relative to the Sun specifically (identically zero, `r = 0`,
+ * degenerate), the Sun's state relative to the SSB *is* real and
+ * nonzero -- Jupiter's pull keeps it perpetually off-center, in a real
+ * wobble -- but vis-viva only means "period" when `mu` approximates the
+ * mass actually gravitating the body around that point, and here `mu`
+ * (the Sun's own GM) instead approximates *the body itself*: computing
+ * this literally gives a well-defined but physically meaningless number
+ * (verified live: ~53 minutes) -- the Sun's real reflex motion is a
+ * superposition of every planet's pull, dominated by Jupiter's ~12-year
+ * period, not a two-body orbit around anything. Same treatment ellipse
+ * mode already gives the Sun ("no real primary to orbit -- no orbit-arc
+ * line"), just applied to periods instead of ellipses.
+ */
+function siderealPeriodSeconds(targetId, et, pool) {
+  if (targetId === SUN_TARGET) {
+    throw new Error("the Sun has no well-defined orbital period of its own (it isn't orbiting anything in the two-body sense -- its motion around the SSB is a superposition of every other body's pull)");
+  }
+  const muSun = bodyValues(SUN_TARGET, 'GM', demo.remote.pool)[0];
+  let muTarget = 0;
+  try {
+    muTarget = bodyValues(targetId, 'GM', demo.remote.pool)[0];
+  } catch {
+    // No real GM for this body -- treated as massless, still resolves.
+  }
+  const mu = muSun + muTarget;
+
+  const { position, velocity } = spkez(targetId, SSB, et, 'NONE', INERTIAL_FRAME, pool);
+  const rMag = Math.hypot(...position);
+  const vMag = Math.hypot(...velocity);
+  const invSemiMajorAxis = 2 / rMag - (vMag * vMag) / mu;
+  if (invSemiMajorAxis <= 0) {
+    throw new Error('orbit around the SSB is not bound (unbound/parabolic) at this epoch');
+  }
+  return periodFromEllipse({ a: 1 / invSemiMajorAxis, mu });
+}
+
 // ---------------------------------------------------------------------
-// Trajectory mode: real sampled positions, one synodic period at a time
+// Trajectory mode: real sampled positions, one period at a time
 // ---------------------------------------------------------------------
 // An alternative to the analytic ellipse above (see the ORBIT control):
 // each body's *actual* position relative to CENTER, sampled across one
-// full lap of its relative geometry with CENTER -- not an idealized
-// two-body shape, the real (perturbed, n-body) relative motion, useful
-// specifically once you've moved off the Sun (an ellipse translated
-// from each body's own primary is still exact at the current instant,
-// but "what does the sky actually trace out over one lap around here"
-// is a genuinely different, real question an ellipse doesn't answer).
+// full lap -- not an idealized two-body shape, the real (perturbed,
+// n-body) relative motion, useful specifically once you've moved off
+// the Sun (an ellipse translated from each body's own primary is still
+// exact at the current instant, but "what does the sky actually trace
+// out over one lap around here" is a genuinely different, real question
+// an ellipse doesn't answer).
 //
-// "One full lap" is each body's own *synodic* period relative to
-// CENTER, not CENTER's own heliocentric period: the relative geometry
-// between CENTER and some other body P doesn't repeat after CENTER's
-// own year, it repeats after the classic two-body synodic-period
-// identity (usually written for Earth specifically; B is just
-// whichever body is CENTER here):
+// "One full lap" is controlled by the PERIOD control:
 //
-//   S = T_B * T_P / |T_P - T_B|
+// - Sidereal (default): each body's own real orbital period,
+//   independent of CENTER entirely -- siderealPeriodSeconds() above.
+// - Synodic: each body's period *relative to CENTER* -- the time for
+//   their relative geometry to repeat, which (unlike CENTER's own
+//   period, or the body's own sidereal period) is what actually decides
+//   how long it takes the sky to retrace itself as seen from CENTER.
+//   The classic two-body synodic-period identity (usually written for
+//   Earth specifically; B is just whichever body is CENTER here):
 //
-// (the textbook version splits this into a "superior planet"/"inferior
-// planet" case by the sign of the denominator; |T_P - T_B| is the same
-// thing without the branch). Centered on Mars, Jupiter's own ~12-year
-// period would give far too short a window to show a full relative lap
-// around Mars, and Mercury's would give far too long -- each body needs
-// its *own* synodic period against CENTER, not one shared window sized
-// off CENTER alone. See synodicWindow() below.
+//     S = T_B * T_P / |T_P - T_B|
+//
+//   (the textbook version splits this into a "superior planet"/
+//   "inferior planet" case by the sign of the denominator; |T_P - T_B|
+//   is the same thing without the branch). As T_B -> infinity (CENTER
+//   effectively not orbiting anything, i.e. the SSB itself) this
+//   reduces to S -> T_P, the body's own sidereal period -- so Synodic
+//   needs no special-casing for CENTER = SSB either.
+//
+// Either way, each body needs its *own* window sized to its own period
+// against CENTER, not one window shared by every body (Centered on
+// Mars, Jupiter's own ~12-year period alone would give far too short a
+// window to show a full relative lap around Mars, and Mercury's would
+// give far too long). See trajectoryWindowForBody() below.
 //
 // The cost: unlike the ellipse (one state, at the current epoch, per
-// body), this needs each displayed body's *whole* synodic window
-// prefetched -- potentially a lot of data for a body whose period is
-// close to CENTER's own (a near-1:1 resonance drives the synodic
-// period toward infinity).
+// body), this needs each displayed body's *whole* window prefetched --
+// potentially a lot of data, especially in Synodic mode for a body
+// whose period is close to CENTER's own (a near-1:1 resonance drives
+// the synodic period toward infinity).
 //
 // Sampled at a fixed time step per body, `dt ~= 0.01 AU / |v_P - v_B|`
 // (both velocities relative to the SSB, at the window's reference
@@ -607,7 +684,7 @@ function periodFromEllipse({ a, mu }) {
 
 const ARC_MAX_SAMPLES = 400; // hard cap on total points per body per arc -- bounds render/prefetch cost regardless of how small trajectoryStepSeconds() comes out
 const TRAJECTORY_STEP_DISTANCE_KM = 0.01 * AU_KM; // the 0.01 AU target separation per sampled step, from dt ~= 0.01 AU / |v_P - v_B|
-const TRAJECTORY_FALLBACK_HALF_SPAN_DAYS = 30; // used when CENTER is the SSB/Sun itself (no heliocentric period), a body has none either (the Sun, viewed from anywhere else), or its period happens to exactly match CENTER's (infinite synodic period)
+const TRAJECTORY_FALLBACK_HALF_SPAN_DAYS = 30; // used only if a period computation genuinely fails (e.g. an unbound osculating state, or missing prefetch coverage) or (Synodic only) a body's period happens to exactly match CENTER's (infinite synodic period)
 
 /**
  * Trajectory-mode sampling step size for `targetId`'s arc relative to
@@ -646,34 +723,40 @@ function sampleArcAtStep(target, observer, et0, et1, dtSeconds, frame, pool) {
 }
 
 /**
- * `body`'s trajectory-mode sampling window relative to CENTER,
- * `[et - S/2, et + S/2]`, where `S` is the *synodic* period between
- * `body` and `centerBody` -- see the section comment above for the
- * `S = T_center*T_body / |T_body - T_center|` identity. Both periods
- * come from computeOrbitalEllipse() + periodFromEllipse() using each
- * body's own state at `et` (coverage must already include `et`;
- * callers ensure this first, same as any other body -- see
- * updateSceneForOffset()). Falls back to a fixed +-30-day window if
- * `centerBody` is null (CENTER is the SSB, which has no heliocentric
- * period of its own -- only reachable if ORBIT is manually forced to
- * Trajectory there), either period computation fails (e.g. `centerBody`
- * or `body` is the Sun itself), or the two periods coincide exactly (a
+ * `body`'s trajectory-mode sampling window, `[et - P/2, et + P/2]`,
+ * where `P` depends on `periodMode` (the PERIOD control):
+ *
+ * - `'sidereal'`: `body`'s own real orbital period
+ *   (siderealPeriodSeconds()) -- independent of `centerBody` entirely.
+ * - `'synodic'`: the *synodic* period between `body` and `centerBody`
+ *   -- see the section comment above for the
+ *   `S = T_center*T_body / |T_body - T_center|` identity. If
+ *   `centerBody` is null (CENTER is the SSB), this is mathematically
+ *   the sidereal-period limit anyway, so it's handled the same as
+ *   `'sidereal'` rather than as a special case.
+ *
+ * Falls back to a fixed +-30-day window if a period computation
+ * genuinely fails (e.g. an unbound osculating state, or `body`'s
+ * coverage at `et` genuinely missing -- callers ensure this first, same
+ * as any other body, see updateSceneForOffset()), or (Synodic only)
+ * `body`'s period happens to coincide exactly with `centerBody`'s (a
  * 1:1 resonance -- an infinite synodic period).
  */
-function synodicWindow(centerBody, body, et, pool) {
-  if (centerBody != null) {
-    try {
-      const centerPeriod = periodFromEllipse(computeOrbitalEllipse(centerBody.target, SUN_TARGET, et, pool));
-      const bodyPeriod = periodFromEllipse(computeOrbitalEllipse(body.target, SUN_TARGET, et, pool));
-      const denom = Math.abs(bodyPeriod - centerPeriod);
-      if (denom > 0) {
-        const halfSynodic = (centerPeriod * bodyPeriod) / denom / 2;
-        return [et - halfSynodic, et + halfSynodic];
-      }
-      log(`  -> ${body.name}'s period matches ${centerBody.name}'s exactly (infinite synodic period); using a fallback +-${TRAJECTORY_FALLBACK_HALF_SPAN_DAYS}-day window.`);
-    } catch (err) {
-      log(`  -> couldn't determine ${body.name}'s synodic period relative to ${centerBody.name} (${err.message}); using a fallback +-${TRAJECTORY_FALLBACK_HALF_SPAN_DAYS}-day window.`);
+function trajectoryWindowForBody(centerBody, body, et, pool, periodMode) {
+  try {
+    const bodyPeriod = siderealPeriodSeconds(body.target, et, pool);
+    if (periodMode !== 'synodic' || centerBody == null) {
+      return [et - bodyPeriod / 2, et + bodyPeriod / 2];
     }
+    const centerPeriod = siderealPeriodSeconds(centerBody.target, et, pool);
+    const denom = Math.abs(bodyPeriod - centerPeriod);
+    if (denom > 0) {
+      const halfSynodic = (centerPeriod * bodyPeriod) / denom / 2;
+      return [et - halfSynodic, et + halfSynodic];
+    }
+    log(`  -> ${body.name}'s period matches ${centerBody.name}'s exactly (infinite synodic period); using a fallback +-${TRAJECTORY_FALLBACK_HALF_SPAN_DAYS}-day window.`);
+  } catch (err) {
+    log(`  -> couldn't determine ${body.name}'s ${periodMode} trajectory window (${err.message}); using a fallback +-${TRAJECTORY_FALLBACK_HALF_SPAN_DAYS}-day window.`);
   }
   const halfSpan = TRAJECTORY_FALLBACK_HALF_SPAN_DAYS * DAY;
   return [et - halfSpan, et + halfSpan];
@@ -689,7 +772,14 @@ scene.background = new THREE.Color(0x05070d);
 // A small near plane -- centering on a body (see "Bodies shown" below)
 // can put things like the Moon's orbit at a tiny scene-unit scale, and
 // scroll-zooming in close to see it shouldn't clip through the near plane.
-const camera = new THREE.PerspectiveCamera(50, viewport.clientWidth / viewport.clientHeight, 0.0005, 1000);
+// A far plane wide enough to hold the whole background grid (see
+// GRID_RADIUS_AU below) regardless of how far a view centers/zooms --
+// Trajectory mode centered on a slow outer planet can put another
+// body's own window comfortably past DE440's own ~50 AU native range,
+// and the grid itself is deliberately oversized (1000 AU) to always
+// stay on screen no matter how far out that goes.
+const GRID_RADIUS_AU = 1000;
+const camera = new THREE.PerspectiveCamera(50, viewport.clientWidth / viewport.clientHeight, 0.0005, GRID_RADIUS_AU * SCENE_UNITS_PER_AU * 1.2);
 const DEFAULT_CAMERA_POSITION = new THREE.Vector3(0, 22, 34);
 camera.position.copy(DEFAULT_CAMERA_POSITION);
 
@@ -705,7 +795,11 @@ scene.add(new THREE.AmbientLight(0xffffff, 0.6));
 const sunLight = new THREE.PointLight(0xffffff, 2, 0, 0);
 scene.add(sunLight);
 
-const grid = new THREE.PolarGridHelper(30, 8, 8, 64, 0x1c2230, 0x141924);
+// Radius in *scene* units, not AU -- always 1000 AU across, so it stays
+// visible as a spatial reference no matter how far a view is zoomed or
+// panned out (e.g. Trajectory mode centered on a distant outer planet,
+// where other bodies' relative distances can dwarf the default view).
+const grid = new THREE.PolarGridHelper(GRID_RADIUS_AU * SCENE_UNITS_PER_AU, 8, 8, 64, 0x1c2230, 0x141924);
 scene.add(grid);
 
 window.addEventListener('resize', () => {
@@ -780,7 +874,7 @@ function kmToScene(posKm) {
   const auX = posKm[0] / AU_KM;
   const auY = posKm[1] / AU_KM;
   const auZ = posKm[2] / AU_KM;
-  const scale = 4.2; // scene units per AU
+  const scale = SCENE_UNITS_PER_AU;
   // Positions arrive already rotated into whatever frame is currently
   // active (see spkez()'s `ref` calls below) -- for the default inertial
   // view that's ECLIPJ2000, whose Z axis *is* the ecliptic pole by
@@ -910,13 +1004,17 @@ async function beginSession(remote, { sourceLabel, sourceSizeBytes, counters = n
     bodies: [], systemBodies: [], mode: 'system', preciseBodyId: null, scale: SYSTEM_SCALE,
     viewObserver: SSB, viewFrame: INERTIAL_FRAME, viewLabel: 'Solar System Barycenter',
     // ORBIT control state: 'ellipse' (default, analytic two-body
-    // curve) or 'trajectory' (real sampled data, one body's own
-    // synodic period against CENTER at a time -- see
-    // synodicWindow()/rebuildArcs()). trajectoryWindows is a
-    // `Map<target, [etStart, etEnd]>`, one entry per displayed body
-    // other than CENTER, recomputed once per updateSceneForOffset()
-    // tick when orbitMode is 'trajectory'.
+    // curve) or 'trajectory' (real sampled data, one body's own window
+    // at a time -- see trajectoryWindowForBody()/rebuildArcs()).
+    // trajectoryWindows is a `Map<target, [etStart, etEnd]>`, one entry
+    // per displayed body other than CENTER, recomputed once per
+    // updateSceneForOffset() tick when orbitMode is 'trajectory'.
     orbitMode: 'ellipse', trajectoryWindows: null,
+    // PERIOD control state: 'sidereal' (default, each body's own real
+    // orbital period, independent of CENTER) or 'synodic' (each body's
+    // period *relative to CENTER* instead) -- only meaningful when
+    // orbitMode is 'trajectory'; see trajectoryWindowForBody().
+    periodMode: 'sidereal',
     // Look At (lookAtBody()): the target id the camera keeps re-aiming
     // at across reference-epoch scrubs, independent of CENTER/FRAME;
     // null means "no explicit look-at target" (camera stays wherever
@@ -1002,11 +1100,11 @@ function ensureMarkers() {
  *   subtly re-angled frame to frame.
  * - `'trajectory'`: `b`'s own *real* position relative to
  *   `demo.viewObserver`, sampled at a fixed step (sampleArcAtStep()) --
- *   see trajectoryStepSeconds() -- over `b`'s own synodic-period window
- *   against CENTER, `demo.trajectoryWindows.get(b.target)`, computed
- *   once per tick by updateSceneForOffset() -- see synodicWindow(). No
- *   primary or translation needed: it's the real relative motion
- *   directly.
+ *   see trajectoryStepSeconds() -- over `b`'s own window (sized per the
+ *   PERIOD control, `demo.periodMode`), `demo.trajectoryWindows.get(b.target)`,
+ *   computed once per tick by updateSceneForOffset() -- see
+ *   trajectoryWindowForBody(). No primary or translation needed: it's
+ *   the real relative motion directly.
  *
  * A body with no real primary to orbit (b.primaryId == null -- only
  * the Sun, in this demo) gets no ellipse-mode arc; trajectory mode
@@ -1187,10 +1285,13 @@ async function buildScene() {
   frameSelect.disabled = false;
   rotatingCheckbox.disabled = false;
   orbitSelect.disabled = false;
+  periodSelect.disabled = false;
   centerSelect.value = 'SSB';
   rotatingCheckbox.checked = false;
   orbitSelect.value = 'ellipse';
+  periodSelect.value = 'sidereal';
   demo.orbitMode = 'ellipse';
+  demo.periodMode = 'sidereal';
   demo.lookAtTarget = null;
   await updateSceneForOffset(Number(timeSlider.value));
   log(`Scene built -- each body's orbit-arc line is its own exact two-body orbit ellipse. Drag the "Reference epoch" slider to explore.`);
@@ -1287,10 +1388,11 @@ function updateViewStatus() {
     : `locked to ${demo.viewFrame}, rotating`;
   const label = demo.viewObserver === SSB ? 'Solar System Barycenter' : demo.viewLabel;
   const orbit = demo.orbitMode === 'trajectory' ? 'trajectory' : 'ellipse';
+  const period = demo.orbitMode === 'trajectory' ? `, period: ${demo.periodMode}` : '';
   const lookAt = demo.lookAtTarget != null && demo.lookAtTarget !== demo.viewObserver
     ? `, looking at ${demo.systemBodies.find((b) => b.target === demo.lookAtTarget)?.name ?? demo.lookAtTarget}`
     : '';
-  viewStatusLabel.textContent = `Viewing from: ${label} (${orientation} · orbit: ${orbit}${lookAt})`;
+  viewStatusLabel.textContent = `Viewing from: ${label} (${orientation} · orbit: ${orbit}${period}${lookAt})`;
 }
 
 /**
@@ -1327,6 +1429,7 @@ async function applyViewSettings() {
     frameSelect.disabled = false;
     rotatingCheckbox.disabled = false;
     orbitSelect.disabled = false;
+    periodSelect.disabled = false;
   }
 
   const newObserver = centerSelect.value === 'SSB' ? SSB : Number(centerSelect.value);
@@ -1341,6 +1444,7 @@ async function applyViewSettings() {
   demo.viewFrame = rotatingCheckbox.checked ? frameSelect.value : INERTIAL_FRAME;
   demo.viewLabel = isSSB ? 'Solar System Barycenter' : (BODIES.find((b) => b.target === newObserver)?.name ?? '');
   demo.orbitMode = orbitSelect.value;
+  demo.periodMode = periodSelect.value;
 
   ensureMarkers();
   await updateSceneForOffset(Number(timeSlider.value));
@@ -1579,6 +1683,7 @@ async function enterPreciseMode(spec) {
   frameSelect.disabled = true;
   rotatingCheckbox.disabled = true;
   orbitSelect.disabled = true;
+  periodSelect.disabled = true;
 
   ensureMarkers();
   buildPreciseLegend(included.filter((b) => !b.isPreciseCenter));
@@ -1628,16 +1733,16 @@ function handlePreciseModeClick(b, evt) {
  *
  * 1. Every body's state *at* `et` itself, unconditionally -- needed for
  *    its own marker position below, and (in trajectory mode) because
- *    computing a body's own heliocentric period -- see synodicWindow()
- *    -- needs to read its real state at `et` first.
+ *    computing a body's own period -- see siderealPeriodSeconds() --
+ *    needs to read its real state at `et` first.
  * 2. Trajectory mode only (demo.orbitMode === 'trajectory', and only in
  *    the inertial frame -- same restriction ellipse-mode arcs have):
  *    now that every body's state at `et` is available, each *other*
- *    body's own sampling window is sized to its synodic period against
- *    CENTER (synodicWindow()) -- not one shared window sized off
- *    CENTER alone, since different bodies need very different spans to
- *    show a full relative lap -- and that body's prefetch is extended
- *    to cover it. Recorded in `demo.trajectoryWindows`
+ *    body's own sampling window is sized per the PERIOD control
+ *    (trajectoryWindowForBody(), `demo.periodMode`) -- not one shared
+ *    window sized off CENTER alone, since different bodies need very
+ *    different spans to show a full relative lap -- and that body's
+ *    prefetch is extended to cover it. Recorded in `demo.trajectoryWindows`
  *    (`Map<target, [etStart, etEnd]>`); rebuildArcs() reads it back out
  *    to know what it can safely sample. CENTER's *own* coverage is also
  *    extended here, to the union of every other body's window -- every
@@ -1681,7 +1786,7 @@ async function updateSceneForOffset(offsetDays) {
     let centerUnionEnd = et;
     for (const b of demo.bodies) {
       if (b.target === demo.viewObserver) continue;
-      const window = synodicWindow(centerBody, b, et, demo.activeRemote.pool);
+      const window = trajectoryWindowForBody(centerBody, b, et, demo.activeRemote.pool, demo.periodMode);
       demo.trajectoryWindows.set(b.target, window);
       centerUnionStart = Math.min(centerUnionStart, window[0]);
       centerUnionEnd = Math.max(centerUnionEnd, window[1]);
@@ -1763,10 +1868,10 @@ timeSlider.addEventListener('input', () => {
   });
 });
 
-// All four View controls funnel through the same applyViewSettings()
+// All five View controls funnel through the same applyViewSettings()
 // -- see its own doc comment for the CENTER-transition ORBIT
 // auto-switch.
-for (const control of [centerSelect, frameSelect, rotatingCheckbox, orbitSelect]) {
+for (const control of [centerSelect, frameSelect, rotatingCheckbox, orbitSelect, periodSelect]) {
   control.addEventListener('change', () => {
     applyViewSettings().catch((err) => {
       log(`ERROR: ${err.message}`);
