@@ -558,101 +558,121 @@ function computeOrbitalEllipse(targetId, primaryId, et, pool) {
   return { a, e, b, pHat, qHat, mu };
 }
 
-/** Kepler's third law, `P = 2*pi*sqrt(a^3/mu)`, from computeOrbitalEllipse()'s own `{ a, mu }` -- used by trajectory mode (below) to size its shared sampling window to CENTER's own real orbital period, without a second vis-viva computation. */
+/** Kepler's third law, `P = 2*pi*sqrt(a^3/mu)`, from computeOrbitalEllipse()'s own `{ a, mu }` -- used by trajectory mode (below) to get each body's own real heliocentric period, without a second vis-viva computation. */
 function periodFromEllipse({ a, mu }) {
   return 2 * Math.PI * Math.sqrt((a * a * a) / mu);
 }
 
 // ---------------------------------------------------------------------
-// Trajectory mode: real sampled positions, adaptively
+// Trajectory mode: real sampled positions, one synodic period at a time
 // ---------------------------------------------------------------------
 // An alternative to the analytic ellipse above (see the ORBIT control):
 // each body's *actual* position relative to CENTER, sampled across one
-// of CENTER's own real orbital periods -- not an idealized two-body
-// shape, the real (perturbed, n-body) relative motion, useful
+// full lap of its relative geometry with CENTER -- not an idealized
+// two-body shape, the real (perturbed, n-body) relative motion, useful
 // specifically once you've moved off the Sun (an ellipse translated
 // from each body's own primary is still exact at the current instant,
 // but "what does the sky actually trace out over one lap around here"
 // is a genuinely different, real question an ellipse doesn't answer).
 //
-// The cost: unlike the ellipse (one state, at the current epoch, per
-// body), this needs each displayed body's *whole* trajectory window
-// prefetched -- potentially a lot of data if CENTER is a slow outer
-// planet (a multi-century window for every body shown).
+// "One full lap" is each body's own *synodic* period relative to
+// CENTER, not CENTER's own heliocentric period: the relative geometry
+// between CENTER and some other body P doesn't repeat after CENTER's
+// own year, it repeats after the classic two-body synodic-period
+// identity (usually written for Earth specifically; B is just
+// whichever body is CENTER here):
 //
-// Sampled adaptively rather than at a fixed point count, for the same
-// reason this demo's very first trajectory-sampling design needed it
-// (see git history): a fast body's real motion sampled over a much
-// slower CENTER's period would otherwise alias into a tangled,
-// self-intersecting mess (e.g. Mercury's ~88-day orbit sampled over
-// one ~165-year Neptune year is nearly 700 real orbits). Specific
-// angular momentum (`r x v`) is exactly conserved for two-body motion,
-// so measuring the actual angle swept between two sampled points --
-// rather than assuming a fixed time step -- naturally lands more
-// points where a body is moving fast and fewer where it's slow, for
-// any body, at any span-to-period ratio, with no per-body tuning.
+//   S = T_B * T_P / |T_P - T_B|
+//
+// (the textbook version splits this into a "superior planet"/"inferior
+// planet" case by the sign of the denominator; |T_P - T_B| is the same
+// thing without the branch). Centered on Mars, Jupiter's own ~12-year
+// period would give far too short a window to show a full relative lap
+// around Mars, and Mercury's would give far too long -- each body needs
+// its *own* synodic period against CENTER, not one shared window sized
+// off CENTER alone. See synodicWindow() below.
+//
+// The cost: unlike the ellipse (one state, at the current epoch, per
+// body), this needs each displayed body's *whole* synodic window
+// prefetched -- potentially a lot of data for a body whose period is
+// close to CENTER's own (a near-1:1 resonance drives the synodic
+// period toward infinity).
+//
+// Sampled at a fixed time step per body, `dt ~= 0.01 AU / |v_P - v_B|`
+// (both velocities relative to the SSB, at the window's reference
+// epoch) -- fast relative motion (near conjunction/opposition, or very
+// different orbital speeds) gets a fine step, slow relative motion
+// (near-identical orbits) gets a coarse one. See
+// trajectoryStepSeconds()/sampleArcAtStep() below.
 
-const ARC_MAX_STEP_RAD = (10 * Math.PI) / 180; // no two consecutive plotted points more than 10 degrees apart, as seen from the observer
-const ARC_SEED_COUNT = 24; // evenly-spaced starting points, before adaptive refinement -- guards against the refinement's one real blind spot: it only ever looks *between* two already-sampled points, so if by coincidence two adjacent seeds land at a similar phase, whatever happens between them is invisible to it. More, evenly-spread seeds make that coincidence unlikely; it isn't ruled out.
-const ARC_MAX_SAMPLES = 400; // hard cap on total points per body per arc -- bounds render cost and the O(n^2) refinement scan below (400^2 = 1.6e5 comparisons, trivial once bytes are already prefetched)
-const TRAJECTORY_FALLBACK_HALF_SPAN_DAYS = 30; // CENTER = SSB has no orbital period; only reached if ORBIT is force-set to Trajectory there (see rebuildArcs())
+const ARC_MAX_SAMPLES = 400; // hard cap on total points per body per arc -- bounds render/prefetch cost regardless of how small trajectoryStepSeconds() comes out
+const TRAJECTORY_STEP_DISTANCE_KM = 0.01 * AU_KM; // the 0.01 AU target separation per sampled step, from dt ~= 0.01 AU / |v_P - v_B|
+const TRAJECTORY_FALLBACK_HALF_SPAN_DAYS = 30; // used when CENTER is the SSB/Sun itself (no heliocentric period), a body has none either (the Sun, viewed from anywhere else), or its period happens to exactly match CENTER's (infinite synodic period)
 
-function angleBetweenVectors(p1, p2) {
-  const d1 = Math.hypot(p1[0], p1[1], p1[2]);
-  const d2 = Math.hypot(p2[0], p2[1], p2[2]);
-  if (d1 === 0 || d2 === 0) return 0;
-  const dot = (p1[0] * p2[0] + p1[1] * p2[1] + p1[2] * p2[2]) / (d1 * d2);
-  return Math.acos(Math.max(-1, Math.min(1, dot)));
+/**
+ * Trajectory-mode sampling step size for `targetId`'s arc relative to
+ * `centerId`: `dt = TRAJECTORY_STEP_DISTANCE_KM / |v_target - v_center|`,
+ * both velocities relative to the SSB (not to CENTER itself) at `et` --
+ * the actual real-space closing/separating speed between the two
+ * bodies, not an artifact of CENTER's own motion. Returns `null` if the
+ * two velocities happen to coincide exactly (e.g. `targetId ===
+ * centerId`) -- callers fall back to ARC_MAX_SAMPLES over the window.
+ */
+function trajectoryStepSeconds(targetId, centerId, et, pool) {
+  const { velocity: vTarget } = spkez(targetId, SSB, et, 'NONE', INERTIAL_FRAME, pool);
+  const { velocity: vCenter } = spkez(centerId, SSB, et, 'NONE', INERTIAL_FRAME, pool);
+  const relSpeed = Math.hypot(vTarget[0] - vCenter[0], vTarget[1] - vCenter[1], vTarget[2] - vCenter[2]);
+  return relSpeed > 0 ? TRAJECTORY_STEP_DISTANCE_KM / relSpeed : null;
 }
 
 /**
- * Samples `target`'s position relative to `observer` across [et0, et1],
- * adaptively: starts from ARC_SEED_COUNT evenly-spaced points, then
- * repeatedly bisects whichever consecutive pair currently sweeps the
- * widest angle (as seen from the observer) until every gap is under
- * ARC_MAX_STEP_RAD or ARC_MAX_SAMPLES is reached. Returns an array of
- * `{ et, position }` in time order.
+ * Samples `target`'s position relative to `observer` uniformly across
+ * [et0, et1] at step `dtSeconds` (see trajectoryStepSeconds()), capped
+ * at ARC_MAX_SAMPLES total points (a `null` step, or one that would
+ * need more than that many, just uses ARC_MAX_SAMPLES evenly spaced
+ * across the whole window instead). Returns an array of `{ et,
+ * position }` in time order.
  */
-function sampleArcAdaptive(target, observer, et0, et1, frame, pool) {
-  const at = (et) => ({ et, position: spkez(target, observer, et, 'NONE', frame, pool).position });
-
+function sampleArcAtStep(target, observer, et0, et1, dtSeconds, frame, pool) {
+  const span = et1 - et0;
+  const wanted = dtSeconds > 0 ? Math.ceil(span / dtSeconds) + 1 : ARC_MAX_SAMPLES;
+  const count = Math.max(2, Math.min(ARC_MAX_SAMPLES, wanted));
   const samples = [];
-  for (let i = 0; i < ARC_SEED_COUNT; i++) {
-    samples.push(at(et0 + (i / (ARC_SEED_COUNT - 1)) * (et1 - et0)));
-  }
-
-  while (samples.length < ARC_MAX_SAMPLES) {
-    let worstIdx = -1;
-    let worstAngle = ARC_MAX_STEP_RAD;
-    for (let i = 0; i < samples.length - 1; i++) {
-      const angle = angleBetweenVectors(samples[i].position, samples[i + 1].position);
-      if (angle > worstAngle) { worstAngle = angle; worstIdx = i; }
-    }
-    if (worstIdx < 0) break; // every gap is already under threshold
-    samples.splice(worstIdx + 1, 0, at((samples[worstIdx].et + samples[worstIdx + 1].et) / 2));
+  for (let i = 0; i < count; i++) {
+    const et = et0 + (i / (count - 1)) * span;
+    samples.push({ et, position: spkez(target, observer, et, 'NONE', frame, pool).position });
   }
   return samples;
 }
 
 /**
- * The shared trajectory-mode sampling window, `[et - P/2, et + P/2]`,
- * where `P` is CENTER's (`demo.viewObserver`'s) own real orbital
- * period around the Sun -- computed via computeOrbitalEllipse() +
- * periodFromEllipse() using `centerBody`'s state at `et` (its own
- * coverage must already include `et`; callers ensure this first, same
- * as any other body -- see updateSceneForOffset()). Falls back to a
- * fixed +-30-day window if CENTER is the SSB itself (no orbital period
- * -- only reachable if ORBIT is manually forced to Trajectory there)
- * or if the period computation otherwise fails.
+ * `body`'s trajectory-mode sampling window relative to CENTER,
+ * `[et - S/2, et + S/2]`, where `S` is the *synodic* period between
+ * `body` and `centerBody` -- see the section comment above for the
+ * `S = T_center*T_body / |T_body - T_center|` identity. Both periods
+ * come from computeOrbitalEllipse() + periodFromEllipse() using each
+ * body's own state at `et` (coverage must already include `et`;
+ * callers ensure this first, same as any other body -- see
+ * updateSceneForOffset()). Falls back to a fixed +-30-day window if
+ * `centerBody` is null (CENTER is the SSB, which has no heliocentric
+ * period of its own -- only reachable if ORBIT is manually forced to
+ * Trajectory there), either period computation fails (e.g. `centerBody`
+ * or `body` is the Sun itself), or the two periods coincide exactly (a
+ * 1:1 resonance -- an infinite synodic period).
  */
-function trajectoryWindow(centerBody, et) {
+function synodicWindow(centerBody, body, et, pool) {
   if (centerBody != null) {
     try {
-      const ellipse = computeOrbitalEllipse(centerBody.target, SUN_TARGET, et, demo.activeRemote.pool);
-      const halfPeriod = periodFromEllipse(ellipse) / 2;
-      return [et - halfPeriod, et + halfPeriod];
+      const centerPeriod = periodFromEllipse(computeOrbitalEllipse(centerBody.target, SUN_TARGET, et, pool));
+      const bodyPeriod = periodFromEllipse(computeOrbitalEllipse(body.target, SUN_TARGET, et, pool));
+      const denom = Math.abs(bodyPeriod - centerPeriod);
+      if (denom > 0) {
+        const halfSynodic = (centerPeriod * bodyPeriod) / denom / 2;
+        return [et - halfSynodic, et + halfSynodic];
+      }
+      log(`  -> ${body.name}'s period matches ${centerBody.name}'s exactly (infinite synodic period); using a fallback +-${TRAJECTORY_FALLBACK_HALF_SPAN_DAYS}-day window.`);
     } catch (err) {
-      log(`  -> couldn't determine ${centerBody.name}'s real orbital period (${err.message}); using a fallback +-${TRAJECTORY_FALLBACK_HALF_SPAN_DAYS}-day window.`);
+      log(`  -> couldn't determine ${body.name}'s synodic period relative to ${centerBody.name} (${err.message}); using a fallback +-${TRAJECTORY_FALLBACK_HALF_SPAN_DAYS}-day window.`);
     }
   }
   const halfSpan = TRAJECTORY_FALLBACK_HALF_SPAN_DAYS * DAY;
@@ -890,11 +910,13 @@ async function beginSession(remote, { sourceLabel, sourceSizeBytes, counters = n
     bodies: [], systemBodies: [], mode: 'system', preciseBodyId: null, scale: SYSTEM_SCALE,
     viewObserver: SSB, viewFrame: INERTIAL_FRAME, viewLabel: 'Solar System Barycenter',
     // ORBIT control state: 'ellipse' (default, analytic two-body
-    // curve) or 'trajectory' (real sampled data over CENTER's own
-    // orbital period -- see trajectoryWindow()/rebuildArcs()).
-    // trajectoryWindow is [etStart, etEnd], recomputed once per
-    // updateSceneForOffset() tick when orbitMode is 'trajectory'.
-    orbitMode: 'ellipse', trajectoryWindow: null,
+    // curve) or 'trajectory' (real sampled data, one body's own
+    // synodic period against CENTER at a time -- see
+    // synodicWindow()/rebuildArcs()). trajectoryWindows is a
+    // `Map<target, [etStart, etEnd]>`, one entry per displayed body
+    // other than CENTER, recomputed once per updateSceneForOffset()
+    // tick when orbitMode is 'trajectory'.
+    orbitMode: 'ellipse', trajectoryWindows: null,
     // Look At (lookAtBody()): the target id the camera keeps re-aiming
     // at across reference-epoch scrubs, independent of CENTER/FRAME;
     // null means "no explicit look-at target" (camera stays wherever
@@ -979,10 +1001,12 @@ function ensureMarkers() {
  *   either way, so it never looks aliased or broken as you scrub, just
  *   subtly re-angled frame to frame.
  * - `'trajectory'`: `b`'s own *real* position relative to
- *   `demo.viewObserver`, sampled adaptively (sampleArcAdaptive()) over
- *   the shared window `demo.trajectoryWindow` computed once per tick
- *   by updateSceneForOffset() -- see trajectoryWindow(). No primary or
- *   translation needed: it's the real relative motion directly.
+ *   `demo.viewObserver`, sampled at a fixed step (sampleArcAtStep()) --
+ *   see trajectoryStepSeconds() -- over `b`'s own synodic-period window
+ *   against CENTER, `demo.trajectoryWindows.get(b.target)`, computed
+ *   once per tick by updateSceneForOffset() -- see synodicWindow(). No
+ *   primary or translation needed: it's the real relative motion
+ *   directly.
  *
  * A body with no real primary to orbit (b.primaryId == null -- only
  * the Sun, in this demo) gets no ellipse-mode arc; trajectory mode
@@ -1008,11 +1032,14 @@ function rebuildArcs(centerEt) {
   if (demo.viewFrame !== INERTIAL_FRAME) return;
 
   if (demo.orbitMode === 'trajectory') {
-    const [windowStart, windowEnd] = demo.trajectoryWindow;
     for (const b of demo.bodies) {
       if (b.target === demo.viewObserver) continue;
+      const window = demo.trajectoryWindows?.get(b.target);
+      if (!window) continue; // no synodic window computed for this body this tick -- see updateSceneForOffset()
+      const [windowStart, windowEnd] = window;
       try {
-        const samples = sampleArcAdaptive(b.target, demo.viewObserver, windowStart, windowEnd, demo.viewFrame, demo.activeRemote.pool);
+        const dt = trajectoryStepSeconds(b.target, demo.viewObserver, centerEt, demo.activeRemote.pool);
+        const samples = sampleArcAtStep(b.target, demo.viewObserver, windowStart, windowEnd, dt, demo.viewFrame, demo.activeRemote.pool);
         const arcPoints = samples.map((s) => new THREE.Vector3(...demo.scale.posToScene(s.position)));
         const arcGeo = new THREE.BufferGeometry().setFromPoints(arcPoints);
         const arcMat = new THREE.LineBasicMaterial({ color: b.color, transparent: true, opacity: 0.45 });
@@ -1305,6 +1332,7 @@ async function applyViewSettings() {
   const newObserver = centerSelect.value === 'SSB' ? SSB : Number(centerSelect.value);
   const wasSSB = demo.viewObserver === SSB;
   const isSSB = newObserver === SSB;
+  const observerChanged = newObserver !== demo.viewObserver;
   if (wasSSB !== isSSB) {
     orbitSelect.value = isSSB ? 'ellipse' : 'trajectory';
   }
@@ -1316,6 +1344,15 @@ async function applyViewSettings() {
 
   ensureMarkers();
   await updateSceneForOffset(Number(timeSlider.value));
+  // Re-center the camera on CENTER's new position (the scene origin)
+  // whenever CENTER actually changed, unless a Look At target is
+  // active -- updateSceneForOffset() above already re-aimed the camera
+  // at that target's (possibly just-recomputed) position instead, via
+  // reaimCameraAtLookAtTarget(). See recenterCameraAtOrigin()'s own
+  // comment for the bug this fixes (Look, then From on a new body).
+  if (observerChanged && demo.lookAtTarget == null) {
+    recenterCameraAtOrigin();
+  }
   updateViewStatus();
   updateLegendActiveState();
 }
@@ -1361,11 +1398,38 @@ function reaimCameraAtLookAtTarget() {
   if (!demo || demo.lookAtTarget == null) return;
   const b = demo.bodies.find((body) => body.target === demo.lookAtTarget);
   if (!b || !b.marker) return;
-  const newTarget = b.marker.position;
+  reaimCameraAt(b.marker.position);
+}
+
+/**
+ * Shared delta-translate camera move: re-targets `controls.target` at
+ * `newTarget`, translating `camera.position` by the same delta so the
+ * current viewing angle/distance is preserved rather than snapping to
+ * a fixed framing. Used both by reaimCameraAtLookAtTarget() (aims at a
+ * body's current marker position) and recenterCameraAtOrigin() below
+ * (aims at the scene origin, i.e. CENTER's own position).
+ */
+function reaimCameraAt(newTarget) {
   const delta = newTarget.clone().sub(controls.target);
   controls.target.copy(newTarget);
   camera.position.add(delta);
   controls.update();
+}
+
+/**
+ * Re-centers the camera on the scene origin -- always CENTER's own
+ * position, by construction (every marker is placed via
+ * `spkez(target, demo.viewObserver, ...)`, and CENTER relative to
+ * itself is exactly zero). Called by applyViewSettings() whenever
+ * CENTER actually changes (e.g. "View From") and there's no active
+ * Look At target overriding it: without this, the camera stays
+ * wherever a previous Look click (or manual drag) left it, aimed at
+ * nothing in particular in the new view, until the user drags again --
+ * reported live as "click Look, then From on a new body: the camera
+ * goes off-center and stays that way."
+ */
+function recenterCameraAtOrigin() {
+  reaimCameraAt(new THREE.Vector3(0, 0, 0));
 }
 
 /**
@@ -1560,14 +1624,22 @@ function handlePreciseModeClick(b, evt) {
  * scrubbed relative to what's already been visited, so each is checked
  * and extended independently.
  *
- * In trajectory mode (demo.orbitMode === 'trajectory', and only in the
- * inertial frame -- same restriction ellipse-mode arcs have), CENTER's
- * own coverage is ensured first (a single-point probe, to read its
- * state for the period computation), then `demo.trajectoryWindow` is
- * (re)computed from it (trajectoryWindow()) and every *other* body's
- * `ensureBodyCoverage()` call uses that whole window instead of just
- * `et` -- rebuildArcs() reads `demo.trajectoryWindow` back out to know
- * what it can safely sample.
+ * Two prefetch passes:
+ *
+ * 1. Every body's state *at* `et` itself, unconditionally -- needed for
+ *    its own marker position below, and (in trajectory mode) because
+ *    computing a body's own heliocentric period -- see synodicWindow()
+ *    -- needs to read its real state at `et` first.
+ * 2. Trajectory mode only (demo.orbitMode === 'trajectory', and only in
+ *    the inertial frame -- same restriction ellipse-mode arcs have):
+ *    now that every body's state at `et` is available, each *other*
+ *    body's own sampling window is sized to its synodic period against
+ *    CENTER (synodicWindow()) -- not one shared window sized off
+ *    CENTER alone, since different bodies need very different spans to
+ *    show a full relative lap -- and that body's prefetch is extended
+ *    to cover it. Recorded in `demo.trajectoryWindows`
+ *    (`Map<target, [etStart, etEnd]>`); rebuildArcs() reads it back out
+ *    to know what it can safely sample.
  *
  * `sceneUpdateSeq` guards against a slower, stale call finishing
  * *after* a newer one and clobbering its result -- expected when this
@@ -1580,30 +1652,31 @@ async function updateSceneForOffset(offsetDays) {
   const et = demo.et0 + offsetDays * DAY;
   timeLabel.textContent = `${et2utcCalendar(et)}  (${offsetDays >= 0 ? '+' : ''}${offsetDays.toFixed(2)} d)`;
 
-  const trajectoryActive = demo.orbitMode === 'trajectory' && demo.viewFrame === INERTIAL_FRAME;
-  if (trajectoryActive) {
-    const centerBody = demo.bodies.find((b) => b.target === demo.viewObserver) ?? null;
-    if (centerBody) {
-      try {
-        await ensureBodyCoverage(centerBody, et, et);
-      } catch (err) {
-        log(`  -> couldn't extend prefetch for ${centerBody.name} (${err.message})`);
-      }
-      if (mySeq !== sceneUpdateSeq) return;
-    }
-    demo.trajectoryWindow = trajectoryWindow(centerBody, et);
-  } else {
-    demo.trajectoryWindow = null;
-  }
-
   for (const b of demo.bodies) {
-    const [needStart, needEnd] = trajectoryActive && b.target !== demo.viewObserver ? demo.trajectoryWindow : [et, et];
     try {
-      await ensureBodyCoverage(b, needStart, needEnd);
+      await ensureBodyCoverage(b, et, et);
     } catch (err) {
       log(`  -> couldn't extend prefetch for ${b.name} (${err.message})`);
     }
     if (mySeq !== sceneUpdateSeq) return; // a newer update superseded this one while we were awaiting
+  }
+
+  const trajectoryActive = demo.orbitMode === 'trajectory' && demo.viewFrame === INERTIAL_FRAME;
+  demo.trajectoryWindows = null;
+  if (trajectoryActive) {
+    const centerBody = demo.bodies.find((b) => b.target === demo.viewObserver) ?? null;
+    demo.trajectoryWindows = new Map();
+    for (const b of demo.bodies) {
+      if (b.target === demo.viewObserver) continue;
+      const window = synodicWindow(centerBody, b, et, demo.activeRemote.pool);
+      demo.trajectoryWindows.set(b.target, window);
+      try {
+        await ensureBodyCoverage(b, window[0], window[1]);
+      } catch (err) {
+        log(`  -> couldn't extend prefetch for ${b.name} (${err.message})`);
+      }
+      if (mySeq !== sceneUpdateSeq) return;
+    }
   }
 
   for (const b of demo.bodies) {

@@ -222,17 +222,35 @@ where the tidy ellipse of *one* body stops being the interesting shape
 and what the whole system actually traces out from here (retrograde
 loops and all, the same effect that makes Mars appear to loop
 backwards as seen from Earth) becomes the point. Every displayed body
-except Center itself is sampled directly, adaptively (`spkez(body,
-Center, et, 'NONE', Frame, pool)` at as many points as its angular
-motion needs to stay smooth, capped at 400 samples/body), over one
-shared window `[et - P/2, et + P/2]`, where `P` is *Center's own* real
-heliocentric orbital period -- reusing the same vis-viva math as the
-ellipse case, just to size a sampling window instead of a closed-form
-curve. Because the window is real and shared, it's also real
-prefetching cost: centering on a slow-moving outer planet like Neptune
-or Pluto means fetching a multi-century span for *every* other shown
-body, not just an instant's worth -- worth knowing before scrubbing
-around with Trajectory active on one of them.
+except Center itself is sampled directly (`spkez(body, Center, et,
+'NONE', Frame, pool)`), each over its **own** window `[et - S/2, et +
+S/2]`, where `S` is that body's *synodic* period against Center -- not
+Center's own heliocentric period, which is the wrong lap length for
+anything except a body that happens to share it. The synodic-period
+identity is the classic one, usually written for Earth specifically
+(`S = T_Earth*T_planet / |T_planet - T_Earth|`), generalized here since
+Center can be any displayed body, not just Earth:
+`S = T_Center*T_body / |T_body - T_Center|`, both periods from the same
+vis-viva math the ellipse case uses. Centered on Mars, Jupiter's own
+~12-year period alone would give far too short a window to show a full
+relative lap around Mars, and Mercury's would give far too long --
+verified against real astronomical values: this demo's own computed
+Mars/Earth synodic period comes out to ~780.1 days, matching the
+well-known real figure.
+
+Sampled at a per-body time step `dt ~= 0.01 AU / |v_body - v_Center|`
+(both velocities relative to the SSB, at the window's reference epoch)
+rather than a fixed point count -- fast relative motion (near
+conjunction/opposition, or very different orbital speeds) gets a fine
+step, slow relative motion (near-identical orbits) gets a coarse one,
+capped at 400 samples/body either way. Because each window is real
+(and, for a body whose period is close to Center's own, can be very
+long -- a near-1:1 resonance drives the synodic period toward
+infinity), it's also real prefetching cost, per body: centering on a
+slow-moving outer planet like Neptune or Pluto means a real, sometimes
+large, prefetch for whichever other body's synodic period against it
+happens to be long -- worth knowing before scrubbing around with
+Trajectory active there.
 
 ## Bodies shown, and their real relative sizes
 
