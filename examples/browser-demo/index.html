@@ -686,7 +686,9 @@ function siderealPeriodSeconds(targetId, et, pool) {
 // `dt` grows automatically; at cusps, retrograde-loop turns, and close
 // approaches -- exactly where a fixed step would visibly facet the
 // curve -- relative acceleration spikes and `dt` shrinks to preserve
-// local detail, with no separate per-arc tuning needed. See
+// local detail, with no separate per-arc tuning needed. A per-step
+// *pace floor* guarantees the arc still reaches the far edge of its own
+// window within ARC_MAX_SAMPLES regardless -- see
 // trajectoryStepSeconds()/sampleArcAdaptive() below.
 
 const ARC_MAX_SAMPLES = 400; // hard cap on total points per body per arc -- bounds render/prefetch cost regardless of how small the dynamic step comes out
@@ -734,23 +736,40 @@ function trajectoryStepSeconds(targetId, centerId, et, pool) {
  * Samples `target`'s position relative to `observer` across [et0, et1],
  * marching forward from `et0` with the curvature-based dynamic step
  * (trajectoryStepSeconds()) recomputed fresh at *every* point -- not a
- * single step chosen once for the whole span -- until `et1` is reached
- * or ARC_MAX_SAMPLES points have been placed, whichever comes first (a
- * hard cap on render/prefetch cost; a window that would need more than
- * that many points at this resolution just doesn't reach its far edge,
- * same trade-off ARC_MAX_SAMPLES has always been). A `null`/non-
- * positive step (degenerate: identical acceleration, or no forward
- * progress left in floating-point at this magnitude of `et`) closes the
- * arc in one final step to `et1` rather than looping. Returns an array
- * of `{ et, position }` in time order.
+ * single step chosen once for the whole span.
+ *
+ * Every step is clamped to a **pace floor**, `(et1 - et) / stepsLeft`
+ * (the exact, evenly-spaced step needed to reach `et1` using only the
+ * samples still budgeted) -- the *larger* of the pace floor and the
+ * curvature step is always used. This guarantees the arc always reaches
+ * `et1` -- always closing the window, never stopping short partway
+ * through -- while still spending extra resolution on genuine curvature
+ * whenever there's budget to spare (a straight stretch's own larger
+ * curvature step exceeds the floor and is used as-is; the floor only
+ * ever *widens* an unaffordably small step, degrading gracefully toward
+ * plain uniform sampling, never toward an incomplete arc). Without
+ * this, a window sized to a *different* body's own real period than
+ * the one actually determining the local step (e.g. viewing a slow
+ * outer planet from Earth: relative acceleration -- and so the
+ * step -- is dominated by Earth's own fast motion, tiny next to an
+ * outer planet's multi-decade Sidereal window) could exhaust
+ * ARC_MAX_SAMPLES long before reaching `et1`, leaving the rendered arc
+ * incomplete and not passing through the body's own current position at
+ * all -- caught live, exactly this way, centered on Earth viewing the
+ * outer planets in Sidereal mode.
+ *
+ * Returns an array of `{ et, position }` in time order.
  */
 function sampleArcAdaptive(target, observer, et0, et1, frame, pool) {
   const at = (et) => ({ et, position: spkez(target, observer, et, 'NONE', frame, pool).position });
   const samples = [at(et0)];
   let et = et0;
   while (samples.length < ARC_MAX_SAMPLES && et < et1) {
-    const dt = trajectoryStepSeconds(target, observer, et, pool);
-    const nextEt = dt > 0 ? Math.min(et1, et + dt) : et1;
+    const stepsLeft = ARC_MAX_SAMPLES - samples.length;
+    const paceFloor = (et1 - et) / stepsLeft;
+    const curvatureDt = trajectoryStepSeconds(target, observer, et, pool);
+    const dt = curvatureDt > 0 ? Math.max(curvatureDt, paceFloor) : paceFloor;
+    const nextEt = Math.min(et1, et + dt);
     if (nextEt <= et) break; // no forward progress possible -- stop rather than loop
     et = nextEt;
     samples.push(at(et));
@@ -1309,7 +1328,18 @@ async function buildScene() {
       // pairwise (target, observer) state between them afterwards, not
       // just relative to the SSB itself. Switching the view center
       // (applyViewSettings() below) never needs a re-prefetch as a result.
-      await prefetchBodyProbe(demo.remote, body, SUN_TARGET);
+      //
+      // The Sun's own primary is `null` -- it isn't orbiting the Sun
+      // (itself); every other body's is the Sun. Without this,
+      // computeOrbitalEllipse(Sun, Sun, ...) was self-referential (a
+      // zero position vector), throwing "rectilinear orbit (zero
+      // angular momentum)" every time rebuildArcs() ran in Ellipse mode
+      // -- caught and logged harmlessly (the intended, documented
+      // behavior: the Sun gets no ellipse, just a marker), but via an
+      // exception rather than the clean `b.primaryId == null` skip
+      // rebuildArcs() already has, just never actually reachable for
+      // the Sun before this.
+      await prefetchBodyProbe(demo.remote, body, spec.target === SUN_TARGET ? null : SUN_TARGET);
     } catch (err) {
       log(`  -> skipped (${err.message})`);
       continue;

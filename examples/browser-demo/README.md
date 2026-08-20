@@ -202,7 +202,15 @@ A body with no real primary to orbit -- only the Sun itself, in this
 demo, since it has no single primary of its own in this two-body sense
 -- gets no orbit-arc line at all (still prefetched and shown with a
 live marker position, just with nothing well-defined to draw an
-ellipse around).
+ellipse around). The Sun is recorded with `primaryId = null` from the
+start specifically so this is a clean, silent skip; earlier it was
+recorded the same as every other body (`primaryId` = the Sun itself),
+so drawing its own ellipse meant computing its state *relative to
+itself* -- identically zero -- and relying on the resulting
+`computeOrbitalEllipse()` exception (caught and logged, not a crash,
+but confusing: `couldn't draw Sun's orbit ellipse (rectilinear orbit
+(zero angular momentum) -- no well-defined orbital plane)`) to reach
+the same "no ellipse" outcome instead.
 
 When the current view isn't centered on a body's own real primary (the
 default whole-system view centers on the SSB, not the Sun; clicking a
@@ -285,9 +293,24 @@ curve -- relative acceleration spikes and `dt` shrinks to preserve local
 detail, with no separate per-arc tuning needed. Verified live against
 Mercury's real, eccentric orbit (relative to Earth): `dt` comes out to
 ~59 hours near perihelion vs. ~89 hours near aphelion, tracking Mercury's
-own ~1.5x perihelion/aphelion distance ratio. Capped at 400 samples/body
-either way, so a window that would need more than that many points at
-this resolution just doesn't reach its far edge.
+own ~1.5x perihelion/aphelion distance ratio.
+
+Capped at 400 samples/body, but every step is also clamped to a **pace
+floor** -- the larger of the curvature step and the exact, evenly-spaced
+step still needed to reach the window's far edge using only the samples
+left in budget -- so the arc always reaches that far edge and always
+passes through (or very near) the body's actual current position,
+degrading gracefully toward plain uniform sampling if it has to rather
+than stopping short. This matters most exactly where it's easy to miss:
+centered on Earth, an outer planet's own Sidereal window can span
+decades, but the *step* the curvature formula wants is dominated by
+Earth's own fast motion (`a_Center`), not the far slower outer planet's
+-- without the pace floor, marching at Earth-scale steps never got
+anywhere near covering a Neptune-scale window within 400 samples,
+leaving a visibly incomplete arc that didn't reach the planet's own
+marker at all. Verified live: every outer planet's arc, centered on
+Earth in Sidereal mode, now reaches its own window's far edge exactly
+and spans "now."
 
 Because each window is real (and, in Synodic mode, can be very long for
 a body whose period is close to Center's own -- a near-1:1 resonance
