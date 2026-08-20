@@ -232,8 +232,7 @@ control:
   relative to a fixed, non-rotating reference. Computed from vis-viva
   using the body's state *relative to the SSB itself* (not the Sun),
   since `mu` still needs the Sun's `GM` as its dominant-mass term either
-  way, and (unlike computing this relative to the Sun) this makes the
-  Sun's own state well-defined too -- see below.
+  way (the Sun itself is a deliberate exception to this -- see below).
 - **Synodic**: each body's period *relative to Center* instead -- the
   classic two-body synodic-period identity, usually written for Earth
   specifically (`S = T_Earth*T_planet / |T_planet - T_Earth|`),
@@ -252,28 +251,61 @@ control:
   so no special-casing is needed for Center = SSB either.
 
 Neither mode has a meaningful "period" for the **Sun** itself: it isn't
-orbiting anything in the two-body sense, so both throw a clear, expected
-error and fall back to a fixed &plusmn;30-day window for the Sun's own
-arc specifically (same treatment Ellipse mode already gives it -- "no
-real primary to orbit," just applied to periods here). This replaced an
-earlier, more confusing version of the same fallback that computed the
-Sun's period *relative to itself* (identically zero -- "rectilinear
-orbit, zero angular momentum") instead of relative to the SSB.
+orbiting anything in the two-body sense. Rather than fall back to an
+arbitrary fixed window, its arc gets a real, physically motivated one:
+the Sun's position *relative to Center* is exactly the mirror image of
+Center's own heliocentric position (flip the sign and it's Center's own
+real orbit), so it retraces itself on exactly Center's own real period
+-- the Sun's window is Center's own siderealPeriodSeconds() directly, in
+*either* PERIOD mode (Sidereal/Synodic have no independent meaning for
+a body defined as Center's own mirror). This replaced an earlier
+fallback that tried to compute the Sun's period *relative to itself*
+(identically zero -- "rectilinear orbit, zero angular momentum") and,
+after that was fixed to use the SSB instead, a *different* problem:
+vis-viva around the Sun's own real (nonzero) barycentric wobble, using
+the Sun's own `GM` as the "primary" mass, gives a physically meaningless
+number (measured live: ~53 minutes) -- the Sun *is* the dominant mass,
+not a test particle orbiting something at the barycenter. Mirroring
+Center's own real period sidesteps the whole question.
 
-Sampled at a per-body time step `dt ~= 0.01 AU / |v_body - v_Center|`
-(both velocities relative to the SSB, at the window's reference epoch)
-rather than a fixed point count -- fast relative motion (near
-conjunction/opposition, or very different orbital speeds) gets a fine
-step, slow relative motion (near-identical orbits) gets a coarse one,
-capped at 400 samples/body either way. Because each window is real
-(and, in Synodic mode, can be very long for a body whose period is
-close to Center's own -- a near-1:1 resonance drives the synodic period
-toward infinity; in Sidereal mode, a slow real body like Pluto has a
-real ~249-year window regardless of Center), it's also real prefetching
-cost, per body -- worth knowing before scrubbing around with Trajectory
-active on a kernel with limited real temporal coverage (e.g. `de440s`
-only covers 1849-2150, so Pluto's own +-124.5-year Sidereal window can
-push right up against that edge depending on "now").
+Sampled with a **curvature-based dynamic step**, recomputed at every
+point as the arc is marched out rather than fixed once for the whole
+window:
+
+```
+dt = sqrt(2*epsilon / |a_body - a_Center|)
+a  = -GM_Sun/r^3 * r          (heliocentric two-body acceleration, r from the Sun)
+```
+
+with a fixed spatial-error tolerance `epsilon` of 0.01 AU. Along
+straight, slowly-curving stretches of an orbit, relative acceleration is
+small and `dt` grows automatically; at cusps, retrograde-loop turns, and
+close approaches -- exactly where a fixed step would visibly facet the
+curve -- relative acceleration spikes and `dt` shrinks to preserve local
+detail, with no separate per-arc tuning needed. Verified live against
+Mercury's real, eccentric orbit (relative to Earth): `dt` comes out to
+~59 hours near perihelion vs. ~89 hours near aphelion, tracking Mercury's
+own ~1.5x perihelion/aphelion distance ratio. Capped at 400 samples/body
+either way, so a window that would need more than that many points at
+this resolution just doesn't reach its far edge.
+
+Because each window is real (and, in Synodic mode, can be very long for
+a body whose period is close to Center's own -- a near-1:1 resonance
+drives the synodic period toward infinity; in Sidereal mode, a slow real
+body like Pluto has a real ~249-year window regardless of Center), it's
+also real prefetching cost, per body -- worth knowing before scrubbing
+around with Trajectory active on a kernel with limited real temporal
+coverage (e.g. `de440s` only covers 1849-2150, so Pluto's own
++-124.5-year Sidereal window can push right up against that edge
+depending on "now"). The curvature step adds one more wrinkle here: it
+needs the **Sun's** own state at every sampled point of *every* body's
+window (not just the Sun's own, possibly narrower, displayed window),
+so the Sun's own prefetch coverage is extended to the same union of
+every body's window that Center's own coverage already gets -- caught
+live, initially missed: without this, a body whose own window outran the
+Sun's (much narrower) default coverage sampled fine near "now" but
+failed with a byte-range error partway through its own window, even
+though every other body's own coverage was already sufficient.
 
 ## Bodies shown, and their real relative sizes
 

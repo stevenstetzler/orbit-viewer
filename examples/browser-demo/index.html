@@ -675,49 +675,85 @@ function siderealPeriodSeconds(targetId, et, pool) {
 // whose period is close to CENTER's own (a near-1:1 resonance drives
 // the synodic period toward infinity).
 //
-// Sampled at a fixed time step per body, `dt ~= 0.01 AU / |v_P - v_B|`
-// (both velocities relative to the SSB, at the window's reference
-// epoch) -- fast relative motion (near conjunction/opposition, or very
-// different orbital speeds) gets a fine step, slow relative motion
-// (near-identical orbits) gets a coarse one. See
-// trajectoryStepSeconds()/sampleArcAtStep() below.
+// Sampled with a **curvature-based dynamic step**, recomputed at every
+// point as the arc is marched out rather than fixed once for the whole
+// window: `dt = sqrt(2*epsilon / |a_target - a_center|)`, where `a` is
+// each body's own two-body heliocentric acceleration,
+// `a = -GM_Sun/r^3 * r` (`r` measured *from the Sun*, not CENTER or the
+// SSB -- see accelerationRelativeToSun() below), and `epsilon` is a
+// fixed spatial-error tolerance (0.01 AU). Along straight, slowly-
+// curving stretches of an orbit, relative acceleration is small and
+// `dt` grows automatically; at cusps, retrograde-loop turns, and close
+// approaches -- exactly where a fixed step would visibly facet the
+// curve -- relative acceleration spikes and `dt` shrinks to preserve
+// local detail, with no separate per-arc tuning needed. See
+// trajectoryStepSeconds()/sampleArcAdaptive() below.
 
-const ARC_MAX_SAMPLES = 400; // hard cap on total points per body per arc -- bounds render/prefetch cost regardless of how small trajectoryStepSeconds() comes out
-const TRAJECTORY_STEP_DISTANCE_KM = 0.01 * AU_KM; // the 0.01 AU target separation per sampled step, from dt ~= 0.01 AU / |v_P - v_B|
+const ARC_MAX_SAMPLES = 400; // hard cap on total points per body per arc -- bounds render/prefetch cost regardless of how small the dynamic step comes out
+const TRAJECTORY_STEP_EPSILON_KM = 0.01 * AU_KM; // epsilon: the max positional error per step the dt formula solves for, in the same spatial units as position
 const TRAJECTORY_FALLBACK_HALF_SPAN_DAYS = 30; // used only if a period computation genuinely fails (e.g. an unbound osculating state, or missing prefetch coverage) or (Synodic only) a body's period happens to exactly match CENTER's (infinite synodic period)
 
 /**
- * Trajectory-mode sampling step size for `targetId`'s arc relative to
- * `centerId`: `dt = TRAJECTORY_STEP_DISTANCE_KM / |v_target - v_center|`,
- * both velocities relative to the SSB (not to CENTER itself) at `et` --
- * the actual real-space closing/separating speed between the two
- * bodies, not an artifact of CENTER's own motion. Returns `null` if the
- * two velocities happen to coincide exactly (e.g. `targetId ===
- * centerId`) -- callers fall back to ARC_MAX_SAMPLES over the window.
+ * A body's own instantaneous two-body heliocentric acceleration,
+ * `a = -GM_Sun/r^3 * r`, `r` measured from the Sun (not CENTER, not the
+ * SSB) at `et` -- the gravitational acceleration a test particle at
+ * this body's real position would feel from the Sun alone. Used only to
+ * size the adaptive sampling step (trajectoryStepSeconds()) -- unlike
+ * computeOrbitalEllipse()'s `mu`, this deliberately omits the target's
+ * own GM (it's the force *acting on* the body, not a combined two-body
+ * reduced mass), matching the formula as given.
  */
-function trajectoryStepSeconds(targetId, centerId, et, pool) {
-  const { velocity: vTarget } = spkez(targetId, SSB, et, 'NONE', INERTIAL_FRAME, pool);
-  const { velocity: vCenter } = spkez(centerId, SSB, et, 'NONE', INERTIAL_FRAME, pool);
-  const relSpeed = Math.hypot(vTarget[0] - vCenter[0], vTarget[1] - vCenter[1], vTarget[2] - vCenter[2]);
-  return relSpeed > 0 ? TRAJECTORY_STEP_DISTANCE_KM / relSpeed : null;
+function accelerationRelativeToSun(targetId, et, pool) {
+  const muSun = bodyValues(SUN_TARGET, 'GM', demo.remote.pool)[0];
+  const { position } = spkez(targetId, SUN_TARGET, et, 'NONE', INERTIAL_FRAME, pool);
+  const r = new THREE.Vector3(...position);
+  const rMag = r.length();
+  return r.multiplyScalar(-muSun / (rMag * rMag * rMag));
 }
 
 /**
- * Samples `target`'s position relative to `observer` uniformly across
- * [et0, et1] at step `dtSeconds` (see trajectoryStepSeconds()), capped
- * at ARC_MAX_SAMPLES total points (a `null` step, or one that would
- * need more than that many, just uses ARC_MAX_SAMPLES evenly spaced
- * across the whole window instead). Returns an array of `{ et,
- * position }` in time order.
+ * Curvature-based dynamic step size for `targetId`'s arc relative to
+ * `centerId`, at `et`: `dt = sqrt(2*epsilon / |a_target - a_center|)`
+ * (TRAJECTORY_STEP_EPSILON_KM), both accelerations heliocentric (see
+ * accelerationRelativeToSun()) -- the same quantity that would appear
+ * in a second-order Taylor expansion of the *relative* position, so a
+ * step sized this way keeps each step's positional error under
+ * `epsilon` regardless of how sharply the relative trajectory is
+ * currently curving. Returns `null` if the two accelerations happen to
+ * coincide exactly (e.g. `targetId === centerId`) -- callers fall back
+ * to a single step spanning the rest of the window.
  */
-function sampleArcAtStep(target, observer, et0, et1, dtSeconds, frame, pool) {
-  const span = et1 - et0;
-  const wanted = dtSeconds > 0 ? Math.ceil(span / dtSeconds) + 1 : ARC_MAX_SAMPLES;
-  const count = Math.max(2, Math.min(ARC_MAX_SAMPLES, wanted));
-  const samples = [];
-  for (let i = 0; i < count; i++) {
-    const et = et0 + (i / (count - 1)) * span;
-    samples.push({ et, position: spkez(target, observer, et, 'NONE', frame, pool).position });
+function trajectoryStepSeconds(targetId, centerId, et, pool) {
+  const aTarget = accelerationRelativeToSun(targetId, et, pool);
+  const aCenter = accelerationRelativeToSun(centerId, et, pool);
+  const relAccel = aTarget.sub(aCenter).length();
+  return relAccel > 0 ? Math.sqrt((2 * TRAJECTORY_STEP_EPSILON_KM) / relAccel) : null;
+}
+
+/**
+ * Samples `target`'s position relative to `observer` across [et0, et1],
+ * marching forward from `et0` with the curvature-based dynamic step
+ * (trajectoryStepSeconds()) recomputed fresh at *every* point -- not a
+ * single step chosen once for the whole span -- until `et1` is reached
+ * or ARC_MAX_SAMPLES points have been placed, whichever comes first (a
+ * hard cap on render/prefetch cost; a window that would need more than
+ * that many points at this resolution just doesn't reach its far edge,
+ * same trade-off ARC_MAX_SAMPLES has always been). A `null`/non-
+ * positive step (degenerate: identical acceleration, or no forward
+ * progress left in floating-point at this magnitude of `et`) closes the
+ * arc in one final step to `et1` rather than looping. Returns an array
+ * of `{ et, position }` in time order.
+ */
+function sampleArcAdaptive(target, observer, et0, et1, frame, pool) {
+  const at = (et) => ({ et, position: spkez(target, observer, et, 'NONE', frame, pool).position });
+  const samples = [at(et0)];
+  let et = et0;
+  while (samples.length < ARC_MAX_SAMPLES && et < et1) {
+    const dt = trajectoryStepSeconds(target, observer, et, pool);
+    const nextEt = dt > 0 ? Math.min(et1, et + dt) : et1;
+    if (nextEt <= et) break; // no forward progress possible -- stop rather than loop
+    et = nextEt;
+    samples.push(at(et));
   }
   return samples;
 }
@@ -735,15 +771,31 @@ function sampleArcAtStep(target, observer, et0, et1, dtSeconds, frame, pool) {
  *   the sidereal-period limit anyway, so it's handled the same as
  *   `'sidereal'` rather than as a special case.
  *
+ * The **Sun** is a special case, in *either* PERIOD mode: it has no
+ * orbital period of its own (it isn't orbiting anything in the
+ * two-body sense), but its position *relative to CENTER* is exactly
+ * the mirror image of CENTER's own heliocentric position -- flip the
+ * sign and it's CENTER's own real orbit -- so it retraces itself on
+ * exactly CENTER's own real period. `bodyPeriod` for the Sun is
+ * `centerBody`'s own siderealPeriodSeconds() directly, bypassing
+ * `periodMode` entirely (Sidereal/Synodic have no independent meaning
+ * for a body defined as CENTER's own mirror).
+ *
  * Falls back to a fixed +-30-day window if a period computation
- * genuinely fails (e.g. an unbound osculating state, or `body`'s
- * coverage at `et` genuinely missing -- callers ensure this first, same
- * as any other body, see updateSceneForOffset()), or (Synodic only)
- * `body`'s period happens to coincide exactly with `centerBody`'s (a
- * 1:1 resonance -- an infinite synodic period).
+ * genuinely fails (e.g. an unbound osculating state, `body`'s coverage
+ * at `et` genuinely missing -- callers ensure this first, same as any
+ * other body, see updateSceneForOffset() -- or the Sun's own arc with
+ * `centerBody == null`, CENTER = SSB, which has no period for the Sun
+ * to mirror either), or (Synodic only, non-Sun bodies) `body`'s period
+ * happens to coincide exactly with `centerBody`'s (a 1:1 resonance --
+ * an infinite synodic period).
  */
 function trajectoryWindowForBody(centerBody, body, et, pool, periodMode) {
   try {
+    if (body.target === SUN_TARGET && centerBody != null) {
+      const mirrorPeriod = siderealPeriodSeconds(centerBody.target, et, pool);
+      return [et - mirrorPeriod / 2, et + mirrorPeriod / 2];
+    }
     const bodyPeriod = siderealPeriodSeconds(body.target, et, pool);
     if (periodMode !== 'synodic' || centerBody == null) {
       return [et - bodyPeriod / 2, et + bodyPeriod / 2];
@@ -1099,12 +1151,12 @@ function ensureMarkers() {
  *   either way, so it never looks aliased or broken as you scrub, just
  *   subtly re-angled frame to frame.
  * - `'trajectory'`: `b`'s own *real* position relative to
- *   `demo.viewObserver`, sampled at a fixed step (sampleArcAtStep()) --
- *   see trajectoryStepSeconds() -- over `b`'s own window (sized per the
- *   PERIOD control, `demo.periodMode`), `demo.trajectoryWindows.get(b.target)`,
- *   computed once per tick by updateSceneForOffset() -- see
- *   trajectoryWindowForBody(). No primary or translation needed: it's
- *   the real relative motion directly.
+ *   `demo.viewObserver`, sampled with a curvature-based dynamic step
+ *   (sampleArcAdaptive() -- see trajectoryStepSeconds()) over `b`'s own
+ *   window (sized per the PERIOD control, `demo.periodMode`),
+ *   `demo.trajectoryWindows.get(b.target)`, computed once per tick by
+ *   updateSceneForOffset() -- see trajectoryWindowForBody(). No primary
+ *   or translation needed: it's the real relative motion directly.
  *
  * A body with no real primary to orbit (b.primaryId == null -- only
  * the Sun, in this demo) gets no ellipse-mode arc; trajectory mode
@@ -1136,8 +1188,7 @@ function rebuildArcs(centerEt) {
       if (!window) continue; // no synodic window computed for this body this tick -- see updateSceneForOffset()
       const [windowStart, windowEnd] = window;
       try {
-        const dt = trajectoryStepSeconds(b.target, demo.viewObserver, centerEt, demo.activeRemote.pool);
-        const samples = sampleArcAtStep(b.target, demo.viewObserver, windowStart, windowEnd, dt, demo.viewFrame, demo.activeRemote.pool);
+        const samples = sampleArcAdaptive(b.target, demo.viewObserver, windowStart, windowEnd, demo.viewFrame, demo.activeRemote.pool);
         const arcPoints = samples.map((s) => new THREE.Vector3(...demo.scale.posToScene(s.position)));
         const arcGeo = new THREE.BufferGeometry().setFromPoints(arcPoints);
         const arcMat = new THREE.LineBasicMaterial({ color: b.color, transparent: true, opacity: 0.45 });
@@ -1749,6 +1800,11 @@ function handlePreciseModeClick(b, evt) {
  *    sampled point is `spkez(body, CENTER, sampleEt, ...)`, which needs
  *    CENTER's own state at `sampleEt` too (it's the observer, chained
  *    through the SSB same as any other body), not just at `et` itself.
+ *    The **Sun's** own coverage is extended to that same union too, for
+ *    the same reason: the curvature-based dynamic step
+ *    (trajectoryStepSeconds()) queries the Sun's state at every sampled
+ *    point of *every* body's window, not just within the Sun's own
+ *    (possibly narrower) displayed window.
  *
  * `sceneUpdateSeq` guards against a slower, stale call finishing
  * *after* a newer one and clobbering its result -- expected when this
@@ -1796,6 +1852,29 @@ async function updateSceneForOffset(offsetDays) {
         await ensureBodyCoverage(centerBody, centerUnionStart, centerUnionEnd);
       } catch (err) {
         log(`  -> couldn't extend prefetch for ${centerBody.name} (${err.message})`);
+      }
+      if (mySeq !== sceneUpdateSeq) return;
+    }
+    // The curvature-based dynamic step (trajectoryStepSeconds(), via
+    // accelerationRelativeToSun()) queries the SUN's own state at
+    // *every* sampled point of *every* displayed body's own window, not
+    // just CENTER's -- so, exactly like CENTER above, the Sun's own
+    // coverage needs to grow to the union of every body's window, not
+    // stay pinned to its own (possibly much narrower) trajectory window.
+    // Without this, a body whose own window is wider than the Sun's
+    // (e.g. Mars centered on Earth) samples fine near `et`, but the
+    // curvature step for a *different*, still-in-window point near the
+    // Sun's stale coverage edge fails with "byte range ... not
+    // prefetched" -- caught live: Saturn/Uranus/Neptune all failed this
+    // way scrubbed to +3600 days, all with the Sun's own coverage the
+    // limiting factor even though every other body's own coverage was
+    // already sufficient.
+    const sunBody = demo.bodies.find((b) => b.target === SUN_TARGET);
+    if (sunBody && sunBody !== centerBody) {
+      try {
+        await ensureBodyCoverage(sunBody, centerUnionStart, centerUnionEnd);
+      } catch (err) {
+        log(`  -> couldn't extend prefetch for ${sunBody.name} (${err.message})`);
       }
       if (mySeq !== sceneUpdateSeq) return;
     }
