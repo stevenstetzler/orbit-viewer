@@ -1639,7 +1639,11 @@ function handlePreciseModeClick(b, evt) {
  *    show a full relative lap -- and that body's prefetch is extended
  *    to cover it. Recorded in `demo.trajectoryWindows`
  *    (`Map<target, [etStart, etEnd]>`); rebuildArcs() reads it back out
- *    to know what it can safely sample.
+ *    to know what it can safely sample. CENTER's *own* coverage is also
+ *    extended here, to the union of every other body's window -- every
+ *    sampled point is `spkez(body, CENTER, sampleEt, ...)`, which needs
+ *    CENTER's own state at `sampleEt` too (it's the observer, chained
+ *    through the SSB same as any other body), not just at `et` itself.
  *
  * `sceneUpdateSeq` guards against a slower, stale call finishing
  * *after* a newer one and clobbering its result -- expected when this
@@ -1666,10 +1670,33 @@ async function updateSceneForOffset(offsetDays) {
   if (trajectoryActive) {
     const centerBody = demo.bodies.find((b) => b.target === demo.viewObserver) ?? null;
     demo.trajectoryWindows = new Map();
+    // Every sample spkez(b.target, demo.viewObserver, sampleEt, ...)
+    // needs CENTER's own state at `sampleEt` too (it's the observer,
+    // chained through the SSB same as any other body) -- not just at
+    // `et` itself. Each other body's own window can be (much) wider
+    // than a single DAF record, so CENTER's coverage needs to grow to
+    // the *union* of every other body's window, not stay pinned to the
+    // single point pass 1 above already ensured.
+    let centerUnionStart = et;
+    let centerUnionEnd = et;
     for (const b of demo.bodies) {
       if (b.target === demo.viewObserver) continue;
       const window = synodicWindow(centerBody, b, et, demo.activeRemote.pool);
       demo.trajectoryWindows.set(b.target, window);
+      centerUnionStart = Math.min(centerUnionStart, window[0]);
+      centerUnionEnd = Math.max(centerUnionEnd, window[1]);
+    }
+    if (centerBody) {
+      try {
+        await ensureBodyCoverage(centerBody, centerUnionStart, centerUnionEnd);
+      } catch (err) {
+        log(`  -> couldn't extend prefetch for ${centerBody.name} (${err.message})`);
+      }
+      if (mySeq !== sceneUpdateSeq) return;
+    }
+    for (const b of demo.bodies) {
+      if (b.target === demo.viewObserver) continue;
+      const window = demo.trajectoryWindows.get(b.target);
       try {
         await ensureBodyCoverage(b, window[0], window[1]);
       } catch (err) {
