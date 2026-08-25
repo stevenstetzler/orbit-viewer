@@ -458,6 +458,53 @@ itself would just be invisibly clipped) -- verified live: scroll-zoomed
 out past the grid's *old* far-plane limit (1000 scene units, ~238 AU)
 to ~1200 scene units and confirmed the grid still renders.
 
+## Adding a custom kernel
+
+"4. Add a custom kernel" (sidebar, enabled once a session is open)
+layers extra bodies from your own `.bsp` onto the live session -- e.g.
+an asteroid/comet or mission trajectory kernel that isn't in the
+catalogue above. Picking a file:
+
+1. **Structurally scans it** -- walks the DAF summary-record chain
+   directly (the same low-level primitives `scripts/inspect-spk.mjs`
+   uses to build `kernels/sources.mjs`'s own catalogue), so every
+   body/interval it carries is listed *before* any real position data
+   is fetched.
+2. **Shows a popup**: a checkbox per discovered body (name resolved
+   via the built-in NAIF ID table, falling back to `Body <id>` for an
+   unrecognized one -- matching how NAIF's own `brief` utility labels
+   an unnamed body), all checked by default, with Select All/Deselect
+   All; and one time-selector bounded by `min(start)`..`max(end)`
+   across every discovered body, defaulting to the midpoint.
+3. **On "Load selected"**: each checked body is prefetched over its
+   *entire* real interval (not just a point) and folded into the
+   session as an ordinary body -- addable to Center/Frame, and shown
+   in the legend with working Look/From, exactly like the ten built-in
+   ones. The session's reference epoch moves to the popup's chosen
+   time (a custom kernel's valid interval has no reason to overlap
+   wherever the reference epoch already was).
+
+Custom bodies always render as a **white sampled trajectory** over
+their own full discovered interval (never the analytic-ellipse mode --
+there's no known primary/GM to compute one from), at a sample count set
+by the new "Custom trajectory resolution" slider, independent of
+Orbit/Period's period-scaled scheme. They have no known `IAU_<BODY>`
+orientation, so Rotating/Frame don't apply to them ("From" a custom
+body leaves Frame untouched and turns Rotating off).
+
+The key trick making this work: a custom kernel's segments are
+registered into the *same* `KernelPool` the primary kernel already
+uses (via the lower-level `prefetchSpkQuery()`, not a fresh pool the
+way `openRemoteSpk()` normally allocates one) -- `spkez()` can only
+chain target/observer state through one pool at a time, so without
+this a custom body could never be positioned relative to (or used as
+Center for) any of the built-in ten. One consequence: a custom body
+whose segments are expressed relative to a center that isn't itself
+resolvable to the Solar System Barycenter *within the same file*
+(rather than relative to the SSB directly, or to another body already
+in that file) fails to load with a clear error -- see
+[`TODO.md`](../../TODO.md).
+
 ## Command+Click: precise single-body mode
 
 Shows *only* the clicked body and its real satellites. DE440/DE440s

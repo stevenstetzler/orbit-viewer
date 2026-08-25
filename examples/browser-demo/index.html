@@ -71,6 +71,28 @@
     position: absolute; left: 16px; bottom: 12px; color: #626c80; font-size: 11px;
     pointer-events: none;
   }
+  #customKernelStatus {
+    font: 11px/1.5 ui-monospace, monospace; color: #8892a6; margin: 6px 0 0; white-space: pre-wrap;
+  }
+  .modalBackdrop {
+    position: fixed; inset: 0; background: rgba(5, 7, 13, 0.72);
+    display: flex; align-items: center; justify-content: center; z-index: 10;
+  }
+  .modalPanel {
+    width: 420px; max-width: calc(100vw - 32px); max-height: calc(100vh - 64px);
+    overflow-y: auto; background: #0b0e17; border: 1px solid #1c2230; border-radius: 8px;
+    padding: 16px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  }
+  #customKernelBodyList { list-style: none; margin: 8px 0; padding: 0; max-height: 260px; overflow-y: auto; }
+  #customKernelBodyList li {
+    display: flex; align-items: baseline; gap: 8px; margin: 2px -6px; padding: 4px 6px; border-radius: 4px;
+  }
+  #customKernelBodyList li:hover { background: #141a26; }
+  #customKernelBodyList .cname { color: #d7dce5; }
+  #customKernelBodyList .cid { color: #626c80; font-size: 11px; }
+  #customKernelBodyList .cinterval {
+    margin-left: auto; color: #626c80; font-size: 11px; white-space: nowrap; font-variant-numeric: tabular-nums;
+  }
 </style>
 </head>
 <body>
@@ -132,6 +154,23 @@
       not prefetched yet).
     </p>
 
+    <h2>4. Add a custom kernel</h2>
+    <p class="sub" style="margin-bottom:8px">
+      Layer bodies from your own <code>.bsp</code> onto this session --
+      e.g. an asteroid/comet or mission trajectory kernel not in the
+      catalogue above. Structurally scanned first (a couple of small
+      byte-range reads, same as "2. Load a kernel"), so you can pick
+      which of its bodies to add before any real data is fetched.
+    </p>
+    <input id="customKernelInput" type="file" accept=".bsp" disabled />
+    <div id="customKernelStatus"></div>
+    <div id="customResolutionRow" style="display:none">
+      <label for="customResolutionSlider" style="display:block;color:#8892a6;font-size:12px;margin:8px 0 4px">
+        Custom trajectory resolution: <span id="customResolutionLabel"></span> samples
+      </label>
+      <input id="customResolutionSlider" type="range" min="50" max="2000" step="10" value="500" style="width:100%" />
+    </div>
+
     <h2>View controls</h2>
     <div class="controlGrid">
       <label for="centerSelect">Center</label>
@@ -182,6 +221,30 @@
   </div>
 </div>
 
+<!-- "Add a custom kernel" confirmation popup -- built fresh by
+     openCustomKernelModal() each time a kernel is structurally
+     scanned; hidden (display:none) otherwise. No modal library --
+     a plain fixed-position overlay, styled to match the rest of the
+     sidebar. -->
+<div id="customKernelModal" class="modalBackdrop" style="display:none">
+  <div class="modalPanel">
+    <h2 id="customKernelModalTitle" style="margin-top:0">Add bodies</h2>
+    <div class="buttonRow">
+      <button id="customKernelSelectAll" class="secondary" type="button">Select all</button>
+      <button id="customKernelDeselectAll" class="secondary" type="button">Deselect all</button>
+    </div>
+    <ul id="customKernelBodyList"></ul>
+    <label for="customKernelEpochSlider" style="display:block;color:#8892a6;font-size:12px;margin:14px 0 4px">
+      Reference epoch: <span id="customKernelEpochLabel"></span>
+    </label>
+    <input id="customKernelEpochSlider" type="range" min="0" max="1" step="any" style="width:100%" />
+    <div class="buttonRow" style="margin-top:16px">
+      <button id="customKernelLoadBtn" type="button">Load selected</button>
+      <button id="customKernelCancelBtn" class="secondary" type="button">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <script type="importmap">
 {
   "imports": {
@@ -193,8 +256,19 @@
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { load, str2et, et2utcCalendar, openRemoteSpk, spkez, bodyValues, kclear } from '../../src/browser.js';
+import { load, str2et, et2utcCalendar, openRemoteSpk, spkez, bodyValues, kclear, bodyName } from '../../src/browser.js';
 import { KERNELS as KERNEL_MANIFEST } from '../../kernels/sources.mjs';
+// Lower-level lazy-loading primitives, used only by the "Add a custom
+// kernel" flow below (discoverSpkBodies()/loadCustomKernel()) --
+// openRemoteSpk() (imported above) always allocates its own isolated
+// KernelPool, which would make a custom kernel's bodies un-chainable
+// against the primary kernel's own bodies (spkez()/spkState() search
+// exactly one pool at a time -- see src/spk.js). Importing these
+// directly instead lets a custom kernel's segments be registered into
+// demo.remote.pool itself -- see loadCustomKernel()'s own comment.
+import { openRemoteFile } from '../../src/lazy/remoteFile.js';
+import { prefetchSpkQuery } from '../../src/lazy/prefetch.js';
+import { parseFileRecord, parseDaf, readWords, FILE_RECORD_BYTES } from '../../src/daf.js';
 
 const statusEl = document.getElementById('status');
 const fileInput = document.getElementById('fileInput');
@@ -213,6 +287,20 @@ const viewStatusEl = document.getElementById('viewStatus');
 const proxySectionEl = document.getElementById('proxySection');
 const proxyListEl = document.getElementById('proxyList');
 const viewStatusLabel = document.querySelector('#viewStatus .label');
+const customKernelInput = document.getElementById('customKernelInput');
+const customKernelStatusEl = document.getElementById('customKernelStatus');
+const customResolutionRow = document.getElementById('customResolutionRow');
+const customResolutionSlider = document.getElementById('customResolutionSlider');
+const customResolutionLabel = document.getElementById('customResolutionLabel');
+const customKernelModal = document.getElementById('customKernelModal');
+const customKernelModalTitle = document.getElementById('customKernelModalTitle');
+const customKernelBodyList = document.getElementById('customKernelBodyList');
+const customKernelSelectAll = document.getElementById('customKernelSelectAll');
+const customKernelDeselectAll = document.getElementById('customKernelDeselectAll');
+const customKernelEpochSlider = document.getElementById('customKernelEpochSlider');
+const customKernelEpochLabel = document.getElementById('customKernelEpochLabel');
+const customKernelLoadBtn = document.getElementById('customKernelLoadBtn');
+const customKernelCancelBtn = document.getElementById('customKernelCancelBtn');
 
 function log(line) {
   statusEl.textContent += (statusEl.textContent.endsWith('\n') || statusEl.textContent === '' ? '' : '\n') + line;
@@ -1028,6 +1116,9 @@ function clearSession() {
   clearBodies();
   demo = null;
   kclear(); // forget any kernels loaded into the global pool by a previous file
+  customKernelInput.disabled = true;
+  customResolutionRow.style.display = 'none';
+  customKernelStatusEl.textContent = '';
 }
 
 /**
@@ -1135,11 +1226,294 @@ async function beginSession(remote, { sourceLabel, sourceSizeBytes, counters = n
     // mode, a whole window for trajectory mode).
     activeRemote: remote,
     satelliteRemotes: new Map(), // kernelId -> openRemoteSpk() result, fetched at most once per session
+    // "Add a custom kernel" (loadCustomKernel()): one entry per loaded
+    // custom kernel, { file, remoteFile, bodies: [...added body objects] },
+    // purely for bookkeeping/status logging -- every custom body's
+    // segments actually live in `remote.pool` itself (see
+    // loadCustomKernel()'s own comment), not a separate pool.
+    customKernels: [],
+    // Sample count for a custom body's white trajectory line (see
+    // rebuildArcs()) -- backed by the "Custom trajectory resolution"
+    // slider, independent of arcSampleBudget()'s period-scaled scheme
+    // (custom bodies have no known orbital period to scale against).
+    customTrajectorySamples: Number(customResolutionSlider.value),
   };
   updateViewStatus();
+  customKernelInput.disabled = false;
 
   await buildScene();
 }
+
+// ---------------------------------------------------------------------
+// "Add a custom kernel" -- layers extra bodies from a user-supplied
+// .bsp onto the already-open session (see the file input's own
+// change handler and openCustomKernelModal()/loadSelectedCustomBodies()
+// near the bottom of this file). Split into three steps: structural
+// discovery (no prefetch -- just enough to list bodies/intervals),
+// a checkbox+time-selector popup, then an eager per-body prefetch of
+// whatever was selected.
+// ---------------------------------------------------------------------
+
+/**
+ * Structurally discovers every body a not-yet-prefetched SPK file
+ * carries, *without* calling prefetch() -- adapts
+ * scripts/inspect-spk.mjs's readStructure() (same DAF summary-record
+ * walk: parseFileRecord()/readWords() to find every summary record,
+ * then parseDaf() to read them), but grouped **per target** rather
+ * than globally, since each body's own [startEt, stopEt] is exactly
+ * what `brief` reports and what the popup needs to show.
+ *
+ * @param {import('../../src/lazy/remoteFile.js').RemoteFile} remoteFile
+ * @returns {Promise<Map<number, { target: number, center: number, etStart: number, etEnd: number, types: Set<number> }>>}
+ */
+async function discoverSpkBodies(remoteFile) {
+  const WORDS_PER_RECORD = FILE_RECORD_BYTES / 8;
+  await remoteFile.ensureRange(0, FILE_RECORD_BYTES);
+  const fileRecord = parseFileRecord(remoteFile.buffer);
+  let recordNumber = fileRecord.fward;
+  const visited = new Set();
+  while (recordNumber !== 0) {
+    if (visited.has(recordNumber)) throw new Error(`summary record chain loops at ${recordNumber}`);
+    visited.add(recordNumber);
+    const startByte = (recordNumber - 1) * FILE_RECORD_BYTES;
+    await remoteFile.ensureRange(startByte, startByte + FILE_RECORD_BYTES);
+    const addr = (recordNumber - 1) * WORDS_PER_RECORD + 1;
+    recordNumber = Math.round(readWords(remoteFile.buffer, fileRecord.littleEndian, addr, addr)[0]);
+  }
+
+  const daf = parseDaf(remoteFile.buffer);
+  const bodies = new Map();
+  for (const summary of daf.summaries) {
+    const [target, center, , type] = summary.ic;
+    const [begin, end] = summary.dc;
+    let b = bodies.get(target);
+    if (!b) {
+      b = { target, center, etStart: begin, etEnd: end, types: new Set() };
+      bodies.set(target, b);
+    } else {
+      b.etStart = Math.min(b.etStart, begin);
+      b.etEnd = Math.max(b.etEnd, end);
+    }
+    b.types.add(type);
+  }
+  return bodies;
+}
+
+/**
+ * Appends one <option> to CENTER for a newly-added body (custom or
+ * otherwise) -- populateViewControls() only fills CENTER/FRAME once,
+ * at module init, from the static BODIES array, so a body added later
+ * needs this instead. No FRAME option: only called for custom bodies,
+ * which never have a real iauFrame (see viewFromBody()'s own guard).
+ */
+function addBodyToViewControls(b) {
+  const opt = document.createElement('option');
+  opt.value = String(b.target);
+  opt.textContent = b.name;
+  centerSelect.appendChild(opt);
+}
+
+let pendingCustomKernel = null; // { file, remoteFile, discovered } while the modal is open; null otherwise
+
+/**
+ * Builds and shows the checkbox+time-selector popup from a completed
+ * discoverSpkBodies() scan. All bound state lives on `pendingCustomKernel`
+ * until "Load selected" or "Cancel" resolves it.
+ */
+function openCustomKernelModal(file, remoteFile, discovered) {
+  const bodies = [...discovered.values()].sort((a, b) => a.target - b.target);
+  pendingCustomKernel = { file, remoteFile, discovered };
+
+  customKernelModalTitle.textContent = `Add bodies from ${file.name} (${bodies.length} found)`;
+  customKernelBodyList.innerHTML = '';
+  for (const b of bodies) {
+    const li = document.createElement('li');
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = true;
+    checkbox.dataset.target = String(b.target);
+    const name = document.createElement('span');
+    name.className = 'cname';
+    name.textContent = bodyName(b.target, demo.remote.pool);
+    const id = document.createElement('span');
+    id.className = 'cid';
+    id.textContent = `(${b.target})`;
+    const interval = document.createElement('span');
+    interval.className = 'cinterval';
+    interval.textContent = `${et2utcCalendar(b.etStart)} – ${et2utcCalendar(b.etEnd)}`;
+    li.append(checkbox, name, id, interval);
+    customKernelBodyList.appendChild(li);
+  }
+
+  const etMin = Math.min(...bodies.map((b) => b.etStart));
+  const etMax = Math.max(...bodies.map((b) => b.etEnd));
+  customKernelEpochSlider.min = String(etMin);
+  customKernelEpochSlider.max = String(etMax);
+  customKernelEpochSlider.value = String((etMin + etMax) / 2);
+  updateCustomKernelEpochLabel();
+
+  customKernelModal.style.display = '';
+}
+
+function updateCustomKernelEpochLabel() {
+  customKernelEpochLabel.textContent = et2utcCalendar(Number(customKernelEpochSlider.value));
+}
+
+function closeCustomKernelModal() {
+  customKernelModal.style.display = 'none';
+  pendingCustomKernel = null;
+}
+
+customKernelSelectAll.addEventListener('click', () => {
+  for (const cb of customKernelBodyList.querySelectorAll('input[type=checkbox]')) cb.checked = true;
+});
+customKernelDeselectAll.addEventListener('click', () => {
+  for (const cb of customKernelBodyList.querySelectorAll('input[type=checkbox]')) cb.checked = false;
+});
+customKernelEpochSlider.addEventListener('input', updateCustomKernelEpochLabel);
+customKernelCancelBtn.addEventListener('click', () => closeCustomKernelModal());
+
+/**
+ * "Load selected": prefetches each checked body's *entire* discovered
+ * interval and folds it into the live session as an ordinary body.
+ *
+ * The key trick is *where* each body's segments are registered: not
+ * into a fresh, isolated pool (what openRemoteSpk() would give), but
+ * directly into `demo.remote.pool` -- the same pool the primary
+ * kernel's own 10 bodies live in. spkez()/spkState() build a
+ * target->SSB->observer chain by searching exactly one pool (see
+ * src/spk.js), so two different pools can never be chained together;
+ * a custom body in its own pool could never be positioned relative to
+ * (or used as CENTER for) any of the primary kernel's bodies. Sharing
+ * one pool is exactly the trick loadPlanetaryConstants()/
+ * loadGravitationalParameters() already use for text-kernel data,
+ * generalized here to lazy SPK segments via the low-level
+ * prefetchSpkQuery(remoteFile, pool, query) (normally called only by
+ * openRemoteSpk()'s own `prefetch` closure, exported for exactly this
+ * kind of case).
+ *
+ * Each selected body is prefetched over its own *entire* discovered
+ * [etStart, etEnd] up front (not just a point, the way
+ * prefetchBodyProbe() does for the 10 standard bodies) -- there's no
+ * period-based windowing available for a custom body (no known GM/
+ * primary), so its whole real interval is the only sensible thing to
+ * show (see rebuildArcs()). Setting b.dataStart/b.dataEnd to that same
+ * full interval up front means ensureBodyCoverage()'s existing bounds
+ * check is satisfied forever after -- these bodies never need a
+ * second prefetch.
+ */
+async function loadSelectedCustomBodies() {
+  if (!pendingCustomKernel || !demo) return;
+  const { file, remoteFile, discovered } = pendingCustomKernel;
+  const checkedTargets = [...customKernelBodyList.querySelectorAll('input[type=checkbox]:checked')]
+    .map((cb) => Number(cb.dataset.target));
+  const chosenEt0 = Number(customKernelEpochSlider.value);
+  closeCustomKernelModal();
+
+  if (checkedTargets.length === 0) {
+    log(`No bodies selected from ${file.name} -- nothing added.`);
+    return;
+  }
+
+  customKernelInput.disabled = true;
+  log(`Adding ${checkedTargets.length} bod${checkedTargets.length === 1 ? 'y' : 'ies'} from ${file.name}...`);
+  const added = [];
+  for (const target of checkedTargets) {
+    const info = discovered.get(target);
+    const name = bodyName(target, demo.remote.pool);
+    try {
+      await prefetchSpkQuery(remoteFile, demo.remote.pool, {
+        target, observer: SSB, etStart: info.etStart, etEnd: info.etEnd,
+      });
+    } catch (err) {
+      log(`  -> skipped ${name} (${target}): ${err.message}`);
+      continue;
+    }
+    const body = {
+      target, bodyId: target, name, color: 0xffffff, fallbackRadius: 1.0,
+      iauFrame: null, primaryId: null, isCustom: true,
+      customIntervalStart: info.etStart, customIntervalEnd: info.etEnd,
+      dataStart: info.etStart, dataEnd: info.etEnd,
+    };
+    // demo.systemBodies and demo.bodies are the *same* array reference
+    // in 'system' mode (see buildScene()'s `demo.bodies = bodiesState;
+    // demo.systemBodies = bodiesState;`) -- pushing to both would
+    // double-add. In 'precise' mode they're genuinely different arrays
+    // (demo.bodies holds just the precise-mode center + satellites);
+    // only systemBodies gets the new body then, so it shows up once
+    // the session returns to 'system' mode (applyViewSettings()
+    // restores `demo.bodies = demo.systemBodies`).
+    demo.systemBodies.push(body);
+    if (demo.bodies !== demo.systemBodies) demo.bodies.push(body);
+    addBodyToViewControls(body);
+    added.push(body);
+    log(`  -> added ${name} (${target}), ${et2utcCalendar(info.etStart)} to ${et2utcCalendar(info.etEnd)}`);
+  }
+  customKernelInput.disabled = false;
+  customKernelInput.value = '';
+
+  if (added.length === 0) {
+    log(`Nothing from ${file.name} could be added (see above).`);
+    return;
+  }
+
+  demo.customKernels.push({ file, remoteFile, bodies: added });
+  ensureMarkers();
+  buildLegend(demo.systemBodies);
+  customResolutionRow.style.display = '';
+
+  // The session's own reference epoch moves to the chosen point --
+  // same role "now" plays at beginSession() time -- since a custom
+  // kernel's valid interval has no reason to overlap wherever et0
+  // already was (a mission trajectory from years ago/ahead of "now",
+  // for instance). The +-3650-day "Reference epoch" slider then
+  // scrubs around this new et0 exactly as before.
+  demo.et0 = chosenEt0;
+  timeSlider.value = '0';
+  await updateSceneForOffset(0);
+}
+
+customKernelLoadBtn.addEventListener('click', () => {
+  loadSelectedCustomBodies().catch((err) => {
+    log(`ERROR: ${err.message}`);
+    console.error(err);
+  });
+});
+
+customResolutionSlider.addEventListener('input', () => {
+  customResolutionLabel.textContent = customResolutionSlider.value;
+  if (!demo) return;
+  demo.customTrajectorySamples = Number(customResolutionSlider.value);
+  rebuildArcs(demo.et0 + Number(timeSlider.value) * DAY);
+});
+customResolutionLabel.textContent = customResolutionSlider.value;
+
+customKernelInput.addEventListener('change', async () => {
+  const file = customKernelInput.files && customKernelInput.files[0];
+  if (!file || !demo) return;
+  customKernelInput.disabled = true;
+  customKernelStatusEl.textContent = `Scanning ${file.name}...`;
+  try {
+    const resolveRange = async (_url, startByte, endByteExclusive) => {
+      const slice = file.slice(startByte, endByteExclusive);
+      return new Uint8Array(await slice.arrayBuffer());
+    };
+    const remoteFile = await openRemoteFile(file.name, { fileLength: file.size, resolveRange });
+    const discovered = await discoverSpkBodies(remoteFile);
+    customKernelStatusEl.textContent = `${file.name}: ${discovered.size} body/bodies found.`;
+    if (discovered.size === 0) {
+      log(`${file.name} has no SPK segments -- nothing to add.`);
+    } else {
+      openCustomKernelModal(file, remoteFile, discovered);
+    }
+  } catch (err) {
+    customKernelStatusEl.textContent = `ERROR scanning ${file.name}: ${err.message}`;
+    log(`ERROR scanning ${file.name}: ${err.message}`);
+    console.error(err);
+  } finally {
+    customKernelInput.disabled = false;
+  }
+});
 
 /**
  * A body's real mean radius in km -- BODY<id>_RADII, averaged across
@@ -1251,15 +1625,30 @@ function rebuildArcs(centerEt) {
     }
     for (const b of demo.bodies) {
       if (b.target === demo.viewObserver) continue;
-      const window = demo.trajectoryWindows?.get(b.target);
-      if (!window) continue; // no synodic window computed for this body this tick -- see updateSceneForOffset()
-      const [windowStart, windowEnd] = window;
+      // A custom body (loadSelectedCustomBodies()) has no known
+      // primary/GM to size a period-based window from, so it doesn't
+      // participate in demo.trajectoryWindows at all (see
+      // updateSceneForOffset()) -- its own real, full discovered
+      // interval is the window instead, at a flat, user-controlled
+      // sample count (demo.customTrajectorySamples, the "Custom
+      // trajectory resolution" slider) rather than arcSampleBudget()'s
+      // period-loop-scaled scheme.
+      let windowStart, windowEnd, maxSamples;
+      if (b.isCustom) {
+        windowStart = b.customIntervalStart;
+        windowEnd = b.customIntervalEnd;
+        maxSamples = demo.customTrajectorySamples;
+      } else {
+        const window = demo.trajectoryWindows?.get(b.target);
+        if (!window) continue; // no synodic window computed for this body this tick -- see updateSceneForOffset()
+        [windowStart, windowEnd] = window;
+        maxSamples = arcSampleBudget(windowEnd - windowStart, centerPeriod);
+      }
       try {
-        const maxSamples = arcSampleBudget(windowEnd - windowStart, centerPeriod);
         const samples = sampleArcAdaptive(b.target, demo.viewObserver, windowStart, windowEnd, demo.viewFrame, demo.activeRemote.pool, maxSamples);
         const arcPoints = samples.map((s) => new THREE.Vector3(...demo.scale.posToScene(s.position)));
         const arcGeo = new THREE.BufferGeometry().setFromPoints(arcPoints);
-        const arcMat = new THREE.LineBasicMaterial({ color: b.color, transparent: true, opacity: 0.45 });
+        const arcMat = new THREE.LineBasicMaterial({ color: b.isCustom ? 0xffffff : b.color, transparent: true, opacity: 0.45 });
         b.arcLine = new THREE.Line(arcGeo, arcMat);
         scene.add(b.arcLine);
       } catch (err) {
@@ -1572,7 +1961,10 @@ async function applyViewSettings() {
 
   demo.viewObserver = newObserver;
   demo.viewFrame = rotatingCheckbox.checked ? frameSelect.value : INERTIAL_FRAME;
-  demo.viewLabel = isSSB ? 'Solar System Barycenter' : (BODIES.find((b) => b.target === newObserver)?.name ?? '');
+  // demo.systemBodies, not the static BODIES array -- BODIES only
+  // covers the 10 built-in bodies; demo.systemBodies also carries any
+  // bodies added later via "Add a custom kernel" (loadSelectedCustomBodies()).
+  demo.viewLabel = isSSB ? 'Solar System Barycenter' : (demo.systemBodies.find((b) => b.target === newObserver)?.name ?? '');
   demo.orbitMode = orbitSelect.value;
   demo.periodMode = periodSelect.value;
 
@@ -1598,12 +1990,20 @@ async function applyViewSettings() {
  * (the origin -- which is now `b`, since it's the new center) takes
  * over ("default the LOOK AT to BODY"). ROTATING is left as whatever
  * it already was -- View From only ever sets *which* body FRAME
- * refers to, not whether it's actually used.
+ * refers to, not whether it's actually used -- *unless* `b` has no
+ * known frame (a custom body, added via "Add a custom kernel": no
+ * PCK orientation data, so no real IAU_<BODY>), in which case FRAME
+ * is left untouched and ROTATING is forced off instead -- there's
+ * nothing meaningful for it to rotate into.
  */
 function viewFromBody(b) {
   if (!demo) return Promise.resolve();
   centerSelect.value = String(b.target);
-  frameSelect.value = b.iauFrame;
+  if (b.iauFrame != null) {
+    frameSelect.value = b.iauFrame;
+  } else {
+    rotatingCheckbox.checked = false;
+  }
   demo.lookAtTarget = null;
   return applyViewSettings();
 }
@@ -1897,6 +2297,12 @@ async function updateSceneForOffset(offsetDays) {
   timeLabel.textContent = `${et2utcCalendar(et)}  (${offsetDays >= 0 ? '+' : ''}${offsetDays.toFixed(2)} d)`;
 
   for (const b of demo.bodies) {
+    // A custom body (loadSelectedCustomBodies()) is already prefetched
+    // over its entire real interval up front -- there's nothing more
+    // to cover, and demo.activeRemote.prefetch() is bound to the
+    // *primary* kernel's own file, which doesn't have this body's
+    // segments at all (see loadSelectedCustomBodies()'s own comment).
+    if (b.isCustom) continue;
     try {
       await ensureBodyCoverage(b, et, et);
     } catch (err) {
@@ -1921,12 +2327,17 @@ async function updateSceneForOffset(offsetDays) {
     let centerUnionEnd = et;
     for (const b of demo.bodies) {
       if (b.target === demo.viewObserver) continue;
+      if (b.isCustom) continue; // fixed, full-interval window -- see rebuildArcs(), not period-based
       const window = trajectoryWindowForBody(centerBody, b, et, demo.activeRemote.pool, demo.periodMode);
       demo.trajectoryWindows.set(b.target, window);
       centerUnionStart = Math.min(centerUnionStart, window[0]);
       centerUnionEnd = Math.max(centerUnionEnd, window[1]);
     }
-    if (centerBody) {
+    // A custom CENTER is already fully prefetched over its own real
+    // interval (see loadSelectedCustomBodies()) -- same reasoning as
+    // the isCustom skips above, ensureBodyCoverage() would otherwise
+    // try (and fail) to extend it via the *primary* kernel's remote.
+    if (centerBody && !centerBody.isCustom) {
       try {
         await ensureBodyCoverage(centerBody, centerUnionStart, centerUnionEnd);
       } catch (err) {
@@ -1959,6 +2370,7 @@ async function updateSceneForOffset(offsetDays) {
     }
     for (const b of demo.bodies) {
       if (b.target === demo.viewObserver) continue;
+      if (b.isCustom) continue; // already fully prefetched -- see the isCustom skip above
       const window = demo.trajectoryWindows.get(b.target);
       try {
         await ensureBodyCoverage(b, window[0], window[1]);
