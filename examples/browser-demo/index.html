@@ -267,7 +267,7 @@ import { KERNELS as KERNEL_MANIFEST } from '../../kernels/sources.mjs';
 // directly instead lets a custom kernel's segments be registered into
 // demo.remote.pool itself -- see loadCustomKernel()'s own comment.
 import { openRemoteFile } from '../../src/lazy/remoteFile.js';
-import { prefetchSpkQuery } from '../../src/lazy/prefetch.js';
+import { prefetchSpkQuery, prefetchSpkBodySegment } from '../../src/lazy/prefetch.js';
 import { parseFileRecord, parseDaf, readWords, FILE_RECORD_BYTES } from '../../src/daf.js';
 
 const statusEl = document.getElementById('status');
@@ -1374,6 +1374,45 @@ customKernelEpochSlider.addEventListener('input', updateCustomKernelEpochLabel);
 customKernelCancelBtn.addEventListener('click', () => closeCustomKernelModal());
 
 /**
+ * Prefetches one custom body's segment(s) over `[etStart, etEnd]`,
+ * tolerating the common case where the custom file's own chain
+ * doesn't reach the SSB by itself -- real small-body/spacecraft SPK
+ * products are routinely given relative to the Sun (or another body)
+ * rather than the SSB directly, which is exactly what
+ * prefetchSpkQuery() alone can't handle (it only ever walks the
+ * *custom file's own* summaries looking for the whole chain -- see
+ * its doc comment).
+ *
+ * Two-step fallback:
+ * 1. Try the ordinary full-chain prefetchSpkQuery() first -- handles
+ *    a self-contained custom kernel (its own chain reaches the SSB by
+ *    itself, or the body is already relative to the SSB directly).
+ * 2. If that fails, fall back to prefetchSpkBodySegment(): fetch just
+ *    this body's own local segment (relative to whatever center the
+ *    kernel actually declares -- discovered structurally, see
+ *    discoverSpkBodies()), no chain-to-SSB requirement. Since
+ *    KernelPool segments are file-agnostic, this is enough *if* the
+ *    declared center's own chain to the SSB is already sitting in
+ *    demo.remote.pool -- true for the common cases (Sun, Earth, any
+ *    planet barycenter) since buildScene() already prefetched all ten
+ *    standard bodies' own chains at session start. A real spkez()
+ *    probe confirms the chain actually resolves now (or throws the
+ *    library's own clear "no path back to the SSB" error if it
+ *    doesn't -- e.g. a custom body relative to some other body that's
+ *    neither in this file nor already loaded).
+ */
+async function prefetchCustomBody(remoteFile, pool, target, etStart, etEnd) {
+  try {
+    await prefetchSpkQuery(remoteFile, pool, { target, observer: SSB, etStart, etEnd });
+    return;
+  } catch {
+    // Falls through to the single-hop fallback below.
+  }
+  await prefetchSpkBodySegment(remoteFile, pool, { bodyId: target, etStart, etEnd });
+  spkez(target, SSB, (etStart + etEnd) / 2, 'NONE', INERTIAL_FRAME, pool); // throws clearly if the chain still doesn't resolve
+}
+
+/**
  * "Load selected": prefetches each checked body's *entire* discovered
  * interval and folds it into the live session as an ordinary body.
  *
@@ -1388,9 +1427,11 @@ customKernelCancelBtn.addEventListener('click', () => closeCustomKernelModal());
  * one pool is exactly the trick loadPlanetaryConstants()/
  * loadGravitationalParameters() already use for text-kernel data,
  * generalized here to lazy SPK segments via the low-level
- * prefetchSpkQuery(remoteFile, pool, query) (normally called only by
- * openRemoteSpk()'s own `prefetch` closure, exported for exactly this
- * kind of case).
+ * prefetchSpkQuery()/prefetchSpkBodySegment() (see
+ * prefetchCustomBody()'s own comment for the fallback between them --
+ * needed because real small-body/spacecraft kernels are routinely
+ * heliocentric, not SSB-relative, which prefetchSpkQuery() alone can't
+ * chain on its own).
  *
  * Each selected body is prefetched over its own *entire* discovered
  * [etStart, etEnd] up front (not just a point, the way
@@ -1422,9 +1463,7 @@ async function loadSelectedCustomBodies() {
     const info = discovered.get(target);
     const name = bodyName(target, demo.remote.pool);
     try {
-      await prefetchSpkQuery(remoteFile, demo.remote.pool, {
-        target, observer: SSB, etStart: info.etStart, etEnd: info.etEnd,
-      });
+      await prefetchCustomBody(remoteFile, demo.remote.pool, target, info.etStart, info.etEnd);
     } catch (err) {
       log(`  -> skipped ${name} (${target}): ${err.message}`);
       continue;

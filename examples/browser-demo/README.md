@@ -494,16 +494,20 @@ body leaves Frame untouched and turns Rotating off).
 
 The key trick making this work: a custom kernel's segments are
 registered into the *same* `KernelPool` the primary kernel already
-uses (via the lower-level `prefetchSpkQuery()`, not a fresh pool the
-way `openRemoteSpk()` normally allocates one) -- `spkez()` can only
-chain target/observer state through one pool at a time, so without
-this a custom body could never be positioned relative to (or used as
-Center for) any of the built-in ten. One consequence: a custom body
-whose segments are expressed relative to a center that isn't itself
-resolvable to the Solar System Barycenter *within the same file*
-(rather than relative to the SSB directly, or to another body already
-in that file) fails to load with a clear error -- see
-[`TODO.md`](../../TODO.md).
+uses (via the lower-level `prefetchSpkQuery()`/`prefetchSpkBodySegment()`,
+not a fresh pool the way `openRemoteSpk()` normally allocates one) --
+`spkez()` can only chain target/observer state through one pool at a
+time, so without this a custom body could never be positioned relative
+to (or used as Center for) any of the built-in ten. This also means a
+**heliocentric** kernel (segments relative to the Sun rather than the
+SSB directly -- the norm for real small-body/spacecraft SPK products)
+loads correctly even though the custom file itself has no
+Sun-to-SSB segment: that link is already sitting in the primary
+kernel's own prefetched data, in the same pool. What's *not* handled:
+a custom body relative to a center that isn't resolvable either within
+its own file or by anything already loaded (e.g. relative to a second
+custom body from a *different* file) -- that fails to load with a
+clear error -- see [`TODO.md`](../../TODO.md).
 
 ## Command+Click: precise single-body mode
 
