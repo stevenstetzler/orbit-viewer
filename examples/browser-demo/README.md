@@ -575,6 +575,46 @@ Moon frames with the Moon's real, distant orbit fully visible.
 Click the `#viewStatus` bar (or the active body again with Command/Meta) to
 leave precise mode.
 
+Custom-kernel bodies (see "Adding a custom kernel" above) stay visible
+through precise mode too, rendered at the same scale as everything
+else -- correctly positioned even if that puts them far outside the
+initial camera framing (zoom/pan out to find them), and shown as a
+marker only (no orbit-arc line -- they have no known primary/GM to
+draw an ellipse from, same rule as everywhere else). The `#viewStatus`
+label distinguishes them from real satellites, e.g. `Precise mode:
+Earth + 1 satellite, 1 custom body`.
+
+## Satellites: a per-row dropdown, in and out of precise mode
+
+Every "Bodies shown" row for a planet with known moons gets a small
+dropdown next to its Look/From buttons, listing them by name (populated
+at zero fetch cost, straight from `kernels/sources.mjs`'s own
+catalogue -- the same data precise mode's satellite resolution already
+reads). Picking one there redirects that row's Look/From and
+Command+Click to the chosen satellite instead of the planet itself --
+so "View from Phobos" or "Command+Click Titan to go precise" both work
+straight from the whole-system view, no need to enter precise mode on
+the parent first.
+
+A satellite is only actually fetched the first time something on its
+row is used (Look/From/Command+Click) -- not just by selecting it in
+the dropdown -- through the same two-source resolution precise mode
+itself uses (already-loaded kernel first, then the mapped satellite
+kernel through the local proxy). Once resolved it's added to the scene
+like any other body (its own marker, a CENTER option, and -- since
+satellites get a *guessed* `IAU_<NAME>` frame, e.g. `IAU_PHOBOS` -- a
+FRAME option too, failing gracefully at query time if that particular
+frame turns out not to have real orientation data) and stays part of
+the session from then on; switching the dropdown back to "—" only
+changes what *future* actions on that row target.
+
+This only works because satellite kernels are opened into the *same*
+shared `KernelPool` the primary (and any custom) kernel already uses
+(see `openSatelliteKernel()`) -- confirmed live: selecting Phobos from
+Mars's dropdown and clicking "From" correctly repositions every other
+body (Earth from `de440s.bsp`, a loaded custom body from a third file)
+relative to it, proving the chain crosses all three files transparently.
+
 ## Notes
 
 - Whole-system positions are converted from km to AU and then to a

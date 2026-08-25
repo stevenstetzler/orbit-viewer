@@ -67,6 +67,7 @@
   select:disabled { color: #626c80; }
   #legend .rowActions, #preciseLegend .rowActions { display: flex; gap: 4px; flex: 0 0 auto; }
   #legend .rowActions button { padding: 2px 7px; font-size: 10px; }
+  #legend .satelliteSelect { width: auto; max-width: 84px; flex: 0 0 auto; padding: 1px 3px; font-size: 10px; }
   #overlayHint {
     position: absolute; left: 16px; bottom: 12px; color: #626c80; font-size: 11px;
     pointer-events: none;
@@ -508,13 +509,25 @@ const SATELLITE_COLORS = [
  * would have for every other mapped planet too (mar099's "499 rel 4",
  * ura184-3's "799 rel 7", nep105's "899 rel 8", plu060's "999 rel 9"),
  * not just Earth.
+ *
+ * Each entry also gets a *guessed* `iauFrame` (`IAU_<NAME>`) -- unlike
+ * the ten built-in BODIES, there's no curated list confirming this
+ * frame's orientation constants actually exist in the loaded PCK, so
+ * ROTATING/FRAME simply fails at query time (same as any other
+ * missing-frame lookup, caught in the marker-placement loop) if they
+ * don't. Free to attempt, and gives satellites the same FRAME/ROTATING
+ * support the ten standard bodies already have whenever it does exist
+ * (e.g. `IAU_MOON`).
  */
 function satellitesFromManifest(kernelId, centerId, excludeIds, only) {
   const entry = KERNEL_MANIFEST[kernelId];
   if (!entry) return [];
   return (entry.targets ?? [])
     .filter((t) => t.center === centerId && !excludeIds.includes(t.id) && (!only || only.includes(t.id)))
-    .map((t, i) => ({ target: t.id, bodyId: t.id, name: t.name, color: SATELLITE_COLORS[i % SATELLITE_COLORS.length] }));
+    .map((t, i) => ({
+      target: t.id, bodyId: t.id, name: t.name, color: SATELLITE_COLORS[i % SATELLITE_COLORS.length],
+      iauFrame: `IAU_${t.name.toUpperCase().replace(/\s+/g, '_')}`,
+    }));
 }
 
 const SSB = 0; // Solar System Barycenter -- the default view center
@@ -1166,11 +1179,10 @@ async function loadPlanetaryConstants(pool) {
  * below, to compute each body's own real two-body orbit shape.
  *
  * Always loaded into (and looked up from) `demo.remote.pool`
- * specifically, never `demo.activeRemote.pool` -- same reasoning
- * meanRadiusKmFor() already uses for `RADII`: GM is a constant,
- * unrelated to which remote's pool happens to hold a given body's SPK
- * segments, so there's no need to load it again into a satellite
- * kernel's own separate pool (see openSatelliteKernel()).
+ * specifically -- the one shared pool the whole session uses (see
+ * openSatelliteKernel()/loadSelectedCustomBodies() for why every
+ * source's SPK segments end up in this same pool too), so there's
+ * never a need to load it again anywhere else.
  */
 async function loadGravitationalParameters(pool) {
   const url = new URL('../../kernels/gm_de440.tpc', import.meta.url).href;
@@ -1216,16 +1228,21 @@ async function beginSession(remote, { sourceLabel, sourceSizeBytes, counters = n
     // null means "no explicit look-at target" (camera stays wherever
     // it was left, same as today).
     lookAtTarget: null,
-    // The "active" remote drives 3D-scene rendering (rebuildArcs(),
-    // updateSceneForOffset()'s marker loop, ensureBodyCoverage()) and,
-    // in 'precise' mode, can be a *different* kernel than `remote` (a
-    // satellite kernel -- see resolveSatellitesFor()). Each body in
-    // demo.bodies carries its own b.dataStart/b.dataEnd (see
-    // prefetchBodyProbe()/ensureBodyCoverage()) -- just whatever epoch
-    // range has actually been visited (a single point for ellipse
-    // mode, a whole window for trajectory mode).
-    activeRemote: remote,
-    satelliteRemotes: new Map(), // kernelId -> openRemoteSpk() result, fetched at most once per session
+    // Every SPK segment for the whole session -- the primary kernel's,
+    // any satellite kernel's (openSatelliteKernel()), any custom
+    // kernel's (loadSelectedCustomBodies()) -- lives in this one
+    // `remote.pool`, never a per-source pool: spkez()/spkState() only
+    // ever search a single pool to chain target/observer state, so a
+    // body positioned relative to (or used as CENTER for) another body
+    // from a *different* source only works if both sources' segments
+    // are registered here. Each body in demo.bodies carries its own
+    // `.remote` (whichever remote-like object -- `remote` itself, a
+    // satellite kernel, ...-- it was actually resolved through; see
+    // prefetchBodyProbe()) and its own b.dataStart/b.dataEnd (see
+    // ensureBodyCoverage()) -- just whatever epoch range has actually
+    // been visited (a single point for ellipse mode, a whole window
+    // for trajectory mode).
+    satelliteRemotes: new Map(), // kernelId -> remote-like object (pool-shared -- see openSatelliteKernel()), fetched at most once per session
     // "Add a custom kernel" (loadCustomKernel()): one entry per loaded
     // custom kernel, { file, remoteFile, bodies: [...added body objects] },
     // purely for bookkeeping/status logging -- every custom body's
@@ -1300,17 +1317,34 @@ async function discoverSpkBodies(remoteFile) {
 }
 
 /**
- * Appends one <option> to CENTER for a newly-added body (custom or
- * otherwise) -- populateViewControls() only fills CENTER/FRAME once,
- * at module init, from the static BODIES array, so a body added later
- * needs this instead. No FRAME option: only called for custom bodies,
- * which never have a real iauFrame (see viewFromBody()'s own guard).
+ * Appends one <option> to CENTER (and, if `b` has a real `iauFrame`,
+ * to FRAME too) for a newly-added body -- custom-kernel or a
+ * materialized satellite (resolveRowTarget()) -- populateViewControls()
+ * only fills CENTER/FRAME once, at module init, from the static
+ * BODIES array, so a body added later needs this instead.
+ *
+ * This is *not* just cosmetic: `viewFromBody()` sets `centerSelect.value
+ * = String(b.target)` directly, and a <select> silently resets to ""
+ * (no selection) when assigned a value with no matching <option> --
+ * without a real entry here, "View From" a satellite or custom body
+ * would silently fall back to the SSB instead of actually targeting
+ * it. Custom bodies never have a real `iauFrame` (`null` -- see
+ * viewFromBody()'s own guard), so they only ever get the CENTER
+ * option; a satellite's *guessed* `iauFrame` (satellitesFromManifest())
+ * gets a FRAME option too, on the same "free to attempt, fails
+ * gracefully if wrong" basis as the guess itself.
  */
 function addBodyToViewControls(b) {
   const opt = document.createElement('option');
   opt.value = String(b.target);
   opt.textContent = b.name;
   centerSelect.appendChild(opt);
+  if (b.iauFrame != null) {
+    const frameOpt = document.createElement('option');
+    frameOpt.value = b.iauFrame;
+    frameOpt.textContent = b.iauFrame;
+    frameSelect.appendChild(frameOpt);
+  }
 }
 
 let pendingCustomKernel = null; // { file, remoteFile, discovered } while the modal is open; null otherwise
@@ -1658,7 +1692,7 @@ function rebuildArcs(centerEt) {
     // SSB, or the Sun as CENTER) falls back to the flat ceiling.
     let centerPeriod = null;
     try {
-      centerPeriod = siderealPeriodSeconds(demo.viewObserver, centerEt, demo.activeRemote.pool);
+      centerPeriod = siderealPeriodSeconds(demo.viewObserver, centerEt, demo.remote.pool);
     } catch {
       // Falls back to arcSampleBudget()'s own flat-ceiling default.
     }
@@ -1684,7 +1718,7 @@ function rebuildArcs(centerEt) {
         maxSamples = arcSampleBudget(windowEnd - windowStart, centerPeriod);
       }
       try {
-        const samples = sampleArcAdaptive(b.target, demo.viewObserver, windowStart, windowEnd, demo.viewFrame, demo.activeRemote.pool, maxSamples);
+        const samples = sampleArcAdaptive(b.target, demo.viewObserver, windowStart, windowEnd, demo.viewFrame, demo.remote.pool, maxSamples);
         const arcPoints = samples.map((s) => new THREE.Vector3(...demo.scale.posToScene(s.position)));
         const arcGeo = new THREE.BufferGeometry().setFromPoints(arcPoints);
         const arcMat = new THREE.LineBasicMaterial({ color: b.isCustom ? 0xffffff : b.color, transparent: true, opacity: 0.45 });
@@ -1701,10 +1735,10 @@ function rebuildArcs(centerEt) {
     if (b.target === demo.viewObserver) continue; // degenerate: always (0,0,0) relative to itself
     if (b.primaryId == null) continue; // no real primary to orbit -- no well-defined ellipse
     try {
-      const { a, e, b: semiMinor, pHat, qHat } = computeOrbitalEllipse(b.target, b.primaryId, centerEt, demo.activeRemote.pool);
+      const { a, e, b: semiMinor, pHat, qHat } = computeOrbitalEllipse(b.target, b.primaryId, centerEt, demo.remote.pool);
       const offset = b.primaryId === demo.viewObserver
         ? new THREE.Vector3()
-        : new THREE.Vector3(...spkez(b.primaryId, demo.viewObserver, centerEt, 'NONE', demo.viewFrame, demo.activeRemote.pool).position);
+        : new THREE.Vector3(...spkez(b.primaryId, demo.viewObserver, centerEt, 'NONE', demo.viewFrame, demo.remote.pool).position);
       const curve = new THREE.EllipseCurve(-a * e, 0, a, semiMinor, 0, 2 * Math.PI, false, 0);
       const arcPoints = curve.getPoints(ORBIT_ELLIPSE_SEGMENTS).map((p) => {
         const posKm = pHat.clone().multiplyScalar(p.x).add(qHat.clone().multiplyScalar(p.y)).add(offset);
@@ -1739,7 +1773,7 @@ async function ensureBodyCoverage(b, etStart, etEnd) {
   const newStart = Math.min(b.dataStart, etStart);
   const newEnd = Math.max(b.dataEnd, etEnd);
   const before = demo.counters ? { ...demo.counters } : null;
-  await demo.activeRemote.prefetch({ target: b.target, observer: SSB, etStart: newStart, etEnd: newEnd });
+  await b.remote.prefetch({ target: b.target, observer: SSB, etStart: newStart, etEnd: newEnd });
   b.dataStart = newStart;
   b.dataEnd = newEnd;
   if (demo.counters) {
@@ -1766,11 +1800,18 @@ async function ensureBodyCoverage(b, etStart, etEnd) {
  * planet, the clicked body for one of its satellites) -- for
  * rebuildArcs() to use later; this doesn't affect what gets
  * prefetched here, only what `body.target`'s own chain-to-SSB already
- * gives.
+ * gives. Also records `body.remote` (`remote` itself) -- whichever
+ * remote-like object this body's data actually came from -- so
+ * ensureBodyCoverage() later knows where to ask for more, without a
+ * single session-wide "active remote" to fall back on (every source's
+ * segments already live in the same shared `demo.remote.pool`, but
+ * incremental prefetching still has to go through the right
+ * `remoteFile`/proxy).
  */
 async function prefetchBodyProbe(remote, body, primaryId) {
   await remote.prefetch({ target: body.target, observer: SSB, etStart: demo.et0, etEnd: demo.et0 });
   body.primaryId = primaryId;
+  body.remote = remote;
   body.dataStart = demo.et0;
   body.dataEnd = demo.et0;
 }
@@ -1790,7 +1831,6 @@ async function buildScene() {
   demo.mode = 'system';
   demo.preciseBodyId = null;
   demo.scale = SYSTEM_SCALE;
-  demo.activeRemote = demo.remote;
   if (wasPrecise) resetCameraToDefault();
 
   const before = demo.counters ? { ...demo.counters } : null;
@@ -1855,6 +1895,52 @@ async function buildScene() {
   log(`Scene built -- each body's orbit-arc line is its own exact two-body orbit ellipse. Drag the "Reference epoch" slider to explore.`);
 }
 
+/**
+ * Resolves what a "Bodies shown" row's Look/From/Command+Click should
+ * actually act on: the row's own body `b`, or -- if `satelliteSelect`
+ * has a real satellite chosen -- that satellite, materializing it
+ * first if this is the first time it's ever been selected anywhere in
+ * the session.
+ *
+ * "Materializing" means: resolve it via resolveOneSatellite() (the
+ * same prefetch path precise mode's own resolveSatellitesFor() uses,
+ * pool-shared -- see openSatelliteKernel()), fold it into
+ * demo.systemBodies/demo.bodies exactly like a custom-kernel body
+ * (`demo.systemBodies.push(body); if (demo.bodies !== demo.systemBodies) demo.bodies.push(body);`),
+ * give it a marker, and position every marker immediately
+ * (updateSceneForOffset()) -- lookAtBody() in particular reads
+ * `.marker.position` directly rather than recomputing it, so a
+ * freshly-created marker (defaulting to the scene origin) has to be
+ * positioned *before* returning, not just created.
+ *
+ * A satellite resolved this way is never removed again -- reselecting
+ * "-" on this row only changes what *future* actions on this row
+ * target, it doesn't hide an already-shown marker (mirrors how a
+ * custom-kernel body, once added, stays for the rest of the session).
+ *
+ * Returns `null` (having already logged why, via resolveOneSatellite())
+ * if resolution fails or nothing is selected but should have resolved.
+ */
+async function resolveRowTarget(b, satelliteSelect) {
+  if (!satelliteSelect || satelliteSelect.value === '') return b;
+  const satelliteTarget = Number(satelliteSelect.value);
+  const existing = demo.systemBodies.find((sb) => sb.target === satelliteTarget);
+  if (existing) return existing;
+
+  const mapping = SATELLITE_KERNEL_FOR_BODY[b.bodyId];
+  const candidates = satellitesFromManifest(mapping.kernelId, mapping.centerId ?? b.target, [b.target, b.bodyId], mapping.only);
+  const candidate = candidates.find((c) => c.target === satelliteTarget);
+  const body = candidate ? await resolveOneSatellite(b, candidate, mapping) : null;
+  if (!body) return null;
+
+  demo.systemBodies.push(body);
+  if (demo.bodies !== demo.systemBodies) demo.bodies.push(body);
+  addBodyToViewControls(body);
+  ensureMarkers();
+  await updateSceneForOffset(Number(timeSlider.value));
+  return body;
+}
+
 /** Always built from demo.systemBodies -- the full legend stays the same, clickable set regardless of the current view/mode. */
 function buildLegend(bodiesState) {
   legendEl.innerHTML = '';
@@ -1871,27 +1957,72 @@ function buildLegend(bodiesState) {
     dist.className = 'dist';
     dist.id = `dist-${b.target}`;
 
+    // Satellite picker -- only for a body SATELLITE_KERNEL_FOR_BODY
+    // actually maps (the standard bodies with known natural
+    // satellites; never a custom body). Lists every known satellite by
+    // name at zero fetch cost (satellitesFromManifest() reads static
+    // catalogue data, kernels/sources.mjs) -- resolveRowTarget() above
+    // resolves (prefetches, if not already materialized) whichever one
+    // is selected, lazily, only when Look/From/Command+Click actually
+    // act on it. "-" (the default) means "act on the body itself".
+    const mapping = SATELLITE_KERNEL_FOR_BODY[b.bodyId];
+    let satelliteSelect = null;
+    if (mapping) {
+      satelliteSelect = document.createElement('select');
+      satelliteSelect.className = 'satelliteSelect';
+      satelliteSelect.title = `${b.name}'s satellites -- Look/From/Command+Click below act on whichever is chosen here`;
+      const noneOpt = document.createElement('option');
+      noneOpt.value = '';
+      noneOpt.textContent = '—';
+      satelliteSelect.appendChild(noneOpt);
+      for (const c of satellitesFromManifest(mapping.kernelId, mapping.centerId ?? b.target, [b.target, b.bodyId], mapping.only)) {
+        const opt = document.createElement('option');
+        opt.value = String(c.target);
+        opt.textContent = c.name;
+        satelliteSelect.appendChild(opt);
+      }
+      satelliteSelect.addEventListener('click', (evt) => evt.stopPropagation()); // don't also trigger the row's own precise-mode click
+    }
+
     const actions = document.createElement('span');
     actions.className = 'rowActions';
     const lookBtn = document.createElement('button');
     lookBtn.type = 'button';
     lookBtn.className = 'secondary';
     lookBtn.textContent = 'Look';
-    lookBtn.title = `Look at ${b.name} (keeps Center/Frame/Rotating/Orbit as they are)`;
-    lookBtn.addEventListener('click', (evt) => { evt.stopPropagation(); lookAtBody(b); });
     const fromBtn = document.createElement('button');
     fromBtn.type = 'button';
     fromBtn.className = 'secondary';
     fromBtn.textContent = 'From';
-    fromBtn.title = `View from ${b.name} (sets Center and Frame to ${b.name})`;
-    fromBtn.addEventListener('click', (evt) => {
+    const updateActionTitles = () => {
+      const targetName = satelliteSelect && satelliteSelect.value
+        ? satelliteSelect.options[satelliteSelect.selectedIndex].textContent
+        : b.name;
+      lookBtn.title = `Look at ${targetName} (keeps Center/Frame/Rotating/Orbit as they are)`;
+      fromBtn.title = `View from ${targetName} (sets Center and Frame to ${targetName})`;
+    };
+    updateActionTitles();
+    if (satelliteSelect) satelliteSelect.addEventListener('change', updateActionTitles);
+    lookBtn.addEventListener('click', async (evt) => {
       evt.stopPropagation();
-      viewFromBody(b).catch((err) => { log(`ERROR: ${err.message}`); console.error(err); });
+      const target = await resolveRowTarget(b, satelliteSelect);
+      if (target) lookAtBody(target);
+    });
+    fromBtn.addEventListener('click', async (evt) => {
+      evt.stopPropagation();
+      const target = await resolveRowTarget(b, satelliteSelect);
+      if (target) viewFromBody(target).catch((err) => { log(`ERROR: ${err.message}`); console.error(err); });
     });
     actions.append(lookBtn, fromBtn);
 
-    li.append(swatch, name, dist, actions);
-    li.addEventListener('click', (evt) => handlePreciseModeClick(b, evt));
+    li.append(swatch, name, dist);
+    if (satelliteSelect) li.append(satelliteSelect);
+    li.append(actions);
+    li.addEventListener('click', async (evt) => {
+      if (!demo || modeChangeInFlight || !evt.metaKey) return;
+      const target = await resolveRowTarget(b, satelliteSelect);
+      if (target) handlePreciseModeClick(target, evt);
+    });
     legendEl.appendChild(li);
   }
   updateLegendActiveState();
@@ -1928,15 +2059,37 @@ function updateLegendActiveState() {
   // `bodyId` (which for the barycenter-positioned outer planets differs
   // from `target`, but was never what the legend row is keyed by).
   const activeLi = document.getElementById(`legend-${demo.viewObserver}`);
-  if (activeLi) activeLi.classList.add('active');
+  if (activeLi) {
+    activeLi.classList.add('active');
+    return;
+  }
+  // No top-level row for this target -- true for a materialized
+  // satellite (resolveRowTarget()), which never gets its own row.
+  // Highlight its parent's row instead, via the satellite's own
+  // recorded primaryId (prefetchBodyProbe()), so "viewing from a
+  // moon" still shows something active in the list.
+  const activeBody = demo.systemBodies.find((b) => b.target === demo.viewObserver);
+  if (activeBody && activeBody.primaryId != null) {
+    document.getElementById(`legend-${activeBody.primaryId}`)?.classList.add('active');
+  }
 }
 
 function updateViewStatus() {
   if (!demo) return;
   if (demo.mode === 'precise') {
-    const satCount = demo.bodies.length - 1;
+    // Split the rest of demo.bodies into real satellites of this
+    // center (resolveSatellitesFor()) and custom-kernel bodies, which
+    // ride along in precise mode too (enterPreciseMode()) but aren't
+    // this body's own satellites -- worth distinguishing in the label
+    // rather than lumping a user-loaded asteroid in as a "satellite".
+    const others = demo.bodies.slice(1);
+    const satCount = others.filter((b) => !b.isCustom).length;
+    const customCount = others.filter((b) => b.isCustom).length;
+    const parts = [];
+    if (satCount > 0) parts.push(`${satCount} satellite${satCount === 1 ? '' : 's'}`);
+    if (customCount > 0) parts.push(`${customCount} custom bod${customCount === 1 ? 'y' : 'ies'}`);
     viewStatusLabel.textContent = `Precise mode: ${demo.viewLabel}` +
-      (satCount > 0 ? ` + ${satCount} satellite${satCount === 1 ? '' : 's'}` : ' (no satellite data in this kernel)');
+      (parts.length ? ` + ${parts.join(', ')}` : ' (no satellite data in this kernel)');
     viewStatusEl.classList.add('exitable');
     return;
   }
@@ -1979,7 +2132,6 @@ async function applyViewSettings() {
     demo.mode = 'system';
     demo.preciseBodyId = null;
     demo.scale = SYSTEM_SCALE;
-    demo.activeRemote = demo.remote;
     demo.bodies = demo.systemBodies; // already carries its own per-body primaryId/dataStart/dataEnd -- nothing to restore separately
     buildPreciseLegend([]);
     resetCameraToDefault();
@@ -2116,102 +2268,115 @@ function recenterCameraAtOrigin() {
  * of magnitude below a screen pixel).
  */
 /**
- * Opens (or reuses, from demo.satelliteRemotes) an openRemoteSpk()
- * session for `kernelId` through the local range-caching proxy.
- * Structural discovery only -- a couple of ~64 KiB range reads even
- * for a multi-gigabyte file -- until something is actually prefetched
- * from it. Requires the proxy (see detectKernelProxy()): NAIF itself
- * sends no Access-Control-Allow-Origin, so a browser can't fetch these
+ * Opens (or reuses, from demo.satelliteRemotes) a structural-discovery-
+ * only session for `kernelId` through the local range-caching proxy --
+ * a couple of ~64 KiB range reads even for a multi-gigabyte file,
+ * until something is actually prefetched from it. Requires the proxy
+ * (see detectKernelProxy()): NAIF itself sends no
+ * Access-Control-Allow-Origin, so a browser can't fetch these
  * cross-origin any other way.
+ *
+ * Deliberately *not* openRemoteSpk() -- that always allocates its own
+ * fresh, isolated KernelPool, which would make a satellite
+ * un-chainable against anything outside its own kernel (spkez()/
+ * spkState() only ever search one pool -- see loadSelectedCustomBodies()'s
+ * own comment for the first time this exact problem came up, for
+ * custom kernels). The returned object is shaped like an
+ * openRemoteSpk() result (`{ remoteFile, pool, prefetch }`) so every
+ * existing caller (prefetchBodyProbe(), ensureBodyCoverage()) works
+ * unmodified, but `pool` is `demo.remote.pool` itself and `prefetch`
+ * registers into it via prefetchCustomBody() (full-chain first, single-
+ * hop-plus-verify fallback) -- so a satellite resolved this way can be
+ * positioned relative to (or used as CENTER for) any other body in the
+ * session, not just within a precise-mode view of its own parent.
  */
 async function openSatelliteKernel(kernelId) {
   if (demo.satelliteRemotes.has(kernelId)) return demo.satelliteRemotes.get(kernelId);
   const entry = proxyCatalogue.get(kernelId);
   log(`  Fetching ${entry.file} (${entry.size}) through the local proxy -- needed once, then cached for this session...`);
-  const remote = await openRemoteSpk(entry.url);
+  const remoteFile = await openRemoteFile(entry.url);
+  const remote = {
+    remoteFile,
+    pool: demo.remote.pool,
+    prefetch: ({ target, etStart, etEnd }) => prefetchCustomBody(remoteFile, demo.remote.pool, target, etStart, etEnd),
+  };
   demo.satelliteRemotes.set(kernelId, remote);
   return remote;
 }
 
 /**
- * Resolves precise mode's satellites for `spec`, trying two sources in
- * order:
+ * Resolves one satellite `candidate` (from satellitesFromManifest())
+ * to a real, prefetched body -- or `null`, having already logged why --
+ * trying two sources in order:
  *
  * 1. Whatever's already loaded (demo.remote) -- covers Earth's Moon in
- *    the ordinary case (bundled in de440/de440s), or any body if the
- *    user's own main kernel happens to already carry its moons (e.g.
- *    they picked jup365.bsp directly via the file picker).
- * 2. The kernel SATELLITE_KERNEL_FOR_BODY maps `spec.bodyId` to,
- *    fetched through the local proxy if one is running (openSatelliteKernel()) --
- *    self-sufficient: every satellite SPK in the manifest carries its
- *    own copy of the Sun/Earth/EMB/planet-barycenter chain to the SSB
- *    (confirmed in kernels/sources.mjs), so this needs nothing from
- *    demo.remote at all.
+ *    the ordinary case (bundled in de440/de440s), or any satellite if
+ *    the user's own main kernel happens to already carry it (e.g. they
+ *    picked jup365.bsp directly via the file picker).
+ * 2. The kernel `mapping` (SATELLITE_KERNEL_FOR_BODY's entry for the
+ *    parent) points to, fetched through the local proxy if one is
+ *    running (openSatelliteKernel()).
  *
- * Each returned satellite carries its own `.primaryId` (`spec.target`
- * -- see prefetchBodyProbe()), used later to draw its own real
- * two-body orbit ellipse around the clicked body (rebuildArcs()).
- *
- * @returns {{ remote: object, satellites: object[] }}
- *   `remote` is whichever of the two ended up being used (or demo.remote,
- *   unchanged, if neither had anything) -- the caller uses it as
- *   demo.activeRemote for the rest of this precise-mode session.
+ * The returned body carries its own `.primaryId` (`parentSpec.target`)
+ * and `.remote` (see prefetchBodyProbe()), for rebuildArcs() and
+ * ensureBodyCoverage() respectively -- used both by resolveSatellitesFor()
+ * (precise mode, wants every known satellite) and by the "Bodies
+ * shown" per-row satellite dropdown (wants exactly one, on demand).
  */
-async function resolveSatellitesFor(spec) {
-  const mapping = SATELLITE_KERNEL_FOR_BODY[spec.bodyId];
-  const candidates = mapping
-    ? satellitesFromManifest(mapping.kernelId, mapping.centerId ?? spec.target, [spec.target, spec.bodyId], mapping.only)
-    : [];
-  if (!candidates.length) {
-    return { remote: demo.remote, satellites: [] };
-  }
-
-  const fromMain = [];
-  for (const sat of candidates) {
-    const body = { ...sat };
-    try {
-      await prefetchBodyProbe(demo.remote, body, spec.target);
-      fromMain.push(body);
-    } catch {
-      // Not in the loaded kernel -- try the mapped satellite kernel below.
-    }
-  }
-  if (fromMain.length) {
-    return { remote: demo.remote, satellites: fromMain };
+async function resolveOneSatellite(parentSpec, candidate, mapping) {
+  const body = { ...candidate };
+  try {
+    await prefetchBodyProbe(demo.remote, body, parentSpec.target);
+    return body;
+  } catch {
+    // Not in the loaded kernel -- try the mapped satellite kernel below.
   }
 
   if (!proxyCatalogue || !proxyCatalogue.has(mapping.kernelId)) {
-    log(`  -> ${spec.name}'s satellites aren't in the loaded kernel, and no local proxy is running to fetch ` +
-      `${mapping.kernelId}.bsp from -- run \`npm run serve-example\` to see them.`);
-    return { remote: demo.remote, satellites: [] };
+    log(`  -> ${candidate.name} isn't in the loaded kernel, and no local proxy is running to fetch ` +
+      `${mapping.kernelId}.bsp from -- run \`npm run serve-example\` to see it.`);
+    return null;
   }
-
   let satRemote;
   try {
     satRemote = await openSatelliteKernel(mapping.kernelId);
   } catch (err) {
-    log(`  -> couldn't open ${mapping.kernelId}.bsp for ${spec.name}'s satellites (${err.message})`);
-    return { remote: demo.remote, satellites: [] };
+    log(`  -> couldn't open ${mapping.kernelId}.bsp for ${candidate.name} (${err.message})`);
+    return null;
   }
+  try {
+    await prefetchBodyProbe(satRemote, body, parentSpec.target);
+    return body;
+  } catch (err) {
+    log(`  -> couldn't prefetch ${candidate.name} (${err.message})`);
+    return null;
+  }
+}
 
-  const fromSatKernel = [];
-  for (const sat of candidates) {
-    const body = { ...sat };
-    try {
-      await prefetchBodyProbe(satRemote, body, spec.target);
-      fromSatKernel.push(body);
-    } catch (err) {
-      log(`  -> couldn't prefetch ${sat.name} (${err.message})`);
-    }
+/**
+ * Resolves *every* known satellite of `spec` -- precise mode's own use
+ * (enterPreciseMode()) -- via resolveOneSatellite(). Returns `[]` (not
+ * an error) if `spec` has no SATELLITE_KERNEL_FOR_BODY mapping at all
+ * (most bodies, including every satellite itself -- moons-of-moons
+ * aren't a thing in this data).
+ */
+async function resolveSatellitesFor(spec) {
+  const mapping = SATELLITE_KERNEL_FOR_BODY[spec.bodyId];
+  if (!mapping) return [];
+  const candidates = satellitesFromManifest(mapping.kernelId, mapping.centerId ?? spec.target, [spec.target, spec.bodyId], mapping.only);
+  const resolved = [];
+  for (const candidate of candidates) {
+    const body = await resolveOneSatellite(spec, candidate, mapping);
+    if (body) resolved.push(body);
   }
-  return { remote: satRemote, satellites: fromSatKernel };
+  return resolved;
 }
 
 async function enterPreciseMode(spec) {
   if (!demo) return;
   log(`Entering precise mode: ${spec.name}...`);
 
-  const { remote: precRemote, satellites } = await resolveSatellitesFor(spec);
+  const satellites = await resolveSatellitesFor(spec);
   log(satellites.length
     ? `  -> ${satellites.length} satellite(s): ${satellites.map((s) => s.name).join(', ')}`
     : `  -> no satellite data available for ${spec.name} in this session.`);
@@ -2221,7 +2386,18 @@ async function enterPreciseMode(spec) {
   // whole-system view -- harmless: rebuildArcs() and the marker loop
   // both key the center body off target === viewObserver, always true
   // here, before ever consulting primaryId.
-  const included = [{ ...spec, isPreciseCenter: true }, ...satellites];
+  //
+  // Custom-kernel bodies (loadSelectedCustomBodies()) stay visible
+  // through precise mode too -- appended after the center/satellites,
+  // not folded into `satellites` itself (they're not this body's
+  // satellites, so they're excluded from the "Satellites (precise
+  // mode)" mini-legend below). Positioning them correctly here is
+  // exactly what the shared-pool refactor (see openSatelliteKernel(),
+  // demo.remote.pool) makes possible -- previously demo.activeRemote
+  // would have pointed at a satellite kernel's own isolated pool,
+  // where a custom body's segments don't exist at all.
+  const customBodies = demo.systemBodies.filter((b) => b.isCustom);
+  const included = [{ ...spec, isPreciseCenter: true }, ...satellites, ...customBodies];
 
   const centerRadiusKm = meanRadiusKmFor(included[0]); // cache lands on the copy demo.bodies will actually hold
   if (centerRadiusKm == null) {
@@ -2237,7 +2413,6 @@ async function enterPreciseMode(spec) {
   demo.viewLabel = spec.name;
   demo.bodies = included;
   demo.scale = makePreciseScale(centerRadiusKm);
-  demo.activeRemote = precRemote;
   // Precise mode always uses the analytic-ellipse rendering, and never
   // an active Look At target, regardless of what the (now-disabled --
   // see below) View controls were left at in the whole-system view.
@@ -2255,7 +2430,7 @@ async function enterPreciseMode(spec) {
   periodSelect.disabled = true;
 
   ensureMarkers();
-  buildPreciseLegend(included.filter((b) => !b.isPreciseCenter));
+  buildPreciseLegend(included.filter((b) => !b.isPreciseCenter && !b.isCustom));
   await updateSceneForOffset(Number(timeSlider.value));
   fitCameraForPrecise();
   updateViewStatus();
@@ -2337,10 +2512,10 @@ async function updateSceneForOffset(offsetDays) {
 
   for (const b of demo.bodies) {
     // A custom body (loadSelectedCustomBodies()) is already prefetched
-    // over its entire real interval up front -- there's nothing more
-    // to cover, and demo.activeRemote.prefetch() is bound to the
-    // *primary* kernel's own file, which doesn't have this body's
-    // segments at all (see loadSelectedCustomBodies()'s own comment).
+    // over its entire real interval up front -- never needs a second
+    // prefetch (unlike every other body here, it has no `.remote` set
+    // at all, since ensureBodyCoverage() never needs to call
+    // `.prefetch()` on it).
     if (b.isCustom) continue;
     try {
       await ensureBodyCoverage(b, et, et);
@@ -2367,7 +2542,7 @@ async function updateSceneForOffset(offsetDays) {
     for (const b of demo.bodies) {
       if (b.target === demo.viewObserver) continue;
       if (b.isCustom) continue; // fixed, full-interval window -- see rebuildArcs(), not period-based
-      const window = trajectoryWindowForBody(centerBody, b, et, demo.activeRemote.pool, demo.periodMode);
+      const window = trajectoryWindowForBody(centerBody, b, et, demo.remote.pool, demo.periodMode);
       demo.trajectoryWindows.set(b.target, window);
       centerUnionStart = Math.min(centerUnionStart, window[0]);
       centerUnionEnd = Math.max(centerUnionEnd, window[1]);
@@ -2423,7 +2598,7 @@ async function updateSceneForOffset(offsetDays) {
   for (const b of demo.bodies) {
     let position;
     try {
-      ({ position } = spkez(b.target, demo.viewObserver, et, 'NONE', demo.viewFrame, demo.activeRemote.pool));
+      ({ position } = spkez(b.target, demo.viewObserver, et, 'NONE', demo.viewFrame, demo.remote.pool));
     } catch (err) {
       log(`  -> couldn't place ${b.name} relative to the current view (${err.message})`);
       continue;
@@ -2455,7 +2630,7 @@ async function updateSceneForOffset(offsetDays) {
       const distEl = document.getElementById(`pdist-${b.target}`);
       if (!distEl) continue;
       try {
-        const { position } = spkez(b.target, demo.viewObserver, et, 'NONE', demo.viewFrame, demo.activeRemote.pool);
+        const { position } = spkez(b.target, demo.viewObserver, et, 'NONE', demo.viewFrame, demo.remote.pool);
         distEl.textContent = `${Math.hypot(...position).toFixed(0)} km`;
       } catch (err) {
         distEl.textContent = '';
