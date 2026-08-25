@@ -1440,9 +1440,62 @@ async function prefetchCustomBody(remoteFile, pool, target, etStart, etEnd) {
     await prefetchSpkQuery(remoteFile, pool, { target, observer: SSB, etStart, etEnd });
     return;
   } catch {
-    // Falls through to the single-hop fallback below.
+    // Falls through to the hop-by-hop fallback below.
   }
-  await prefetchSpkBodySegment(remoteFile, pool, { bodyId: target, etStart, etEnd });
+
+  // Walk the chain toward the SSB one hop at a time. At each step:
+  // - If `current` is a body this session already knows about
+  //   (demo.systemBodies -- every standard body, always; any
+  //   previously-resolved satellite or custom body), its own segment
+  //   is presumably already registered in `pool` -- but its *coverage*
+  //   (the actual bytes populated) is another matter. A standard body
+  //   is only ever probed at a single point, demo.et0 ("now") --
+  //   there's no reason a custom kernel's own valid interval is
+  //   anywhere near that (a past mission trajectory, a comet's
+  //   apparition window, ...), so the segment existing doesn't mean
+  //   this specific [etStart, etEnd] is covered. ensureBodyCoverage()
+  //   widens it exactly like a live reference-epoch scrub would.
+  // - Otherwise, `current` must have its own segment within *this*
+  //   custom file -- fetch it (prefetchSpkBodySegment(), one hop, no
+  //   chain-to-SSB requirement of its own) and continue from its own
+  //   declared center.
+  // A plain single-hop attempt (fetch target's own segment, then
+  // trust whatever's already in `pool`) covers the common case --
+  // heliocentric or another standard-body-relative kernel -- but not
+  // a custom body chained through *another* recently-resolved body
+  // (whose own coverage may equally need widening), nor a genuinely
+  // multi-hop chain fully contained within the custom file itself.
+  let current = target;
+  const visited = new Set();
+  const MAX_CHAIN_HOPS = 20; // mirrors src/lazy/prefetch.js's own MAX_CHAIN_HOPS (NAIF's CHLEN, spkgeo.f)
+  for (let hop = 0; hop < MAX_CHAIN_HOPS && current !== SSB; hop++) {
+    if (visited.has(current)) {
+      throw new Error(`prefetchCustomBody: circular center chain detected -- body ${current} is its own ancestor`);
+    }
+    visited.add(current);
+
+    const known = demo.systemBodies.find((b) => b.target === current);
+    if (known) {
+      if (known.remote) {
+        await ensureBodyCoverage(known, etStart, etEnd);
+      } else if (etStart < known.dataStart || etEnd > known.dataEnd) {
+        // A custom body with no `.remote` (already fully prefetched
+        // over its own fixed interval) whose window doesn't cover
+        // what we need -- e.g. chained through a *different* custom
+        // kernel's body -- not automatically resolvable; see TODO.md.
+        throw new Error(
+          `prefetchCustomBody: body ${current}'s own interval [${known.dataStart}, ${known.dataEnd}] doesn't ` +
+            `cover [${etStart}, ${etEnd}] needed to chain body ${target} to the Solar System Barycenter`
+        );
+      }
+      break; // known bodies always themselves already chain to the SSB
+    }
+
+    await prefetchSpkBodySegment(remoteFile, pool, { bodyId: current, etStart, etEnd });
+    const segs = pool.getSpkSegments(current);
+    current = segs[segs.length - 1].center;
+  }
+
   spkez(target, SSB, (etStart + etEnd) / 2, 'NONE', INERTIAL_FRAME, pool); // throws clearly if the chain still doesn't resolve
 }
 
@@ -2088,8 +2141,8 @@ function updateViewStatus() {
     const parts = [];
     if (satCount > 0) parts.push(`${satCount} satellite${satCount === 1 ? '' : 's'}`);
     if (customCount > 0) parts.push(`${customCount} custom bod${customCount === 1 ? 'y' : 'ies'}`);
-    viewStatusLabel.textContent = `Precise mode: ${demo.viewLabel}` +
-      (parts.length ? ` + ${parts.join(', ')}` : ' (no satellite data in this kernel)');
+    const suffix = parts.length ? ` + ${parts.join(', ')}` : ' (no satellite data in this kernel)';
+    viewStatusLabel.textContent = `Precise mode: ${demo.viewLabel}${suffix} (orbit: ${demo.orbitMode})`;
     viewStatusEl.classList.add('exitable');
     return;
   }
@@ -2172,6 +2225,26 @@ async function applyViewSettings() {
   }
   updateViewStatus();
   updateLegendActiveState();
+}
+
+/**
+ * ORBIT/PERIOD's own 'change' handler -- unlike CENTER/FRAME/ROTATING
+ * (still routed through applyViewSettings(), which tears precise mode
+ * down on any change), these two stay live *while* precise mode is
+ * active: a custom-kernel body has no known primary/GM, so it never
+ * gets an ellipse (rebuildArcs()) and needs Trajectory mode to render
+ * at all -- including inside precise mode, where it's still shown
+ * (see enterPreciseMode()). Works identically in either mode; the only
+ * mode-specific behavior lives in updateSceneForOffset()/rebuildArcs()
+ * themselves (real satellites don't get a period-based trajectory
+ * while in precise mode).
+ */
+async function applyOrbitPeriodSettings() {
+  if (!demo) return;
+  demo.orbitMode = orbitSelect.value;
+  demo.periodMode = periodSelect.value;
+  await updateSceneForOffset(Number(timeSlider.value));
+  updateViewStatus();
 }
 
 /**
@@ -2413,21 +2486,32 @@ async function enterPreciseMode(spec) {
   demo.viewLabel = spec.name;
   demo.bodies = included;
   demo.scale = makePreciseScale(centerRadiusKm);
-  // Precise mode always uses the analytic-ellipse rendering, and never
-  // an active Look At target, regardless of what the (now-disabled --
-  // see below) View controls were left at in the whole-system view.
+  // Precise mode always *enters* on the analytic-ellipse rendering
+  // (regardless of what the whole-system view's ORBIT was left at),
+  // but -- unlike CENTER/FRAME/ROTATING, still locked below -- ORBIT/
+  // PERIOD stay live from here: a custom-kernel body has no known
+  // primary/GM, so it never gets an ellipse (see rebuildArcs()) and
+  // needs Trajectory mode to show anything at all here. Real
+  // satellites don't get a period-based trajectory even when ORBIT is
+  // Trajectory (see updateSceneForOffset()'s own comment) -- their
+  // already-exact two-body ellipse has no equivalent reason to need
+  // one. orbitSelect/periodSelect's own DOM values are reset to match
+  // (they're no longer disabled, so a stale selection from before
+  // would otherwise visibly disagree with demo.orbitMode here).
   demo.orbitMode = 'ellipse';
+  orbitSelect.value = 'ellipse';
+  demo.periodMode = 'sidereal';
+  periodSelect.value = 'sidereal';
   demo.lookAtTarget = null;
   sunLight.position.set(0, 0, 0); // this system's own center stands in as "the star" for lighting purposes
 
-  // The View controls don't apply to precise mode (a fully separate
-  // feature -- see applyViewSettings()'s own precise-mode teardown,
-  // which re-enables these on the way back out).
+  // CENTER/FRAME/ROTATING don't apply to precise mode (a fully
+  // separate feature -- see applyViewSettings()'s own precise-mode
+  // teardown, which re-enables these on the way back out). ORBIT/
+  // PERIOD are left enabled -- see above.
   centerSelect.disabled = true;
   frameSelect.disabled = true;
   rotatingCheckbox.disabled = true;
-  orbitSelect.disabled = true;
-  periodSelect.disabled = true;
 
   ensureMarkers();
   buildPreciseLegend(included.filter((b) => !b.isPreciseCenter && !b.isCustom));
@@ -2541,7 +2625,32 @@ async function updateSceneForOffset(offsetDays) {
     let centerUnionEnd = et;
     for (const b of demo.bodies) {
       if (b.target === demo.viewObserver) continue;
-      if (b.isCustom) continue; // fixed, full-interval window -- see rebuildArcs(), not period-based
+      if (b.isCustom) {
+        // No trajectoryWindows entry (rebuildArcs() uses its own fixed
+        // [customIntervalStart, customIntervalEnd] instead), but its
+        // interval still has to widen CENTER's (and the Sun's, below)
+        // own coverage same as any other body's window would -- every
+        // sample along a custom body's trajectory needs CENTER's own
+        // state at that same instant. Skipping this (as earlier rounds
+        // did) only "worked" when some *other* body's own window
+        // happened to already be wide enough to cover it too -- not
+        // guaranteed, and not true at all in precise mode, where no
+        // other body contributes a period-based window during
+        // (see the mode check below).
+        centerUnionStart = Math.min(centerUnionStart, b.customIntervalStart);
+        centerUnionEnd = Math.max(centerUnionEnd, b.customIntervalEnd);
+        continue;
+      }
+      // Real satellites don't get a period-based trajectory while in
+      // precise mode -- siderealPeriodSeconds() assumes a body orbits
+      // the Sun directly, which gives a moon essentially its parent
+      // planet's own (multi-month/year) period, not its real
+      // (hours/days) orbit around the parent -- a physically wrong,
+      // expensive-to-sample window. Precise mode's own two-body
+      // ellipse (computeOrbitalEllipse(), around the real parent) is
+      // already exact for satellites; trajectory mode there is only
+      // meant for custom bodies (see rebuildArcs()).
+      if (demo.mode === 'precise') continue;
       const window = trajectoryWindowForBody(centerBody, b, et, demo.remote.pool, demo.periodMode);
       demo.trajectoryWindows.set(b.target, window);
       centerUnionStart = Math.min(centerUnionStart, window[0]);
@@ -2573,8 +2682,22 @@ async function updateSceneForOffset(offsetDays) {
     // way scrubbed to +3600 days, all with the Sun's own coverage the
     // limiting factor even though every other body's own coverage was
     // already sufficient.
-    const sunBody = demo.bodies.find((b) => b.target === SUN_TARGET);
-    if (sunBody && sunBody !== centerBody) {
+    //
+    // Looked up from demo.systemBodies, not demo.bodies -- the Sun is
+    // *never* actually displayed in precise mode (demo.bodies there is
+    // just the precise center + its satellites + custom bodies), but
+    // the curvature step still needs its coverage widened to the same
+    // union in precise mode too (a custom body's trajectory there is
+    // exactly as Sun-relative-curvature-dependent as anywhere else).
+    // demo.systemBodies always has it -- added once in buildScene(),
+    // never removed regardless of mode.
+    const sunBody = demo.systemBodies.find((b) => b.target === SUN_TARGET);
+    // Compared by target, not object identity -- sunBody now always
+    // comes from demo.systemBodies, while centerBody comes from
+    // demo.bodies (a `{...spec}` copy in precise mode -- see
+    // enterPreciseMode()), so the two are never the same *object* even
+    // when centered on the Sun itself.
+    if (sunBody && sunBody.target !== centerBody?.target) {
       try {
         await ensureBodyCoverage(sunBody, centerUnionStart, centerUnionEnd);
       } catch (err) {
@@ -2586,6 +2709,7 @@ async function updateSceneForOffset(offsetDays) {
       if (b.target === demo.viewObserver) continue;
       if (b.isCustom) continue; // already fully prefetched -- see the isCustom skip above
       const window = demo.trajectoryWindows.get(b.target);
+      if (!window) continue; // a real satellite in precise mode -- never gets a period-based window (see the loop above)
       try {
         await ensureBodyCoverage(b, window[0], window[1]);
       } catch (err) {
@@ -2652,12 +2776,22 @@ timeSlider.addEventListener('input', () => {
   });
 });
 
-// All five View controls funnel through the same applyViewSettings()
-// -- see its own doc comment for the CENTER-transition ORBIT
-// auto-switch.
-for (const control of [centerSelect, frameSelect, rotatingCheckbox, orbitSelect, periodSelect]) {
+// CENTER/FRAME/ROTATING funnel through applyViewSettings() -- see its
+// own doc comment for the CENTER-transition ORBIT auto-switch; any
+// change here tears precise mode down if it was active.
+for (const control of [centerSelect, frameSelect, rotatingCheckbox]) {
   control.addEventListener('change', () => {
     applyViewSettings().catch((err) => {
+      log(`ERROR: ${err.message}`);
+      console.error(err);
+    });
+  });
+}
+// ORBIT/PERIOD get their own handler -- see applyOrbitPeriodSettings()'s
+// own comment for why they stay live through precise mode instead.
+for (const control of [orbitSelect, periodSelect]) {
+  control.addEventListener('change', () => {
+    applyOrbitPeriodSettings().catch((err) => {
       log(`ERROR: ${err.message}`);
       console.error(err);
     });

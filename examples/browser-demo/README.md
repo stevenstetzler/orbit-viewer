@@ -503,11 +503,19 @@ to (or used as Center for) any of the built-in ten. This also means a
 SSB directly -- the norm for real small-body/spacecraft SPK products)
 loads correctly even though the custom file itself has no
 Sun-to-SSB segment: that link is already sitting in the primary
-kernel's own prefetched data, in the same pool. What's *not* handled:
-a custom body relative to a center that isn't resolvable either within
-its own file or by anything already loaded (e.g. relative to a second
-custom body from a *different* file) -- that fails to load with a
-clear error -- see [`TODO.md`](../../TODO.md).
+kernel's own prefetched data, in the same pool -- and, since a standard
+body's own coverage is otherwise only ever probed once, at a single
+point near "now" (session start), loading a kernel whose own valid
+interval is nowhere near "now" (a past mission window, a comet's
+apparition, ...) widens that body's coverage to match rather than
+failing with a "byte range ... was not prefetched" error. This works
+across multiple hops too, as long as each one is either already known
+(any of the ten built-in bodies, or a previously-resolved satellite/
+custom body) or has its own segment within the same custom file.
+What's *not* handled: a custom body relative to a body that's itself a
+*different* custom-kernel body whose own already-prefetched interval
+doesn't cover what's needed -- that fails to load with a clear error
+-- see [`TODO.md`](../../TODO.md).
 
 ## Command+Click: precise single-body mode
 
@@ -578,11 +586,22 @@ leave precise mode.
 Custom-kernel bodies (see "Adding a custom kernel" above) stay visible
 through precise mode too, rendered at the same scale as everything
 else -- correctly positioned even if that puts them far outside the
-initial camera framing (zoom/pan out to find them), and shown as a
-marker only (no orbit-arc line -- they have no known primary/GM to
-draw an ellipse from, same rule as everywhere else). The `#viewStatus`
+initial camera framing (zoom/pan out to find them). The `#viewStatus`
 label distinguishes them from real satellites, e.g. `Precise mode:
 Earth + 1 satellite, 1 custom body`.
+
+Unlike Center/Frame/Rotating (locked to the clicked body while precise
+mode is active), **Orbit and Period stay live** -- switching Orbit to
+Trajectory renders a custom body's white sampled trajectory right
+inside precise mode too, exactly as in the whole-system view, since
+it's still the only way to show a body with no known primary/GM at
+all (ellipse mode has nothing to draw for one -- see "Orbit-arc shape"
+above). Real satellites don't get a period-based trajectory even then
+-- `siderealPeriodSeconds()` assumes a body orbits the Sun directly,
+which for a moon gives essentially its parent planet's own period, not
+its real (hours-to-days) orbit around the parent -- so Ellipse mode
+(exact, via the real parent as primary) stays their own only rendering
+either way.
 
 ## Satellites: a per-row dropdown, in and out of precise mode
 
