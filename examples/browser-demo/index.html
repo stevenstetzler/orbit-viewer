@@ -172,6 +172,27 @@
       <input id="customResolutionSlider" type="range" min="50" max="2000" step="10" value="500" style="width:100%" />
     </div>
 
+    <h2>5. Fetch from JPL Horizons</h2>
+    <p class="sub" style="margin-bottom:8px">
+      Fetch a real small-body/comet trajectory straight from
+      <a href="https://ssd.jpl.nasa.gov/horizons/" target="_blank" rel="noopener">JPL Horizons</a>
+      and add it exactly like "4. Add a custom kernel" above -- a name
+      (<code>Ceres</code>, <code>Apophis</code>), a numbered
+      designation (<code>99942</code>, or a comet like <code>1P</code>),
+      or a provisional designation (<code>1999 AN10</code>) all work.
+      Needs the local proxy running (Horizons sends no CORS headers
+      either) -- same requirement as the kernel catalogue above.
+    </p>
+    <input id="horizonsCommandInput" type="text" placeholder="Ceres, 99942, Apophis, 1999 AN10, 1P" disabled style="width:100%;box-sizing:border-box;margin-bottom:6px" />
+    <div class="controlGrid">
+      <label for="horizonsStartInput">Start</label>
+      <input id="horizonsStartInput" type="date" disabled />
+      <label for="horizonsStopInput">Stop</label>
+      <input id="horizonsStopInput" type="date" disabled />
+    </div>
+    <button id="horizonsFetchBtn" type="button" disabled style="margin-top:6px">Fetch</button>
+    <div id="horizonsStatus"></div>
+
     <h2>View controls</h2>
     <div class="controlGrid">
       <label for="centerSelect">Center</label>
@@ -302,6 +323,11 @@ const customKernelEpochSlider = document.getElementById('customKernelEpochSlider
 const customKernelEpochLabel = document.getElementById('customKernelEpochLabel');
 const customKernelLoadBtn = document.getElementById('customKernelLoadBtn');
 const customKernelCancelBtn = document.getElementById('customKernelCancelBtn');
+const horizonsCommandInput = document.getElementById('horizonsCommandInput');
+const horizonsStartInput = document.getElementById('horizonsStartInput');
+const horizonsStopInput = document.getElementById('horizonsStopInput');
+const horizonsFetchBtn = document.getElementById('horizonsFetchBtn');
+const horizonsStatusEl = document.getElementById('horizonsStatus');
 
 function log(line) {
   statusEl.textContent += (statusEl.textContent.endsWith('\n') || statusEl.textContent === '' ? '' : '\n') + line;
@@ -1132,6 +1158,24 @@ function clearSession() {
   customKernelInput.disabled = true;
   customResolutionRow.style.display = 'none';
   customKernelStatusEl.textContent = '';
+  updateHorizonsAvailability();
+}
+
+/**
+ * "5. Fetch from JPL Horizons" needs *both* an open session (same as
+ * the file-picker custom-kernel path -- scanAndOfferCustomKernel()
+ * bails without one) *and* the local proxy (Horizons sends no CORS
+ * headers either -- see fetchFromHorizons()), unlike the file picker,
+ * which only needs the former. Called from wherever either condition
+ * changes: beginSession()/clearSession() (demo) and
+ * detectKernelProxy() (proxyCatalogue).
+ */
+function updateHorizonsAvailability() {
+  const available = Boolean(demo) && Boolean(proxyCatalogue);
+  horizonsCommandInput.disabled = !available;
+  horizonsStartInput.disabled = !available;
+  horizonsStopInput.disabled = !available;
+  horizonsFetchBtn.disabled = !available;
 }
 
 /**
@@ -1257,6 +1301,7 @@ async function beginSession(remote, { sourceLabel, sourceSizeBytes, counters = n
   };
   updateViewStatus();
   customKernelInput.disabled = false;
+  updateHorizonsAvailability();
 
   await buildScene();
 }
@@ -1614,9 +1659,18 @@ customResolutionSlider.addEventListener('input', () => {
 });
 customResolutionLabel.textContent = customResolutionSlider.value;
 
-customKernelInput.addEventListener('change', async () => {
-  const file = customKernelInput.files && customKernelInput.files[0];
-  if (!file || !demo) return;
+/**
+ * Structurally scans `file` for SPK bodies and, if any are found,
+ * opens the "Add bodies" review/select modal -- the shared second half
+ * of both ways a custom kernel enters this demo: picked from disk via
+ * `customKernelInput` below, or fetched from JPL Horizons (see
+ * fetchFromHorizons()). `discoverSpkBodies()`/`openCustomKernelModal()`
+ * only ever touch `file.name`/`.size`/`.slice()`, never `instanceof
+ * File`, so a synthetic `File` built from fetched bytes is a drop-in
+ * here -- no separate code path needed for where the bytes came from.
+ */
+async function scanAndOfferCustomKernel(file) {
+  if (!demo) return;
   customKernelInput.disabled = true;
   customKernelStatusEl.textContent = `Scanning ${file.name}...`;
   try {
@@ -1639,7 +1693,89 @@ customKernelInput.addEventListener('change', async () => {
   } finally {
     customKernelInput.disabled = false;
   }
+}
+
+customKernelInput.addEventListener('change', () => {
+  const file = customKernelInput.files && customKernelInput.files[0];
+  if (!file) return;
+  scanAndOfferCustomKernel(file);
 });
+
+/** e.g. 103748 -> "101.3 KB" -- for the Horizons fetch status line below. */
+function formatBytesShort(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * "5. Fetch from JPL Horizons": fetches a small-body/comet SPK through
+ * the local proxy's /horizons/spk endpoint (see scripts/serve-example.mjs/
+ * scripts/horizonsSpk.mjs -- the object-identifier classification and
+ * Horizons quirks live there, server-side, not duplicated here), then
+ * hands the raw bytes to scanAndOfferCustomKernel() as a synthetic
+ * File -- from that point on it's the *exact* same review/select/add
+ * flow as picking a local .bsp above.
+ */
+async function fetchFromHorizons() {
+  const command = horizonsCommandInput.value.trim();
+  const start = horizonsStartInput.value;
+  const stop = horizonsStopInput.value;
+  if (!command) {
+    horizonsStatusEl.textContent = 'Enter an object name or designation first.';
+    return;
+  }
+  if (!start || !stop) {
+    horizonsStatusEl.textContent = 'Pick a start and stop date first.';
+    return;
+  }
+
+  horizonsFetchBtn.disabled = true;
+  horizonsStatusEl.textContent = `Fetching ${command} from Horizons (${start} to ${stop})...`;
+  log(`Fetching ${command} from JPL Horizons (${start} to ${stop})...`);
+  try {
+    const url = `/horizons/spk?${new URLSearchParams({ command, start, stop })}`;
+    const response = await fetch(url);
+    if (!response.ok) {
+      const body = await response.json().catch(() => null);
+      throw new Error(body?.error || `HTTP ${response.status} ${response.statusText}`);
+    }
+    const bytes = await response.arrayBuffer();
+    // Sanitized only for use as a display/download-adjacent filename --
+    // discoverSpkBodies() reads the actual NAIF ID(s) from the SPK's
+    // own comment area/segments, not from this name.
+    const safeName = command.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'object';
+    const file = new File([bytes], `horizons-${safeName}.bsp`, { type: 'application/octet-stream' });
+    horizonsStatusEl.textContent = `Fetched ${file.name} (${formatBytesShort(bytes.byteLength)}).`;
+    log(`  -> ${formatBytesShort(bytes.byteLength)} from Horizons; scanning for bodies...`);
+    await scanAndOfferCustomKernel(file);
+  } catch (err) {
+    horizonsStatusEl.textContent = `ERROR: ${err.message}`;
+    log(`ERROR fetching ${command} from Horizons: ${err.message}`);
+    console.error(err);
+  } finally {
+    horizonsFetchBtn.disabled = !(demo && proxyCatalogue);
+  }
+}
+horizonsFetchBtn.addEventListener('click', () => {
+  fetchFromHorizons().catch((err) => {
+    log(`ERROR: ${err.message}`);
+    console.error(err);
+  });
+});
+
+// Default start/stop to a modest +-2-year window around today, so a
+// first try is cheap -- freely editable before clicking Fetch.
+{
+  const today = new Date();
+  const fmt = (d) => d.toISOString().slice(0, 10);
+  const start = new Date(today);
+  start.setFullYear(start.getFullYear() - 2);
+  const stop = new Date(today);
+  stop.setFullYear(stop.getFullYear() + 2);
+  horizonsStartInput.value = fmt(start);
+  horizonsStopInput.value = fmt(stop);
+}
 
 /**
  * A body's real mean radius in km -- BODY<id>_RADII, averaged across
@@ -2887,6 +3023,7 @@ async function detectKernelProxy() {
   // this to fetch a satellite kernel on demand when precise mode needs
   // one and the main kernel doesn't already have it.
   proxyCatalogue = new Map(catalogue.kernels.map((entry) => [entry.id, entry]));
+  updateHorizonsAvailability();
 
   for (const entry of catalogue.kernels) {
     const li = document.createElement('li');

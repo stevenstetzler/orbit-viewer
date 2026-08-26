@@ -517,6 +517,38 @@ What's *not* handled: a custom body relative to a body that's itself a
 doesn't cover what's needed -- that fails to load with a clear error
 -- see [`TODO.md`](../../TODO.md).
 
+## Fetching a kernel from JPL Horizons
+
+"5. Fetch from JPL Horizons" (sidebar, enabled once a session is open
+*and* the local proxy is running -- see below) gets a real small-body/
+comet trajectory straight from [JPL Horizons](https://ssd.jpl.nasa.gov/horizons/)
+without leaving the page: type an identifier, pick a start/stop date
+(defaults to a +/-2-year window around today), click Fetch. The result
+feeds directly into "Adding a custom kernel" above -- same structural
+scan, same "Add bodies" popup, same everything -- since a Horizons SPK
+*is* an ordinary `.bsp` file (segment type 21, "extended difference
+lines" -- see [`README.md`](../../README.md)'s segment-type list),
+Horizons just base64-encodes it in its JSON response.
+
+**Identifiers**: a name (`Ceres`, `Apophis`), a numbered small body or
+comet (`99942`, or a comet with its type suffix, e.g. `1P`), or a
+provisional designation (`1999 AN10`) all work -- the last two get
+sent as `DES=<id>;` (Horizons' own disambiguating syntax), everything
+else passed through as typed. A request that's genuinely ambiguous in
+Horizons' own database (some comets match several apparition/epoch
+records even with a specific designation) surfaces Horizons' own
+match listing in the status line rather than failing silently.
+
+**Needs the local proxy** (`npm run serve-example`) for the same
+reason the kernel catalogue above does: `ssd.jpl.nasa.gov` sends no
+`Access-Control-Allow-Origin` header, so a browser can't fetch it
+cross-origin at all. The proxy fetches Horizons on the page's behalf
+(`/horizons/spk?command=...&start=...&stop=...`, see
+`scripts/horizonsSpk.mjs`/`scripts/serve-example.mjs`) and relays the
+decoded bytes back same-origin -- no caching, unlike the kernel proxy,
+since each request is a distinct object/time-range combination rather
+than a range within one large fixed file.
+
 ## Command+Click: precise single-body mode
 
 Shows *only* the clicked body and its real satellites. DE440/DE440s

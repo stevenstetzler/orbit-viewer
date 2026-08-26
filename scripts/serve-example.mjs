@@ -28,6 +28,14 @@
  *      fetches only the blocks covering those bytes, and they stay on
  *      disk for next time. A 2 GB kernel costs a couple of MB to use.
  *
+ * 3. `/horizons/spk?command=...&start=...&stop=...` -- fetches a
+ *    small-body/comet trajectory SPK from the JPL Horizons API on the
+ *    browser's behalf (see horizonsSpk.mjs) and relays the raw bytes
+ *    back same-origin. Same CORS reasoning as (2) above --
+ *    ssd.jpl.nasa.gov sends no Access-Control-Allow-Origin either --
+ *    but no caching (each request is a distinct object/time-range
+ *    combination, not a range within one large fixed file).
+ *
  * Block size: `--block-bytes` defaults to 64 KiB, matching the block
  * size `src/lazy/remoteFile.js` uses in the browser, so the proxy
  * fetches upstream exactly what the page asked for. Raising it trades
@@ -42,10 +50,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { RangeCache, parseRangeHeader, DEFAULT_BLOCK_BYTES } from './rangeCache.mjs';
 import { KERNELS, SPK_IDS, formatBytes } from '../kernels/sources.mjs';
+import { fetchHorizonsSpk } from './horizonsSpk.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CACHE_DIR = path.join(REPO_ROOT, 'kernels', 'cache');
 const PROXY_PREFIX = '/kernels/remote/';
+const HORIZONS_PREFIX = '/horizons/spk';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -185,6 +195,42 @@ async function handleProxyIndex(res) {
   sendJson(res, 200, { kernels: entries });
 }
 
+/**
+ * GET /horizons/spk?command=<object>&start=<date>&stop=<date> -- see
+ * horizonsSpk.mjs for the actual Horizons query/quirks. Success:
+ * raw SPK bytes, same-origin, `application/octet-stream`. Failure
+ * (bad/ambiguous/ineligible object, or Horizons itself unreachable):
+ * `4xx` JSON `{ error }`, Horizons' own message verbatim -- already
+ * specific and actionable (which record didn't match, why, etc.), not
+ * worth re-wrapping.
+ */
+async function handleHorizons(req, res, url) {
+  const command = url.searchParams.get('command');
+  const start = url.searchParams.get('start');
+  const stop = url.searchParams.get('stop');
+  if (!command || !start || !stop) {
+    return sendJson(res, 400, { error: 'command, start, and stop query parameters are all required.' });
+  }
+
+  console.log(`  [horizons] fetching SPK for "${command}" (${start} .. ${stop})...`);
+  let bytes;
+  try {
+    ({ bytes } = await fetchHorizonsSpk({ command, startTime: start, stopTime: stop }));
+  } catch (err) {
+    console.error(`  [horizons] "${command}": ${err.message}`);
+    return sendJson(res, 502, { error: err.message });
+  }
+
+  console.log(`  [horizons] "${command}": ${formatBytes(bytes.byteLength)}.`);
+  res.writeHead(200, {
+    'content-type': 'application/octet-stream',
+    'content-length': bytes.byteLength,
+    'access-control-allow-origin': '*',
+    'cache-control': 'no-cache',
+  });
+  res.end(bytes);
+}
+
 async function handleStatic(req, res, url) {
   let rel = decodeURIComponent(url.pathname);
   if (rel.endsWith('/')) rel += 'index.html';
@@ -221,6 +267,8 @@ const server = http.createServer(async (req, res) => {
       await handleProxyIndex(res);
     } else if (url.pathname.startsWith(PROXY_PREFIX)) {
       await handleProxy(req, res, url);
+    } else if (url.pathname === HORIZONS_PREFIX) {
+      await handleHorizons(req, res, url);
     } else {
       await handleStatic(req, res, url);
     }
@@ -236,6 +284,7 @@ server.listen(opts.port, () => {
   console.log(`spiceJS example server on http://localhost:${opts.port}`);
   console.log(`  demo:        http://localhost:${opts.port}/examples/browser-demo/`);
   console.log(`  kernel list: http://localhost:${opts.port}${PROXY_PREFIX}`);
+  console.log(`  horizons:    http://localhost:${opts.port}${HORIZONS_PREFIX}?command=...&start=...&stop=...`);
   console.log(`  proxying ${SPK_IDS.length} kernels (${formatBytes(total)} upstream) into ${path.relative(REPO_ROOT, CACHE_DIR)}/`);
   console.log(`  block size ${formatBytes(opts.blockBytes)} -- only blocks actually requested are ever fetched.`);
 });
