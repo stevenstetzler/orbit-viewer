@@ -36,6 +36,13 @@
   #proxyList .pname { color: #d7dce5; font-weight: 600; }
   #proxyList .psize { color: #8892a6; font-variant-numeric: tabular-nums; margin-left: auto; white-space: nowrap; }
   #proxyList .pdesc { display: block; color: #626c80; font-size: 11px; margin-top: 2px; }
+  #horizonsCandidateList li {
+    display: block; margin: 3px -8px; padding: 6px 8px;
+    border-radius: 4px; cursor: pointer; border: 1px solid transparent;
+  }
+  #horizonsCandidateList li:hover { background: #141a26; border-color: #1c2230; }
+  #horizonsCandidateList .pdes { color: #d7dce5; font-weight: 600; }
+  #horizonsCandidateList .cname { display: block; color: #626c80; font-size: 11px; margin-top: 2px; }
   #legend, #preciseLegend { list-style: none; margin: 0; padding: 0; }
   #legend li {
     display: flex; align-items: center; gap: 8px; margin: 2px -8px; padding: 4px 8px;
@@ -180,8 +187,10 @@
       (<code>Ceres</code>, <code>Apophis</code>), a numbered
       designation (<code>99942</code>, or a comet like <code>1P</code>),
       or a provisional designation (<code>1999 AN10</code>) all work.
-      Needs the local proxy running (Horizons sends no CORS headers
-      either) -- same requirement as the kernel catalogue above.
+      Looked up first against JPL's Small-Body Database; if more than
+      one object matches, you'll get a list to pick from. Needs the
+      local proxy running (neither API sends CORS headers) -- same
+      requirement as the kernel catalogue above.
     </p>
     <input id="horizonsCommandInput" type="text" placeholder="Ceres, 99942, Apophis, 1999 AN10, 1P" disabled style="width:100%;box-sizing:border-box;margin-bottom:6px" />
     <div class="controlGrid">
@@ -192,6 +201,7 @@
     </div>
     <button id="horizonsFetchBtn" type="button" disabled style="margin-top:6px">Fetch</button>
     <div id="horizonsStatus"></div>
+    <ul id="horizonsCandidateList" style="display:none;list-style:none;margin:8px 0 0;padding:0"></ul>
 
     <h2>View controls</h2>
     <div class="controlGrid">
@@ -328,6 +338,7 @@ const horizonsStartInput = document.getElementById('horizonsStartInput');
 const horizonsStopInput = document.getElementById('horizonsStopInput');
 const horizonsFetchBtn = document.getElementById('horizonsFetchBtn');
 const horizonsStatusEl = document.getElementById('horizonsStatus');
+const horizonsCandidateListEl = document.getElementById('horizonsCandidateList');
 
 function log(line) {
   statusEl.textContent += (statusEl.textContent.endsWith('\n') || statusEl.textContent === '' ? '' : '\n') + line;
@@ -1159,6 +1170,7 @@ function clearSession() {
   customResolutionRow.style.display = 'none';
   customKernelStatusEl.textContent = '';
   updateHorizonsAvailability();
+  clearHorizonsCandidates();
 }
 
 /**
@@ -1708,20 +1720,116 @@ function formatBytesShort(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+/** Hides and empties the ambiguous-match candidate list. */
+function clearHorizonsCandidates() {
+  horizonsCandidateListEl.style.display = 'none';
+  horizonsCandidateListEl.textContent = '';
+}
+
 /**
- * "5. Fetch from JPL Horizons": fetches a small-body/comet SPK through
- * the local proxy's /horizons/spk endpoint (see scripts/serve-example.mjs/
- * scripts/horizonsSpk.mjs -- the object-identifier classification and
- * Horizons quirks live there, server-side, not duplicated here), then
- * hands the raw bytes to scanAndOfferCustomKernel() as a synthetic
- * File -- from that point on it's the *exact* same review/select/add
- * flow as picking a local .bsp above.
+ * Resolves `sstr` to a real SPK-ID through the local proxy's
+ * /horizons/resolve endpoint (see scripts/horizonsSpk.mjs's own doc
+ * comment for the three possible outcomes) -- the first of "5. Fetch
+ * from JPL Horizons"'s two steps. Throws only for a genuine proxy-
+ * level failure (SBDB unreachable); `found`/`ambiguous`/`not-found`
+ * are all normal returns for the caller to branch on.
+ */
+async function resolveHorizonsObject(sstr) {
+  const response = await fetch(`/horizons/resolve?${new URLSearchParams({ sstr })}`);
+  const body = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(body?.error || `HTTP ${response.status} ${response.statusText}`);
+  return body;
+}
+
+/**
+ * Second step: given an already-resolved `spkid` (from
+ * resolveHorizonsObject() above), fetches its trajectory SPK through
+ * /horizons/spk and hands the bytes to scanAndOfferCustomKernel() as
+ * a synthetic File -- from that point on it's the *exact* same
+ * review/select/add flow as picking a local .bsp above. `label` is
+ * just for the status line/log and the synthetic filename (SBDB's own
+ * `fullname`, when available -- discoverSpkBodies() reads the actual
+ * NAIF ID(s) from the SPK's own segments, not from this name).
+ */
+async function addHorizonsBody({ spkid, label, start, stop }) {
+  horizonsStatusEl.textContent = `Fetching ${label} (spkid ${spkid}) from Horizons (${start} to ${stop})...`;
+  log(`Fetching ${label} (spkid ${spkid}) from JPL Horizons (${start} to ${stop})...`);
+  const url = `/horizons/spk?${new URLSearchParams({ spkid, start, stop })}`;
+  const response = await fetch(url);
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    throw new Error(body?.error || `HTTP ${response.status} ${response.statusText}`);
+  }
+  const bytes = await response.arrayBuffer();
+  const safeName = label.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || spkid;
+  const file = new File([bytes], `horizons-${safeName}.bsp`, { type: 'application/octet-stream' });
+  horizonsStatusEl.textContent = `Fetched ${file.name} (${formatBytesShort(bytes.byteLength)}).`;
+  log(`  -> ${formatBytesShort(bytes.byteLength)} from Horizons; scanning for bodies...`);
+  await scanAndOfferCustomKernel(file);
+}
+
+/**
+ * Renders SBDB's ambiguous-match candidates (resolveHorizonsObject()'s
+ * `candidates`) as a clickable list -- picking one re-resolves *that*
+ * candidate's own `pdes` (confirmed always unambiguous -- see
+ * horizonsSpk.mjs) and, once resolved, fetches and adds it exactly
+ * like a direct match would have.
+ */
+function showHorizonsCandidates(candidates, { start, stop }) {
+  horizonsCandidateListEl.textContent = '';
+  for (const { pdes, name } of candidates) {
+    const li = document.createElement('li');
+    const pdesEl = document.createElement('span');
+    pdesEl.className = 'pdes';
+    pdesEl.textContent = pdes;
+    const nameEl = document.createElement('span');
+    nameEl.className = 'cname';
+    nameEl.textContent = name;
+    li.append(pdesEl, nameEl);
+    li.addEventListener('click', async () => {
+      if (li.dataset.busy) return;
+      li.dataset.busy = '1';
+      horizonsFetchBtn.disabled = true;
+      try {
+        const resolved = await resolveHorizonsObject(pdes);
+        if (resolved.status !== 'found') {
+          // Shouldn't happen (a candidate's own pdes is always
+          // unambiguous), but surface whatever SBDB actually said
+          // rather than silently doing nothing.
+          throw new Error(resolved.message || `couldn't resolve ${pdes} to a single object.`);
+        }
+        clearHorizonsCandidates();
+        await addHorizonsBody({ spkid: resolved.spkid, label: resolved.fullname || pdes, start, stop });
+      } catch (err) {
+        horizonsStatusEl.textContent = `ERROR: ${err.message}`;
+        log(`ERROR fetching ${pdes} from Horizons: ${err.message}`);
+        console.error(err);
+      } finally {
+        delete li.dataset.busy;
+        horizonsFetchBtn.disabled = !(demo && proxyCatalogue);
+      }
+    });
+    horizonsCandidateListEl.appendChild(li);
+  }
+  horizonsCandidateListEl.style.display = '';
+}
+
+/**
+ * "5. Fetch from JPL Horizons": resolves the typed identifier through
+ * JPL's Small-Body Database first (resolveHorizonsObject()), *then*
+ * fetches the resulting object's SPK (addHorizonsBody()) -- Horizons'
+ * own `DES=` command needs a real SPK-ID, and a bare name like
+ * "Ceres" isn't reliably one. An ambiguous match (several objects
+ * share the typed string) surfaces a pickable list
+ * (showHorizonsCandidates()) instead of guessing; no match surfaces
+ * SBDB's own message.
  */
 async function fetchFromHorizons() {
-  const command = horizonsCommandInput.value.trim();
+  const sstr = horizonsCommandInput.value.trim();
   const start = horizonsStartInput.value;
   const stop = horizonsStopInput.value;
-  if (!command) {
+  clearHorizonsCandidates();
+  if (!sstr) {
     horizonsStatusEl.textContent = 'Enter an object name or designation first.';
     return;
   }
@@ -1731,27 +1839,26 @@ async function fetchFromHorizons() {
   }
 
   horizonsFetchBtn.disabled = true;
-  horizonsStatusEl.textContent = `Fetching ${command} from Horizons (${start} to ${stop})...`;
-  log(`Fetching ${command} from JPL Horizons (${start} to ${stop})...`);
+  horizonsStatusEl.textContent = `Looking up "${sstr}" in JPL's Small-Body Database...`;
+  log(`Looking up "${sstr}" in JPL's Small-Body Database...`);
   try {
-    const url = `/horizons/spk?${new URLSearchParams({ command, start, stop })}`;
-    const response = await fetch(url);
-    if (!response.ok) {
-      const body = await response.json().catch(() => null);
-      throw new Error(body?.error || `HTTP ${response.status} ${response.statusText}`);
+    const resolved = await resolveHorizonsObject(sstr);
+    if (resolved.status === 'not-found') {
+      horizonsStatusEl.textContent = resolved.message;
+      log(`  -> ${resolved.message}`);
+      return;
     }
-    const bytes = await response.arrayBuffer();
-    // Sanitized only for use as a display/download-adjacent filename --
-    // discoverSpkBodies() reads the actual NAIF ID(s) from the SPK's
-    // own comment area/segments, not from this name.
-    const safeName = command.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'object';
-    const file = new File([bytes], `horizons-${safeName}.bsp`, { type: 'application/octet-stream' });
-    horizonsStatusEl.textContent = `Fetched ${file.name} (${formatBytesShort(bytes.byteLength)}).`;
-    log(`  -> ${formatBytesShort(bytes.byteLength)} from Horizons; scanning for bodies...`);
-    await scanAndOfferCustomKernel(file);
+    if (resolved.status === 'ambiguous') {
+      horizonsStatusEl.textContent =
+        `"${sstr}" matches ${resolved.candidates.length} objects -- pick one below.`;
+      log(`  -> ${resolved.candidates.length} matches; pick one below.`);
+      showHorizonsCandidates(resolved.candidates, { start, stop });
+      return;
+    }
+    await addHorizonsBody({ spkid: resolved.spkid, label: resolved.fullname || sstr, start, stop });
   } catch (err) {
     horizonsStatusEl.textContent = `ERROR: ${err.message}`;
-    log(`ERROR fetching ${command} from Horizons: ${err.message}`);
+    log(`ERROR fetching ${sstr} from Horizons: ${err.message}`);
     console.error(err);
   } finally {
     horizonsFetchBtn.disabled = !(demo && proxyCatalogue);

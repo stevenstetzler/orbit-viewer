@@ -28,12 +28,16 @@
  *      fetches only the blocks covering those bytes, and they stay on
  *      disk for next time. A 2 GB kernel costs a couple of MB to use.
  *
- * 3. `/horizons/spk?command=...&start=...&stop=...` -- fetches a
- *    small-body/comet trajectory SPK from the JPL Horizons API on the
- *    browser's behalf (see horizonsSpk.mjs) and relays the raw bytes
- *    back same-origin. Same CORS reasoning as (2) above --
- *    ssd.jpl.nasa.gov sends no Access-Control-Allow-Origin either --
- *    but no caching (each request is a distinct object/time-range
+ * 3. `/horizons/resolve?sstr=...` and `/horizons/spk?spkid=...&start=
+ *    ...&stop=...` -- the two-step small-body lookup (see
+ *    horizonsSpk.mjs): `resolve` queries JPL's Small-Body Database to
+ *    turn whatever the user typed into an exact SPK-ID (or an
+ *    ambiguous-match list, or a not-found message, for the browser to
+ *    handle), `spk` then fetches that object's trajectory SPK from
+ *    Horizons and relays the raw bytes back same-origin. Same CORS
+ *    reasoning as (2) above -- neither ssd-api.jpl.nasa.gov nor
+ *    ssd.jpl.nasa.gov sends Access-Control-Allow-Origin -- but no
+ *    caching (each request is a distinct object/time-range
  *    combination, not a range within one large fixed file).
  *
  * Block size: `--block-bytes` defaults to 64 KiB, matching the block
@@ -50,12 +54,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { RangeCache, parseRangeHeader, DEFAULT_BLOCK_BYTES } from './rangeCache.mjs';
 import { KERNELS, SPK_IDS, formatBytes } from '../kernels/sources.mjs';
-import { fetchHorizonsSpk } from './horizonsSpk.mjs';
+import { resolveSbdbObject, fetchHorizonsSpk } from './horizonsSpk.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CACHE_DIR = path.join(REPO_ROOT, 'kernels', 'cache');
 const PROXY_PREFIX = '/kernels/remote/';
-const HORIZONS_PREFIX = '/horizons/spk';
+const HORIZONS_RESOLVE_PREFIX = '/horizons/resolve';
+const HORIZONS_SPK_PREFIX = '/horizons/spk';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -196,32 +201,62 @@ async function handleProxyIndex(res) {
 }
 
 /**
- * GET /horizons/spk?command=<object>&start=<date>&stop=<date> -- see
- * horizonsSpk.mjs for the actual Horizons query/quirks. Success:
- * raw SPK bytes, same-origin, `application/octet-stream`. Failure
- * (bad/ambiguous/ineligible object, or Horizons itself unreachable):
- * `4xx` JSON `{ error }`, Horizons' own message verbatim -- already
- * specific and actionable (which record didn't match, why, etc.), not
- * worth re-wrapping.
+ * GET /horizons/resolve?sstr=<query> -- resolves a user-typed object
+ * identifier to a real SPK-ID via JPL's Small-Body Database (see
+ * resolveSbdbObject()). Always 200 + JSON with a `status` field for
+ * any *legitimate* SBDB outcome (`found`/`ambiguous`/`not-found` --
+ * see horizonsSpk.mjs's own doc comment for each shape) -- those
+ * aren't proxy failures, just results the browser is expected to
+ * branch on. Only a genuine transport failure (SBDB unreachable) gets
+ * a non-200.
  */
-async function handleHorizons(req, res, url) {
-  const command = url.searchParams.get('command');
-  const start = url.searchParams.get('start');
-  const stop = url.searchParams.get('stop');
-  if (!command || !start || !stop) {
-    return sendJson(res, 400, { error: 'command, start, and stop query parameters are all required.' });
+async function handleHorizonsResolve(req, res, url) {
+  const sstr = url.searchParams.get('sstr');
+  if (!sstr) {
+    return sendJson(res, 400, { error: 'sstr query parameter is required.' });
   }
 
-  console.log(`  [horizons] fetching SPK for "${command}" (${start} .. ${stop})...`);
-  let bytes;
+  console.log(`  [horizons] resolving "${sstr}" via SBDB...`);
+  let result;
   try {
-    ({ bytes } = await fetchHorizonsSpk({ command, startTime: start, stopTime: stop }));
+    result = await resolveSbdbObject(sstr);
   } catch (err) {
-    console.error(`  [horizons] "${command}": ${err.message}`);
+    console.error(`  [horizons] resolve "${sstr}": ${err.message}`);
     return sendJson(res, 502, { error: err.message });
   }
 
-  console.log(`  [horizons] "${command}": ${formatBytes(bytes.byteLength)}.`);
+  console.log(`  [horizons] resolve "${sstr}": ${result.status}` +
+    (result.status === 'found' ? ` (spkid ${result.spkid})` : ''));
+  sendJson(res, 200, result);
+}
+
+/**
+ * GET /horizons/spk?spkid=<id>&start=<date>&stop=<date> -- fetches
+ * the trajectory SPK for an already-resolved `spkid` (from
+ * /horizons/resolve above) via Horizons. Success: raw SPK bytes,
+ * same-origin, `application/octet-stream`. Failure (ineligible
+ * object, bad time range, or Horizons itself unreachable): `4xx` JSON
+ * `{ error }`, Horizons' own message verbatim -- already specific and
+ * actionable, not worth re-wrapping.
+ */
+async function handleHorizonsSpk(req, res, url) {
+  const spkid = url.searchParams.get('spkid');
+  const start = url.searchParams.get('start');
+  const stop = url.searchParams.get('stop');
+  if (!spkid || !start || !stop) {
+    return sendJson(res, 400, { error: 'spkid, start, and stop query parameters are all required.' });
+  }
+
+  console.log(`  [horizons] fetching SPK for spkid ${spkid} (${start} .. ${stop})...`);
+  let bytes;
+  try {
+    ({ bytes } = await fetchHorizonsSpk({ spkid, startTime: start, stopTime: stop }));
+  } catch (err) {
+    console.error(`  [horizons] spkid ${spkid}: ${err.message}`);
+    return sendJson(res, 502, { error: err.message });
+  }
+
+  console.log(`  [horizons] spkid ${spkid}: ${formatBytes(bytes.byteLength)}.`);
   res.writeHead(200, {
     'content-type': 'application/octet-stream',
     'content-length': bytes.byteLength,
@@ -267,8 +302,10 @@ const server = http.createServer(async (req, res) => {
       await handleProxyIndex(res);
     } else if (url.pathname.startsWith(PROXY_PREFIX)) {
       await handleProxy(req, res, url);
-    } else if (url.pathname === HORIZONS_PREFIX) {
-      await handleHorizons(req, res, url);
+    } else if (url.pathname === HORIZONS_RESOLVE_PREFIX) {
+      await handleHorizonsResolve(req, res, url);
+    } else if (url.pathname === HORIZONS_SPK_PREFIX) {
+      await handleHorizonsSpk(req, res, url);
     } else {
       await handleStatic(req, res, url);
     }
@@ -284,7 +321,8 @@ server.listen(opts.port, () => {
   console.log(`spiceJS example server on http://localhost:${opts.port}`);
   console.log(`  demo:        http://localhost:${opts.port}/examples/browser-demo/`);
   console.log(`  kernel list: http://localhost:${opts.port}${PROXY_PREFIX}`);
-  console.log(`  horizons:    http://localhost:${opts.port}${HORIZONS_PREFIX}?command=...&start=...&stop=...`);
+  console.log(`  horizons:    http://localhost:${opts.port}${HORIZONS_RESOLVE_PREFIX}?sstr=... , ` +
+    `${HORIZONS_SPK_PREFIX}?spkid=...&start=...&stop=...`);
   console.log(`  proxying ${SPK_IDS.length} kernels (${formatBytes(total)} upstream) into ${path.relative(REPO_ROOT, CACHE_DIR)}/`);
   console.log(`  block size ${formatBytes(opts.blockBytes)} -- only blocks actually requested are ever fetched.`);
 });

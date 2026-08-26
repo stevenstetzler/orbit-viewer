@@ -530,24 +530,39 @@ scan, same "Add bodies" popup, same everything -- since a Horizons SPK
 lines" -- see [`README.md`](../../README.md)'s segment-type list),
 Horizons just base64-encodes it in its JSON response.
 
-**Identifiers**: a name (`Ceres`, `Apophis`), a numbered small body or
-comet (`99942`, or a comet with its type suffix, e.g. `1P`), or a
-provisional designation (`1999 AN10`) all work -- the last two get
-sent as `DES=<id>;` (Horizons' own disambiguating syntax), everything
-else passed through as typed. A request that's genuinely ambiguous in
-Horizons' own database (some comets match several apparition/epoch
-records even with a specific designation) surfaces Horizons' own
-match listing in the status line rather than failing silently.
+**Two steps, both against real JPL APIs** (see `scripts/horizonsSpk.mjs`
+for the exact request shapes and the quirks each one has):
+
+1. **Resolve** whatever you typed -- a name (`Ceres`, `Apophis`), a
+   numbered small body or comet (`99942`, `1P`), a provisional
+   designation (`1999 AN10`), or a comet fragment (`141P-A`) -- against
+   [JPL's Small-Body Database](https://ssd-api.jpl.nasa.gov/doc/sbdb.html)
+   (`sstr` search). Three outcomes: an exact match resolves straight to
+   a real SPK-ID; an ambiguous one (e.g. `141P` matches the parent
+   comet *and* each of its own numbered fragments) shows a pickable
+   list -- clicking an entry re-resolves *that* entry's own designation
+   (always unambiguous) and continues from there; no match at all shows
+   SBDB's own message.
+2. **Fetch** the resolved SPK-ID's trajectory from Horizons
+   (`COMMAND='DES=<spkid>'`, `EPHEM_TYPE=SPK`, `REF_PLANE=ECLIPTIC`,
+   `FRAME=J2000`, `CENTER=SUN`) over the chosen date range.
+
+Resolving through SBDB first, rather than guessing at Horizons'
+designation syntax from the typed string, is what makes this reliable
+for the ambiguous cases (a bare name or a comet's shared parent
+designation) -- Horizons itself has no equivalent "here are your
+options" response, it just picks one interpretation or fails.
 
 **Needs the local proxy** (`npm run serve-example`) for the same
-reason the kernel catalogue above does: `ssd.jpl.nasa.gov` sends no
-`Access-Control-Allow-Origin` header, so a browser can't fetch it
-cross-origin at all. The proxy fetches Horizons on the page's behalf
-(`/horizons/spk?command=...&start=...&stop=...`, see
-`scripts/horizonsSpk.mjs`/`scripts/serve-example.mjs`) and relays the
-decoded bytes back same-origin -- no caching, unlike the kernel proxy,
-since each request is a distinct object/time-range combination rather
-than a range within one large fixed file.
+reason the kernel catalogue above does: neither `ssd-api.jpl.nasa.gov`
+(SBDB) nor `ssd.jpl.nasa.gov` (Horizons) sends an
+`Access-Control-Allow-Origin` header, so a browser can't fetch either
+cross-origin at all. The proxy makes both calls on the page's behalf
+(`/horizons/resolve?sstr=...`, `/horizons/spk?spkid=...&start=...&stop=...`)
+and relays the results back same-origin (SBDB's JSON as-is, Horizons'
+decoded SPK bytes) -- no caching, unlike the kernel proxy, since each
+request is a distinct object/time-range combination rather than a
+range within one large fixed file.
 
 ## Command+Click: precise single-body mode
 
