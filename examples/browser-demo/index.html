@@ -1042,7 +1042,18 @@ scene.background = new THREE.Color(0x05070d);
 // and the grid itself is deliberately oversized (1000 AU) to always
 // stay on screen no matter how far out that goes.
 const GRID_RADIUS_AU = 1000;
-const camera = new THREE.PerspectiveCamera(50, viewport.clientWidth / viewport.clientHeight, 0.0005, GRID_RADIUS_AU * SCENE_UNITS_PER_AU * 1.2);
+// The floor for camera.far -- always enough to keep the 1000 AU grid
+// itself on screen, regardless of scale/zoom. fitCameraToScene() below
+// extends *beyond* this floor (never shrinks below it) when the actual
+// scene needs more -- true Linear position + Linear radius, tied to a
+// single real physical scale (see makeScale()), can put real content
+// millions of scene units out even for the whole *solar system* (e.g.
+// anchoring to Pluto's own real radius puts Pluto's real orbital
+// distance several million scene units away) -- well past this default,
+// so without the extension those bodies would just be silently
+// clipped, invisible with no error.
+const DEFAULT_CAMERA_FAR = GRID_RADIUS_AU * SCENE_UNITS_PER_AU * 1.2;
+const camera = new THREE.PerspectiveCamera(50, viewport.clientWidth / viewport.clientHeight, 0.0005, DEFAULT_CAMERA_FAR);
 const DEFAULT_CAMERA_POSITION = new THREE.Vector3(0, 22, 34);
 camera.position.copy(DEFAULT_CAMERA_POSITION);
 
@@ -1114,6 +1125,17 @@ function fitCameraToScene() {
   const cameraDistance = Math.max(4, maxExtent * 2.5);
   const dir = DEFAULT_CAMERA_POSITION.clone().normalize();
   camera.position.copy(dir.multiplyScalar(cameraDistance));
+  // See DEFAULT_CAMERA_FAR's own comment -- extend the far clip plane
+  // to match whenever the real scene needs more room than the grid's
+  // own default provides, and shrink it back down otherwise (so a
+  // return from an extreme scale to an ordinary one doesn't leave
+  // depth-buffer precision needlessly spread across a huge, no-longer-
+  // needed range).
+  const desiredFar = Math.max(DEFAULT_CAMERA_FAR, cameraDistance * 3);
+  if (desiredFar !== camera.far) {
+    camera.far = desiredFar;
+    camera.updateProjectionMatrix();
+  }
   controls.target.set(0, 0, 0);
   controls.update();
 }
@@ -1149,6 +1171,22 @@ const POSITION_LINEAR_SCALE = SCENE_UNITS_PER_AU / AU_KM;
 const POSITION_SQRT_SCALE = SCENE_UNITS_PER_AU / Math.sqrt(AU_KM);
 
 /**
+ * Applies one *uniform* km-to-scene-unit `factor` to a km position
+ * vector -- the shared primitive both scalePosition() (below) and the
+ * Linear-position+Linear-radius case (makeScale()) build on, so the
+ * axis convention only lives in one place. Positions arrive already
+ * rotated into whatever frame is currently active (see spkez()'s `ref`
+ * calls below) -- for the default inertial view that's ECLIPJ2000,
+ * whose Z axis *is* the ecliptic pole by definition, so the planets'
+ * near-coplanar orbits render flat; for a body-fixed IAU_<BODY> view
+ * it's that body's own rotational pole instead. Either way, three.js's
+ * default "up" is Y, so swap Y/Z for a natural top-down view.
+ */
+function scaleLinearPosition(posKm, factor) {
+  return [posKm[0] * factor, posKm[2] * factor, -posKm[1] * factor];
+}
+
+/**
  * Converts a km position vector to a scene-space one, along a chosen
  * radial scale (`mode`: `'linear'` or `'sqrt'`) -- direction is always
  * preserved exactly, only the *magnitude* (distance from whatever
@@ -1161,20 +1199,20 @@ const POSITION_SQRT_SCALE = SCENE_UNITS_PER_AU / Math.sqrt(AU_KM);
  * the observer and calls this exactly once at the point of producing a
  * scene coordinate (markers, ellipse points, sampled-trajectory
  * points), so a nonlinear radial scale needs no changes anywhere else.
+ *
+ * NOTE: `'linear'` here is always POSITION_LINEAR_SCALE, the fixed
+ * AU-anchored factor -- *not* whatever factor Linear radius mode might
+ * be using. When both Position and Radius are Linear, makeScale()
+ * (below) bypasses this function entirely and ties them to one shared
+ * factor instead -- see its own doc comment for why mixing this
+ * function's independent factor with Linear radius's anchor-based one
+ * would put positions and radii on two unrelated physical scales.
  */
 function scalePosition(posKm, mode) {
   const rKm = Math.hypot(posKm[0], posKm[1], posKm[2]);
   if (rKm === 0) return [0, 0, 0];
   const rScene = mode === 'sqrt' ? Math.sqrt(rKm) * POSITION_SQRT_SCALE : rKm * POSITION_LINEAR_SCALE;
-  const factor = rScene / rKm;
-  // Positions arrive already rotated into whatever frame is currently
-  // active (see spkez()'s `ref` calls below) -- for the default inertial
-  // view that's ECLIPJ2000, whose Z axis *is* the ecliptic pole by
-  // definition, so the planets' near-coplanar orbits render flat; for a
-  // body-fixed IAU_<BODY> view it's that body's own rotational pole
-  // instead. Either way, three.js's default "up" is Y, so swap Y/Z for
-  // a natural top-down view.
-  return [posKm[0] * factor, posKm[2] * factor, -posKm[1] * factor];
+  return scaleLinearPosition(posKm, rScene / rKm);
 }
 
 /**
@@ -1191,6 +1229,12 @@ function scalePosition(posKm, mode) {
  * body's own hand-picked relative size; flat in `linear` mode, where
  * every *real* size is already anchored to a true physical scale a
  * hand-picked fallback has no meaningful relationship to.
+ *
+ * NOTE: only reached for Linear radius when Position isn't *also*
+ * Linear -- makeScale() ties Linear+Linear to one shared factor
+ * instead (see its own doc comment), bypassing this function entirely
+ * in that case, so `anchorKm`'s factor is never mixed with
+ * scalePosition()'s own independent one.
  */
 function scaleRadius(b, mode, anchorKm) {
   const km = meanRadiusKmFor(b);
@@ -1220,8 +1264,39 @@ function smallestKnownRadiusKm(bodies) {
  * own doc comment below) from independent Position/Radius scale modes
  * -- the "Position scale"/"Radius scale" View controls. `radiusAnchorKm`
  * only matters when `radiusMode === 'linear'` (see scaleRadius()).
+ *
+ * Linear position + Linear radius is a special case, handled entirely
+ * separately from the general (independent) path below: rather than
+ * scalePosition()'s own fixed AU-anchored factor and scaleRadius()'s
+ * own anchor-based factor -- two numbers with no relationship to each
+ * other -- both position *and* radius share the exact same
+ * km-to-scene-unit factor (anchored the same way scaleRadius() alone
+ * would be: to `radiusAnchorKm`, so the smallest body actually shown
+ * renders at PRECISE_BODY_RADIUS_UNITS). This is what makes
+ * "Linear/Linear" actually mean "one real physical scale for both size
+ * and distance at once" -- e.g. Earth's real ~4x-the-Moon's-radius and
+ * ~35x-Earth's-radius Earth-Moon distance both come out matching those
+ * real ratios directly, rather than sizes and distances compressed by
+ * two unrelated factors (which, tried once, put the Sun's Linear-radius
+ * marker -- anchored to Pluto, the whole system's smallest known body
+ * -- far *larger* than Mercury's own Linear-position orbital distance,
+ * visually swallowing the entire system). Every other Position/Radius
+ * combination (including Linear position alone, or Linear radius
+ * alone) stays fully independent, as an intentionally explorable
+ * combination -- only "both Linear" claims to be physically true, so
+ * only that combination is held to that standard.
  */
 function makeScale({ positionMode, radiusMode, radiusAnchorKm }) {
+  if (positionMode === 'linear' && radiusMode === 'linear' && radiusAnchorKm != null) {
+    const linScale = PRECISE_BODY_RADIUS_UNITS / radiusAnchorKm; // scene units per km, shared
+    return {
+      posToScene: (posKm) => scaleLinearPosition(posKm, linScale),
+      markerRadius: (b) => {
+        const km = meanRadiusKmFor(b);
+        return km != null ? km * linScale : 0.02;
+      },
+    };
+  }
   return {
     posToScene: (posKm) => scalePosition(posKm, positionMode),
     markerRadius: (b) => scaleRadius(b, radiusMode, radiusAnchorKm),
@@ -3027,13 +3102,16 @@ async function exitPreciseMode() {
  * and the Windows/Super key elsewhere, neither of which browsers claim
  * for click handling.)
  *
- * A materialized *satellite* of a major body (has its own real
- * `primaryId`, set by prefetchBodyProbe() when it was first resolved --
- * not true of a top-level planet's own BODIES entry, which has none;
- * still true of a custom/Horizons body even after it gets a real
- * `primaryId` too, see loadSelectedCustomBodies(), but those stay
- * tagged `isCustom` so they're not mistaken for one here) doesn't get
- * its own precise mode -- moons of moons aren't a thing in this data.
+ * A materialized *satellite* of a major body -- not one of the ten
+ * top-level BODIES entries (every one of *those* also gets a real
+ * `primaryId` set by prefetchBodyProbe(), the Sun's own id for every
+ * planet -- so `primaryId != null` alone doesn't distinguish "Earth"
+ * from "Earth's Moon"; membership in BODIES itself, keyed by `target`,
+ * is the real discriminator. Still true of a custom/Horizons body even
+ * after it gets a real `primaryId` too, see loadSelectedCustomBodies(),
+ * but those stay tagged `isCustom` so they're not mistaken for one
+ * here either) -- doesn't get its own precise mode: moons of moons
+ * aren't a thing in this data.
  * Command+Click on one instead enters precise mode on its *parent*
  * (same as clicking the parent directly would), then looks at the
  * satellite specifically -- "looking at the selected body, viewing
@@ -3049,7 +3127,7 @@ function handlePreciseModeClick(b, evt) {
   const done = () => { modeChangeInFlight = false; };
   const fail = (err) => { log(`ERROR: ${err.message}`); console.error(err); };
 
-  const isSatellite = !b.isCustom && b.primaryId != null;
+  const isSatellite = !b.isCustom && !BODIES.some((x) => x.target === b.target);
   const preciseTargetId = isSatellite ? b.primaryId : b.bodyId;
 
   if (demo.mode === 'precise' && demo.preciseBodyId === preciseTargetId) {

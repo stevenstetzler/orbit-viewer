@@ -469,18 +469,19 @@ see "Orbit-arc shape" above).
   distance from Center compresses into scene units (direction is
   always exact; only the radial magnitude changes). `Linear` is a
   plain km-to-scene-unit factor (`SCENE_UNITS_PER_AU` per AU, the same
-  conversion this demo has always used). `Sqrt` compresses far
-  distances relative to near ones -- Neptune:Mercury's real ~77.8x
-  distance ratio becomes ~8.8x -- calibrated to agree exactly with
-  `Linear` at 1 AU, so switching modes doesn't jump the one reference
-  distance both use, only how *other* distances compress relative to
-  it. `Log` was considered and deliberately left out: it needs a
-  reference distance neither `Linear` nor `Sqrt` requires (raw
-  `log(r)` is undefined at `r=0`, and Center is *always* exactly `r=0`
-  in this app's own convention -- not a rare edge case here), and it
-  over-compresses exactly the nearby distinctions worth keeping
-  visible (Earth-vs-Mars spacing becomes barely distinguishable) for
-  little gain over `Sqrt` at the extremes that motivate it.
+  conversion this demo has always used) -- *except* when Radius scale
+  is *also* Linear, see below. `Sqrt` compresses far distances relative
+  to near ones -- Neptune:Mercury's real ~77.8x distance ratio becomes
+  ~8.8x -- calibrated to agree exactly with `Linear` at 1 AU, so
+  switching modes doesn't jump the one reference distance both use,
+  only how *other* distances compress relative to it. `Log` was
+  considered and deliberately left out: it needs a reference distance
+  neither `Linear` nor `Sqrt` requires (raw `log(r)` is undefined at
+  `r=0`, and Center is *always* exactly `r=0` in this app's own
+  convention -- not a rare edge case here), and it over-compresses
+  exactly the nearby distinctions worth keeping visible (Earth-vs-Mars
+  spacing becomes barely distinguishable) for little gain over `Sqrt`
+  at the extremes that motivate it.
 - **Radius scale**: `Linear` or `Sqrt` (default) -- how a body's real
   radius becomes a marker size. `Sqrt` is `RADIUS_SCENE_SCALE *
   sqrt(km)`, unchanged from this demo's original scale: it preserves
@@ -490,10 +491,39 @@ see "Orbit-arc shape" above).
   bodies stay visible and the Sun's marker doesn't swallow Mercury's
   orbit. `Linear` is one true km-to-scene-unit factor, anchored to the
   *smallest* body currently shown so it (and everything larger) renders
-  at a guaranteed-visible size -- not generally viable at whole-system
-  scale (Earth's real radius is ~1/23,000th of its orbital distance),
-  but exactly the right scale once Command+Click narrows the view down
-  to one body and its own satellites -- see "Command+Click: precise
+  at a guaranteed-visible size.
+
+  **Position=Linear + Radius=Linear together is a special case**, tied
+  to *one shared* km-to-scene-unit factor (the same anchor-to-smallest-
+  body factor Radius scale alone uses) rather than Position's own
+  independent AU-based one -- this is the only combination that claims
+  to be an actual true-to-physical-scale rendering (real relative size
+  *and* real relative distance at once), so it's the only one held to
+  that standard; every other combination (including Linear position
+  alone) stays independent, an intentionally explorable display choice
+  rather than a physical claim. Mixing Radius=Linear's anchor-based
+  factor with Position=Linear's own *separate*, unrelated AU-based
+  factor doesn't mean anything physically and looks broken -- verified
+  live, and worth knowing if you're picking the two scales apart to see
+  what each does on its own: with the two factors merely coexisting
+  rather than tied together, the whole-system view's Sun marker (anchored
+  to Pluto, the system's own smallest known body) comes out
+  *larger than Mercury's own real orbital distance*, visually swallowing
+  the entire system. Tied together correctly, the Sun's marker instead
+  comes out correctly tiny next to real interplanetary distances (as it
+  really is) -- not a very *useful* whole-system view (matching the
+  design discussion above: true linear scale plainly doesn't work at
+  solar-system scale), but a physically honest one. The camera's far
+  clip plane extends automatically (`fitCameraToScene()`) whenever a
+  true-linear scene's real extent needs more room than the default
+  1000 AU grid provides, so real content this far out is never silently
+  clipped, invisible with no explanation.
+
+  This scale is not generally viable at whole-system scale (Earth's
+  real radius is ~1/23,000th of its orbital distance -- see above), but
+  it's exactly the right scale once Command+Click narrows the view down
+  to one body and its own satellites, where the real size/distance
+  ratios are far more forgiving -- see "Command+Click: precise
   single-body mode" below.
 - **Look** (per legend row): re-aims the camera at that body without
   touching Center/Frame/Rotating/Orbit at all -- purely a camera move,
@@ -707,12 +737,16 @@ linear distance scale: the Sun is ~590x Pluto's own radius, and the
 space between them is ~2.5 million times Pluto's radius -- no single
 linear factor makes both a visible Sun and a visible Pluto fit at
 once, which is exactly why the whole-system view stays Sqrt-radius by
-default instead). Radius scale's linear km-to-scene-unit factor is
-anchored to the *smallest* real radius actually shown -- not
-necessarily the clicked body's own (`BODY<id>_RADII`) -- so a small
-moon next to a much larger planet still renders at a guaranteed-visible
-size rather than a sub-pixel fraction of the planet's own scale; the
-planet, being larger, is still comfortably visible too. Both selectors
+default instead). The *one shared* km-to-scene-unit factor Linear/Linear
+ties position and radius to (see "View controls" above) is anchored to
+the *smallest* real radius actually shown -- not necessarily the
+clicked body's own (`BODY<id>_RADII`) -- so a small moon next to a much
+larger planet still renders at a guaranteed-visible size rather than a
+sub-pixel fraction of the planet's own scale, and its real orbital
+distance from the planet comes out correctly proportioned to that same
+size rather than using an unrelated factor (the "entire system inside
+the planet" bug an earlier version of this decoupled-scale system had).
+The planet, being larger, is still comfortably visible too. Both selectors
 stay live from here, same as anywhere else -- switching Radius scale
 back to Sqrt, for instance, trades true-to-scale sizing for the
 whole-system view's own more forgiving compression. The camera
