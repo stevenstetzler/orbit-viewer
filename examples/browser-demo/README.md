@@ -1,16 +1,20 @@
 # Browser demo: DE440 in three.js, loaded lazily
 
 A real, live demo of `openRemoteSpk()` (see `docs/lazy-loading.md`)
-running in an actual browser: pick a real `.bsp` SPK kernel from disk,
-and spiceJS reads only the byte ranges it actually needs out of it --
-via `File.slice()`, never a full upload or a full parse -- to plot ten
-Solar System bodies over an adjustable window around *now*, rendered
-with [three.js](https://threejs.org/). Four explicit controls (Center,
-Frame, Rotating, Orbit) and two per-body actions (Look, From) drive the
-view, or Command+Click a body (the Windows/Super key on non-Mac
-keyboards) to drop into a true-to-scale single-body-and-its-moons view
--- see "View controls: Center, Frame, Rotating, Orbit, Look, From"
-below.
+running in an actual browser: opens showing the live Solar System
+already plotted (`de440s` auto-loaded through the local kernel proxy
+the moment it's detected -- see "Running it" below), or pick a real
+`.bsp` SPK kernel from disk yourself, and spiceJS reads only the byte
+ranges it actually needs out of it -- via `File.slice()`, never a full
+upload or a full parse -- to plot ten Solar System bodies over an
+adjustable window bounded by the loaded kernel's own real coverage,
+rendered with [three.js](https://threejs.org/). Six explicit controls
+(Center, Frame, Rotating, Orbit, Position scale, Radius scale) and two
+per-body actions (Look, From) drive the view, or Command+Click a body
+(the Windows/Super key on non-Mac keyboards) to drop into a
+true-to-scale single-body-and-its-moons view -- see "View controls:
+Center, Frame, Rotating, Orbit, Position scale, Radius scale, Look,
+From" below.
 
 ## Running it
 
@@ -31,6 +35,14 @@ fetching only the byte ranges the query touches (measured: 23 ranged
 reads, 1.47 MB of `de440s.bsp`'s 32.7 MB, and nothing at all on a
 reload). No download step, and no CORS problem, because the kernel is
 now same-origin.
+
+As soon as `de440s` shows up in that list, it's loaded automatically
+-- no click needed -- so the page opens already showing the live Solar
+System rather than an empty sidebar waiting for a manual pick. This is
+purely a convenience default: it's the exact same `loadFromProxy()`
+call a manual click on `de440s` in the list would make, so nothing
+about loading it any other way (a different kernel from the list, a
+local file, Horizons) changes.
 
 Any static server works too -- the page needs `http://`/`https://`
 rather than `file://` for ES modules and relative `fetch()`, but
@@ -181,22 +193,45 @@ names actively collide with real asteroids of the same name
 not Jupiter's moons) -- so it would either fail outright or silently
 return the wrong object's data for every body this demo shows.
 
-Since it's a closed curve by construction, it always looks right
-regardless of how many times a fast body has actually orbited -- no
-sampling density or time-span tuning needed at all, for any body, at
-any eccentricity, at any epoch. This is really the *osculating* orbit
--- the instantaneous idealized two-body shape implied by the body's
-real (perturbed, n-body) state at this one epoch, not a shape refined
-over a whole real orbit -- recomputed fresh every time the "Reference
-epoch" slider moves, so it stays honest about the actual current
-trajectory rather than freezing a single snapshot. The "Reference
-epoch" slider itself now has a fixed &plusmn;10-year range (no more
-per-body-period-derived bounds needed, since there's no span left to
-size): scrubbing it still prefetches incrementally per body, but only
-as far as you've actually visited, not a whole orbit ahead of time --
-verified live, screenshotted: scrubbing to the slider's own edge
-(&plusmn;3650 days) still renders a clean, undistorted ellipse, not a
-degraded or clipped one.
+For a **bound** orbit (`invA > 0` below), it's a closed curve by
+construction, so it always looks right regardless of how many times a
+fast body has actually orbited -- no sampling density or time-span
+tuning needed at all, for any bound eccentricity, at any epoch. This
+is really the *osculating* orbit -- the instantaneous idealized
+two-body shape implied by the body's real (perturbed, n-body) state at
+this one epoch, not a shape refined over a whole real orbit --
+recomputed fresh every time the "Reference epoch" slider moves, so it
+stays honest about the actual current trajectory rather than freezing
+a single snapshot. The "Reference epoch" slider itself is bounded by
+the *loaded kernel's own real coverage* (`min`/`max` across every
+segment it carries, discovered structurally at load time the same way
+"Adding a custom kernel" below scans a picked file -- no real data
+fetched just to learn the bounds), not an arbitrary fixed window: for
+`de440s` that's ~1849-2150, comfortably straddling "now" (the
+slider's own default position); a narrower custom kernel gets its own,
+narrower, real bounds instead. Scrubbing it still prefetches
+incrementally per body, but only as far as you've actually visited,
+not a whole orbit ahead of time -- verified live, screenshotted:
+scrubbing to the slider's own edge still renders a clean, undistorted
+ellipse, not a degraded or clipped one.
+
+Not every real orbit is bound, though (`invA <= 0`: parabolic, `e=1`,
+or hyperbolic, `e>1` -- an object on an escape or flyby trajectory,
+most relevant to a small body fetched live from Horizons -- see
+"Fetching a kernel from JPL Horizons" below). For that case there's no
+closed ellipse to draw at all, so `computeOrbitState()` (the shared
+function underlying Ellipse mode -- see below) never throws on it the
+way an earlier version did; instead the arc becomes an **open
+polyline**, sampled via `prop2b()` (NAIF's own universal-variables
+two-body propagator, exported from `src/prop2b.js` -- handles
+elliptical, parabolic, and hyperbolic orbits uniformly, so no separate
+conic-specific geometry is needed) across the body's own real,
+naturally-bounded SPK coverage interval, at a sample count set by the
+"Custom trajectory resolution" slider (the same one custom-body
+Trajectory mode already used -- see "Adding a custom kernel" below).
+Verified live against both a real bound case (Ceres, matching its
+published semi-major axis/eccentricity) and a synthetic hyperbolic
+one.
 
 A body with no real primary to orbit -- only the Sun itself, in this
 demo, since it has no single primary of its own in this two-body sense
@@ -207,10 +242,10 @@ start specifically so this is a clean, silent skip; earlier it was
 recorded the same as every other body (`primaryId` = the Sun itself),
 so drawing its own ellipse meant computing its state *relative to
 itself* -- identically zero -- and relying on the resulting
-`computeOrbitalEllipse()` exception (caught and logged, not a crash,
-but confusing: `couldn't draw Sun's orbit ellipse (rectilinear orbit
-(zero angular momentum) -- no well-defined orbital plane)`) to reach
-the same "no ellipse" outcome instead.
+`computeOrbitState()` exception (caught and logged, not a crash, but
+confusing: `couldn't draw Sun's orbit ellipse (rectilinear orbit (zero
+angular momentum) -- no well-defined orbital plane)`) to reach the
+same "no ellipse" outcome instead.
 
 When the current view isn't centered on a body's own real primary (the
 default whole-system view centers on the SSB, not the Sun; clicking a
@@ -388,9 +423,9 @@ marker doesn't grow large enough to swallow Mercury's orbit -- verified
 directly: the chosen scale puts the Sun's marker just inside Mercury's
 real perihelion distance, with margin.
 
-## View controls: Center, Frame, Rotating, Orbit, Look, From
+## View controls: Center, Frame, Rotating, Orbit, Position scale, Radius scale, Look, From
 
-Four selects/checkboxes above the legend drive the whole-system view,
+Six selects/checkboxes above the legend drive the whole-system view,
 all built on the same underlying idea: every position becomes
 `spkez(otherBody, Center, et, 'NONE', Frame, pool)` instead of
 `spkez(otherBody, 0, et, ...)` -- so e.g. centering on Earth shows a
@@ -430,6 +465,36 @@ see "Orbit-arc shape" above).
 - **Orbit**: `Ellipse` or `Trajectory` -- see "Orbit-arc shape" above.
 - **Period** (Trajectory only): `Sidereal` (default) or `Synodic` --
   see "Orbit-arc shape" above.
+- **Position scale**: `Linear` (default) or `Sqrt` -- how a body's real
+  distance from Center compresses into scene units (direction is
+  always exact; only the radial magnitude changes). `Linear` is a
+  plain km-to-scene-unit factor (`SCENE_UNITS_PER_AU` per AU, the same
+  conversion this demo has always used). `Sqrt` compresses far
+  distances relative to near ones -- Neptune:Mercury's real ~77.8x
+  distance ratio becomes ~8.8x -- calibrated to agree exactly with
+  `Linear` at 1 AU, so switching modes doesn't jump the one reference
+  distance both use, only how *other* distances compress relative to
+  it. `Log` was considered and deliberately left out: it needs a
+  reference distance neither `Linear` nor `Sqrt` requires (raw
+  `log(r)` is undefined at `r=0`, and Center is *always* exactly `r=0`
+  in this app's own convention -- not a rare edge case here), and it
+  over-compresses exactly the nearby distinctions worth keeping
+  visible (Earth-vs-Mars spacing becomes barely distinguishable) for
+  little gain over `Sqrt` at the extremes that motivate it.
+- **Radius scale**: `Linear` or `Sqrt` (default) -- how a body's real
+  radius becomes a marker size. `Sqrt` is `RADIUS_SCENE_SCALE *
+  sqrt(km)`, unchanged from this demo's original scale: it preserves
+  real relative ordering (Jupiter bigger than Earth, Earth bigger than
+  the Moon, the Sun biggest of all) while compressing the real ~585x
+  min/max radius spread (Pluto vs. the Sun) enough that the smallest
+  bodies stay visible and the Sun's marker doesn't swallow Mercury's
+  orbit. `Linear` is one true km-to-scene-unit factor, anchored to the
+  *smallest* body currently shown so it (and everything larger) renders
+  at a guaranteed-visible size -- not generally viable at whole-system
+  scale (Earth's real radius is ~1/23,000th of its orbital distance),
+  but exactly the right scale once Command+Click narrows the view down
+  to one body and its own satellites -- see "Command+Click: precise
+  single-body mode" below.
 - **Look** (per legend row): re-aims the camera at that body without
   touching Center/Frame/Rotating/Orbit at all -- purely a camera move,
   preserving the current viewing angle/distance. Stays framed on that
@@ -439,14 +504,20 @@ see "Orbit-arc shape" above).
   own SSB-in/SSB-out auto-switch below), and clears any active Look
   target.
 - **Command+Click** a body: enters "precise" single-body mode -- see
-  below. All seven controls above are disabled while precise mode is
-  active (it's a separate feature, unaffected by any of them) and
-  re-enabled on exit.
+  below. Center/Frame/Rotating are disabled while precise mode is
+  active (Center/Frame in particular have no meaning there -- see
+  below) and re-enabled on exit; Orbit/Period/Position scale/Radius
+  scale stay live in either mode.
 
 Changing Center to or from the Solar System Barycenter auto-switches
 Orbit to match (`Ellipse` at the SSB, `Trajectory` anywhere else) --
 just a default, not a lock: Orbit stays independently changeable
-afterward.
+afterward. Position/Radius scale get their own mode-dependent default
+too (system mode: Linear/Sqrt, matching this demo's original,
+unchanged whole-system scale; precise mode: Linear/Linear -- see
+"Command+Click" below) -- also just defaults, not locks: either
+selector can be changed at any time, in either mode, and the camera
+reframes automatically to fit whatever the new scale actually produces.
 
 The background circular grid spans 1000 AU (in scene units -- see
 `SCENE_UNITS_PER_AU`), deliberately oversized so it stays visible as a
@@ -484,13 +555,25 @@ catalogue above. Picking a file:
    time (a custom kernel's valid interval has no reason to overlap
    wherever the reference epoch already was).
 
-Custom bodies always render as a **white sampled trajectory** over
-their own full discovered interval (never the analytic-ellipse mode --
-there's no known primary/GM to compute one from), at a sample count set
-by the new "Custom trajectory resolution" slider, independent of
-Orbit/Period's period-scaled scheme. They have no known `IAU_<BODY>`
-orientation, so Rotating/Frame don't apply to them ("From" a custom
-body leaves Frame untouched and turns Rotating off).
+A custom body's `primaryId` is set to its own SPK segment's real
+`center` (almost always the Sun, for a real small-body/comet/mission
+product) rather than left unset, so it participates in Ellipse mode
+exactly like any of the ten built-in bodies -- a real closed ellipse
+when it's gravitationally bound, or (see "Orbit-arc shape" above) an
+open `prop2b()`-sampled arc across its own discovered interval when
+it isn't (a hyperbolic flyby or an unbound comet, straight from
+Horizons). Only a body centered on something with no known `GM` (rare
+-- `kernels/gm_de440.tpc` covers the Sun, every planet/barycenter, and
+every natural satellite this demo knows) falls back silently to no
+ellipse at all, same as any other GM-lookup failure. Switching Orbit to
+**Trajectory** still renders the older **white sampled trajectory**
+instead, over the body's own full discovered interval, at a sample
+count set by the "Custom trajectory resolution" slider, independent
+of Orbit/Period's period-scaled scheme -- useful once the vantage
+point moves off the body's own primary, the same reason Trajectory
+mode exists for any other body. Custom bodies have no known
+`IAU_<BODY>` orientation, so Rotating/Frame don't apply to them ("From"
+a custom body leaves Frame untouched and turns Rotating off).
 
 The key trick making this work: a custom kernel's segments are
 registered into the *same* `KernelPool` the primary kernel already
@@ -615,17 +698,47 @@ needed for close, fast-orbiting moons vs. the whole system's
 year-scale planets, since it's computed from each body's own real
 state directly rather than sampled over any particular span.
 
-The scale changes too: instead of the whole-system AU-anchored scale
-(where every body's true radius would be sub-pixel), precise mode uses
-one linear km-to-scene-unit factor anchored to the clicked body's own
-real radius (`BODY<id>_RADII`) -- so both the body's size *and* its
-satellite's orbital distance are rendered genuinely true-to-scale
-relative to each other, which is exactly the trade-off this whole-system
-default view can't afford to make. The camera automatically reframes
-around the real extent of what's now shown (a lone body's own radius,
-or out past its farthest satellite's orbit) -- verified live: Mars
-(no satellite data) frames as a comfortably-sized lone sphere; Earth +
-Moon frames with the Moon's real, distant orbit fully visible.
+The scale changes too: precise mode always *enters* on Position
+scale=Linear, Radius scale=Linear (see "View controls" above) -- true
+relative size *and* true relative distance at once, the whole point at
+this system-of-one-parent scale, unlike the whole solar system's own
+default (where every body's true radius would be sub-pixel at a true
+linear distance scale: the Sun is ~590x Pluto's own radius, and the
+space between them is ~2.5 million times Pluto's radius -- no single
+linear factor makes both a visible Sun and a visible Pluto fit at
+once, which is exactly why the whole-system view stays Sqrt-radius by
+default instead). Radius scale's linear km-to-scene-unit factor is
+anchored to the *smallest* real radius actually shown -- not
+necessarily the clicked body's own (`BODY<id>_RADII`) -- so a small
+moon next to a much larger planet still renders at a guaranteed-visible
+size rather than a sub-pixel fraction of the planet's own scale; the
+planet, being larger, is still comfortably visible too. Both selectors
+stay live from here, same as anywhere else -- switching Radius scale
+back to Sqrt, for instance, trades true-to-scale sizing for the
+whole-system view's own more forgiving compression. The camera
+automatically reframes around the real extent of what's now shown at
+whatever scale is active (a lone body's own radius, or out past its
+farthest satellite's orbit) -- verified live: Mars (no satellite data)
+frames as a comfortably-sized lone sphere; Earth + Moon frames with the
+Moon's real, distant orbit fully visible.
+
+Command+Click on a **satellite** specifically -- from the "Bodies
+shown" legend's own per-row dropdown (see "Satellites: a per-row
+dropdown" below), not the parent planet's own row -- doesn't try to
+open an empty precise view on the moon alone (a satellite has no
+satellites of its own in this data). It enters precise mode on the
+satellite's real **parent** instead, exactly as Command+Clicking the
+parent directly would (same body list, same ellipses, same scale), then
+re-aims the camera to look at the clicked satellite specifically while
+Center/the observer stays the parent -- "looking at the selected body,
+viewing from the parent of the system." Command+Clicking a *different*
+satellite of a system already shown just re-aims the camera to it,
+staying in the same system; Command+Clicking the currently-viewed body
+again (the parent, or the specific satellite currently looked at) exits
+precise mode, same as clicking any active body a second time always
+has. The per-row entries in precise mode's own "Satellites" mini-legend
+(below) are Command+Click-able too, for the same in-system re-aiming,
+without needing to go back out to the whole-system legend first.
 
 Click the `#viewStatus` bar (or the active body again with Command/Meta) to
 leave precise mode.
@@ -638,17 +751,17 @@ label distinguishes them from real satellites, e.g. `Precise mode:
 Earth + 1 satellite, 1 custom body`.
 
 Unlike Center/Frame/Rotating (locked to the clicked body while precise
-mode is active), **Orbit and Period stay live** -- switching Orbit to
-Trajectory renders a custom body's white sampled trajectory right
-inside precise mode too, exactly as in the whole-system view, since
-it's still the only way to show a body with no known primary/GM at
-all (ellipse mode has nothing to draw for one -- see "Orbit-arc shape"
-above). Real satellites don't get a period-based trajectory even then
--- `siderealPeriodSeconds()` assumes a body orbits the Sun directly,
-which for a moon gives essentially its parent planet's own period, not
-its real (hours-to-days) orbit around the parent -- so Ellipse mode
-(exact, via the real parent as primary) stays their own only rendering
-either way.
+mode is active), **Orbit and Period stay live** -- precise mode always
+*enters* on Ellipse (real satellites get their own exact two-body
+ellipse around the real parent, and a custom body gets one too if it's
+bound, or the same `prop2b()`-sampled open arc otherwise -- see
+"Orbit-arc shape" above), but switching Orbit to Trajectory still works
+here too, exactly as in the whole-system view. Real satellites don't
+get a period-based trajectory even then -- `siderealPeriodSeconds()`
+assumes a body orbits the Sun directly, which for a moon gives
+essentially its parent planet's own period, not its real
+(hours-to-days) orbit around the parent -- so Ellipse mode (exact, via
+the real parent as primary) stays their own only rendering either way.
 
 ## Satellites: a per-row dropdown, in and out of precise mode
 
@@ -683,11 +796,13 @@ relative to it, proving the chain crosses all three files transparently.
 
 ## Notes
 
-- Whole-system positions are converted from km to AU and then to a
-  fixed scene scale (4.2 units/AU) so the whole range from Mercury to
-  Pluto is visible at once; precise mode uses a different, real-radius-
-  anchored scale instead (see "Command+Click" above). Both are display
-  choices, not something spiceJS itself does.
+- Positions and radii each go through their own independently
+  selectable scale (Linear/Sqrt -- see "View controls" above), not one
+  shared conversion. Linear position is km converted to AU and then to
+  a fixed scene scale (4.2 units/AU); Linear radius is one true
+  km-to-scene-unit factor anchored to whichever body currently shown
+  has the smallest known real radius. Both are display choices, not
+  something spiceJS itself does.
 - three.js is loaded from a CDN (unpkg, pinned to 0.169.0) via an
   import map -- swap that for a local copy if you need this to work
   fully offline.

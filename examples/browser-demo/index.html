@@ -221,6 +221,16 @@
         <option value="sidereal">Sidereal</option>
         <option value="synodic">Synodic</option>
       </select>
+      <label for="positionScaleSelect">Position scale</label>
+      <select id="positionScaleSelect" disabled>
+        <option value="linear">Linear</option>
+        <option value="sqrt">Sqrt</option>
+      </select>
+      <label for="radiusScaleSelect">Radius scale</label>
+      <select id="radiusScaleSelect" disabled>
+        <option value="linear">Linear</option>
+        <option value="sqrt">Sqrt</option>
+      </select>
     </div>
     <p class="sub" style="margin:0 0 16px">
       <b>Center</b> and <b>Frame</b> pick bodies independently (e.g.
@@ -236,10 +246,17 @@
       <b>Period</b> (Trajectory only) picks what "one orbit" means per
       body: <b>Sidereal</b> (each body's own real orbital period) or
       <b>Synodic</b> (each body's period relative to Center instead --
-      how long its position relative to here takes to repeat). Each row
-      below also has <b>Look</b> (aim the camera at that body without
-      changing any of the above) and <b>From</b> (set Center and Frame
-      to that body at once).
+      how long its position relative to here takes to repeat).
+      <b>Position scale</b>/<b>Radius scale</b> pick how km become scene
+      units, independently -- <b>Linear</b> is true-to-scale, <b>Sqrt</b>
+      compresses large values (so e.g. Neptune's real distance from the
+      Sun doesn't dwarf everything closer in). Auto-selected per view
+      (whole system: Linear position/Sqrt radius; a single body's own
+      system: Linear/Linear, sized so its smallest member stays visible)
+      but changeable any time, same as Orbit/Period. Each row below also
+      has <b>Look</b> (aim the camera at that body without changing any
+      of the above) and <b>From</b> (set Center and Frame to that body
+      at once).
     </p>
     <div id="viewStatus"><span class="label">Viewing from: &ndash;</span></div>
     <ul id="legend"></ul>
@@ -288,7 +305,7 @@
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { load, str2et, et2utcCalendar, openRemoteSpk, spkez, bodyValues, kclear, bodyName } from '../../src/browser.js';
+import { load, str2et, et2utcCalendar, openRemoteSpk, spkez, bodyValues, kclear, bodyName, prop2b } from '../../src/browser.js';
 import { KERNELS as KERNEL_MANIFEST } from '../../kernels/sources.mjs';
 // Lower-level lazy-loading primitives, used only by the "Add a custom
 // kernel" flow below (discoverSpkBodies()/loadCustomKernel()) --
@@ -312,6 +329,8 @@ const frameSelect = document.getElementById('frameSelect');
 const rotatingCheckbox = document.getElementById('rotatingCheckbox');
 const orbitSelect = document.getElementById('orbitSelect');
 const periodSelect = document.getElementById('periodSelect');
+const positionScaleSelect = document.getElementById('positionScaleSelect');
+const radiusScaleSelect = document.getElementById('radiusScaleSelect');
 const legendEl = document.getElementById('legend');
 const preciseLegendEl = document.getElementById('preciseLegend');
 const preciseLegendWrapEl = document.getElementById('preciseLegendWrap');
@@ -352,6 +371,10 @@ function resetLog(line) {
 // AU, for scaling km positions down to a sane Three.js scene size.
 const AU_KM = 149597870.7;
 const DAY = 86400;
+// Auto-loaded through the local proxy on page load (see
+// detectKernelProxy()) so the page opens already showing the solar
+// system -- a real NAIF kernel id, matching kernels/sources.mjs.
+const DEFAULT_KERNEL_ID = 'de440s';
 const SCENE_UNITS_PER_AU = 4.2; // shared by kmToScene() (below) and the background grid's radius (see three.js scene setup)
 
 // Marker size: real relative body radii (from BODY<id>_RADII, via
@@ -409,7 +432,7 @@ const SUN_TARGET = 10;
 
 // Bodies to render: NAIF ID (position), display name, color, a fallback
 // marker radius (used only if real RADII data can't be found -- see
-// sceneRadiusFor()), the body-fixed IAU_<NAME> frame Alt/Option+Click
+// scaleRadius()), the body-fixed IAU_<NAME> frame Alt/Option+Click
 // switches into, and `bodyId` -- the real physical body's NAIF ID,
 // used for both the IAU frame's constants and the real BODY<id>_RADII
 // lookup (bodyValues(), spiceJS's bodvrd_c/bodvcd_c equivalent -- the
@@ -496,7 +519,7 @@ function populateViewControls() {
  * moons (716-724), which have no real RADII in pck00011.tpc (checked
  * directly) and orbit tens of millions of km out -- letting them in
  * would both render as placeholder dots and blow out
- * fitCameraForPrecise()'s auto-framing relative to the five actually
+ * fitCameraToScene()'s auto-framing relative to the five actually
  * well-known major moons this is meant to show. sat441's own Phoebe
  * (609) gets the same exclusion for the same reason, despite having
  * real RADII data: at ~12.4 million km out it's ~3.5x farther than
@@ -612,7 +635,7 @@ const INERTIAL_FRAME = 'ECLIPJ2000';
 //
 // The curve is drawn at ORBIT_ELLIPSE_SEGMENTS points, evenly spaced in
 // *eccentric* anomaly (via THREE.EllipseCurve -- see
-// computeOrbitalEllipse()/rebuildArcs() below), not true anomaly: for
+// computeOrbitState()/rebuildArcs() below), not true anomaly: for
 // an eccentric orbit that's smoother-looking (more uniform curvature
 // between points) than evenly spacing by time or true anomaly would
 // be, and for a genuinely closed analytic curve there's no aliasing
@@ -622,9 +645,10 @@ const INERTIAL_FRAME = 'ECLIPJ2000';
 const ORBIT_ELLIPSE_SEGMENTS = 180;
 
 /**
- * A body's real (osculating) orbital ellipse around `primaryId`, at
- * `et`, in `primaryId`'s own rest frame (primary at the origin, which
- * is also one of the ellipse's two foci -- not its geometric center).
+ * A body's real (osculating) two-body orbit state relative to
+ * `primaryId`, at `et`, in `primaryId`'s own rest frame -- the shared
+ * conserved-quantities math behind both of rebuildArcs()'s own
+ * branches (the closed-ellipse case and the unbound-orbit fallback).
  * From the standard two-body conserved quantities:
  *   invA = 2/r - v^2/mu                     (vis-viva -> 1/semi-major axis)
  *   h    = r x v                            (specific angular momentum -- orbit-normal direction)
@@ -634,34 +658,35 @@ const ORBIT_ELLIPSE_SEGMENTS = 180;
  * see loadGravitationalParameters()'s own comment on why that pool
  * specifically, regardless of which pool `pool` itself is).
  *
- * Returns `{ a, e, b, pHat, qHat }`: semi-major/-minor axis (km),
- * eccentricity, and an orthonormal in-plane basis (THREE.Vector3,
- * `pHat` toward periapsis, `qHat` completing a right-handed frame with
- * the orbit normal) -- together these place any point on the ellipse
- * via `pHat*x + qHat*y` for `(x, y)` in the ellipse's own 2D perifocal
- * plane (see rebuildArcs()). Deriving the basis from the conserved
- * vectors directly, rather than going through the classical inclination/
- * node/argument-of-periapsis angles, avoids their usual singularities
+ * Returns `{ r, v, mu, e, invA, pHat, qHat, hHat }` (THREE.Vector3 for
+ * the vector fields) -- `pHat`/`qHat` are an orthonormal in-plane basis
+ * (`pHat` toward periapsis, `qHat` completing a right-handed frame with
+ * the orbit normal `hHat`) placing any point in the orbital plane via
+ * `pHat*x + qHat*y`. Deriving the basis from the conserved vectors
+ * directly, rather than going through the classical inclination/node/
+ * argument-of-periapsis angles, avoids their usual singularities
  * (undefined node for zero inclination, undefined argument of periapsis
  * for zero eccentricity) -- exactly the near-circular case several of
  * this demo's own moons are close to.
  *
  * This is exact for genuinely Keplerian (two-body) motion. Real solar
- * system motion is n-body, so the result is really an *osculating*
- * ellipse -- the instantaneous idealized two-body orbit implied by the
- * body's state at this one epoch, not a shape refined over the whole
- * orbit -- recomputed fresh from real data every time the reference
- * epoch moves, so it stays consistent with (and honest about) the
- * actual perturbed trajectory rather than freezing a single snapshot.
+ * system motion is n-body, so the result is really *osculating* --
+ * the instantaneous idealized two-body orbit implied by the body's
+ * state at this one epoch, not a shape refined over the whole orbit --
+ * recomputed fresh from real data every time the reference epoch
+ * moves, so it stays consistent with (and honest about) the actual
+ * perturbed trajectory rather than freezing a single snapshot.
  *
- * Throws if the body isn't gravitationally bound to `primaryId` at this
- * epoch (`invA <= 0`), if the orbit is rectilinear (zero angular
- * momentum -- no well-defined plane), or if the primary's own GM
- * lookup fails entirely (a body's own GM, if missing, is just treated
- * as 0 -- fine for e.g. Styx, whose real mass is small enough that
- * gm_de440.tpc itself lists it as exactly 0).
+ * Deliberately does *not* throw for an unbound orbit (`invA <= 0`,
+ * parabolic/hyperbolic) -- rebuildArcs()'s own closed-ellipse branch
+ * only proceeds when `invA > 0`, and its unbound-orbit fallback needs
+ * `r`/`v`/`mu`/`invA` regardless of boundedness. Still throws if the
+ * orbit is rectilinear (zero angular momentum -- no well-defined plane), or if the
+ * primary's own GM lookup fails entirely (a body's own GM, if missing,
+ * is just treated as 0 -- fine for e.g. Styx, whose real mass is small
+ * enough that gm_de440.tpc itself lists it as exactly 0).
  */
-function computeOrbitalEllipse(targetId, primaryId, et, pool) {
+function computeOrbitState(targetId, primaryId, et, pool) {
   const muPrimary = bodyValues(primaryId, 'GM', demo.remote.pool)[0];
   let muTarget = 0;
   try {
@@ -677,11 +702,7 @@ function computeOrbitalEllipse(targetId, primaryId, et, pool) {
   const rMag = r.length();
   const vMag = v.length();
 
-  const invSemiMajorAxis = 2 / rMag - (vMag * vMag) / mu;
-  if (invSemiMajorAxis <= 0) {
-    throw new Error(`orbit around body ${primaryId} is not bound (unbound/parabolic) at this epoch`);
-  }
-  const a = 1 / invSemiMajorAxis;
+  const invA = 2 / rMag - (vMag * vMag) / mu;
 
   const h = new THREE.Vector3().crossVectors(r, v);
   if (h.lengthSq() === 0) {
@@ -702,12 +723,11 @@ function computeOrbitalEllipse(targetId, primaryId, et, pool) {
   const ECCENTRICITY_EPS = 1e-8;
   const pHat = e > ECCENTRICITY_EPS ? eVec.divideScalar(e) : r.clone().normalize();
   const qHat = new THREE.Vector3().crossVectors(hHat, pHat).normalize();
-  const b = a * Math.sqrt(Math.max(0, 1 - e * e));
 
-  return { a, e, b, pHat, qHat, mu };
+  return { r, v, mu, e, invA, pHat, qHat, hHat };
 }
 
-/** Kepler's third law, `P = 2*pi*sqrt(a^3/mu)`, from computeOrbitalEllipse()'s own `{ a, mu }` -- used by trajectory mode (below) to get each body's own real heliocentric period, without a second vis-viva computation. */
+/** Kepler's third law, `P = 2*pi*sqrt(a^3/mu)` -- used by trajectory mode (below) to get each body's own real heliocentric period, without a second vis-viva computation. */
 function periodFromEllipse({ a, mu }) {
   return 2 * Math.PI * Math.sqrt((a * a * a) / mu);
 }
@@ -716,9 +736,9 @@ function periodFromEllipse({ a, mu }) {
  * A body's own **sidereal** period: the time to complete one full orbit
  * relative to a fixed, non-rotating reference -- here `targetId`'s own
  * state *relative to the SSB itself*, not relative to the Sun (unlike
- * computeOrbitalEllipse(), used for the exact instantaneous ellipse
+ * computeOrbitState(), used for the exact instantaneous ellipse
  * elsewhere). Vis-viva only needs `a` (semi-major axis) for a period,
- * not the full orbital-plane geometry computeOrbitalEllipse() also
+ * not the full orbital-plane geometry computeOrbitState() also
  * derives -- so this never throws on a "rectilinear orbit" (zero
  * angular momentum), only on a genuinely unbound state.
  *
@@ -726,7 +746,7 @@ function periodFromEllipse({ a, mu }) {
  * point, not a body with mass) -- `mu` still needs an approximating
  * "primary" mass for the two-body vis-viva formula to mean anything, so
  * this uses the Sun's GM (from `kernels/gm_de440.tpc`, same source
- * computeOrbitalEllipse() uses) plus `targetId`'s own, same reduced
+ * computeOrbitState() uses) plus `targetId`'s own, same reduced
  * two-body mu approximation as everywhere else in this demo -- accurate
  * to the extent the Sun dominates the system's mass (>99.8%; verified
  * against known real periods: Earth comes out ~367.3 days vs the real
@@ -867,7 +887,7 @@ function arcSampleBudget(windowSpanSeconds, centerPeriodSeconds) {
  * SSB) at `et` -- the gravitational acceleration a test particle at
  * this body's real position would feel from the Sun alone. Used only to
  * size the adaptive sampling step (trajectoryStepSeconds()) -- unlike
- * computeOrbitalEllipse()'s `mu`, this deliberately omits the target's
+ * computeOrbitState()'s `mu`, this deliberately omits the target's
  * own GM (it's the force *acting on* the body, not a combined two-body
  * reduced mass), matching the formula as given.
  */
@@ -1065,18 +1085,24 @@ function resetCameraToDefault() {
 }
 
 /**
- * Frames the camera around the current (precise-mode) scene's real
- * extent -- computed from actual marker positions/radii just placed,
- * not a guess, since this varies hugely body-to-body: a lone body with
- * no satellite data (e.g. Saturn, in this demo's data -- see
- * SATELLITE_KERNEL_FOR_BODY) needs a close-up around just its own
- * ~1-unit radius, while Earth's real Moon needs enough room for a
- * ~60-body-radius gap.
+ * Frames the camera around the current scene's real extent -- computed
+ * from actual marker positions/radii just placed, not a guess, since
+ * this varies hugely body-to-body (a lone body with no satellite data,
+ * e.g. Saturn in this demo's data -- see SATELLITE_KERNEL_FOR_BODY --
+ * needs a close-up around just its own ~1-unit radius, while Earth's
+ * real Moon needs enough room for a ~60-body-radius gap) *and* by
+ * scale mode (Sqrt-position compresses distances that Linear wouldn't).
+ * Originally precise-mode-only (`fitCameraForPrecise()`); generalized
+ * mode-agnostically once Position/Radius scale became live-switchable
+ * in system mode too (applyScaleSettings()) -- system mode's own
+ * *initial* framing still uses the fixed DEFAULT_CAMERA_POSITION
+ * distance (resetCameraToDefault()), unaffected, since its own default
+ * scale doesn't change; this is only for re-framing after a scale
+ * change, in either mode, and precise mode's own initial entry.
  */
-function fitCameraForPrecise() {
-  let maxExtent = demo.scale.markerRadius(demo.bodies[0]); // the precise-mode center's own radius, always present
+function fitCameraToScene() {
+  let maxExtent = 0;
   for (const b of demo.bodies) {
-    if (b.target === demo.viewObserver) continue;
     const dist = b.marker.position.length();
     maxExtent = Math.max(maxExtent, dist + demo.scale.markerRadius(b));
   }
@@ -1100,24 +1126,47 @@ function fitCameraForPrecise() {
 // `demo.bodies` is whatever's *currently displayed* in the 3D scene:
 // equal to demo.systemBodies in 'system' mode, or [center, ...its
 // satellites] in 'precise' mode (see enterPreciseMode()).
-// `demo.scale` is the current position/radius scale (SYSTEM_SCALE, or
-// a precise-mode scale from makePreciseScale()) -- everything that
-// converts a km position or a km radius into scene units goes through
-// it, so the rest of the code never branches on mode directly.
+// `demo.scale` is the current position/radius scale (makeScale(), from
+// whatever Position scale/Radius scale mode is selected -- see
+// applyScaleSettings()) -- everything that converts a km position or a
+// km radius into scene units goes through it, so the rest of the code
+// never branches on mode or scale directly.
 // ---------------------------------------------------------------------
 let demo = null;
 let modeChangeInFlight = false;
 let sceneUpdateSeq = 0; // see updateSceneForOffset()'s staleness guard
 let proxyCatalogue = null; // Map<kernelId, entry> once detectKernelProxy() finds one; null otherwise
 
-function kmToScene(posKm) {
-  // km -> AU, then a fixed display scale so the whole DE440 range is
-  // visually usable (real AU units would put Neptune ~30 units out and
-  // everything inside 1 AU indistinguishable at the origin).
-  const auX = posKm[0] / AU_KM;
-  const auY = posKm[1] / AU_KM;
-  const auZ = posKm[2] / AU_KM;
-  const scale = SCENE_UNITS_PER_AU;
+// Position scale, in scene units per km, for each Position-scale mode
+// (see the "Position scale"/"Radius scale" View controls). `linear` is
+// the same AU-anchored factor kmToScene() always used (SCENE_UNITS_PER_AU
+// per AU); `sqrt` is calibrated to agree with it at exactly 1 AU
+// (`sqrt(AU_KM) * POSITION_SQRT_SCALE === SCENE_UNITS_PER_AU`), so
+// switching modes doesn't jump the scale at the one distance both
+// happen to agree on -- only how *other* distances compress relative
+// to it changes.
+const POSITION_LINEAR_SCALE = SCENE_UNITS_PER_AU / AU_KM;
+const POSITION_SQRT_SCALE = SCENE_UNITS_PER_AU / Math.sqrt(AU_KM);
+
+/**
+ * Converts a km position vector to a scene-space one, along a chosen
+ * radial scale (`mode`: `'linear'` or `'sqrt'`) -- direction is always
+ * preserved exactly, only the *magnitude* (distance from whatever
+ * body `posKm` is relative to -- always the current view's own
+ * CENTER, by construction) is compressed. `'sqrt'` is what makes a
+ * heliocentric-scale view viable at all with a *single* scale factor:
+ * Neptune:Mercury's real ~77x distance ratio becomes ~8.8x, so inner
+ * planets don't collapse toward the origin while outer ones vanish off
+ * frame. Every call site already builds a *full* km vector relative to
+ * the observer and calls this exactly once at the point of producing a
+ * scene coordinate (markers, ellipse points, sampled-trajectory
+ * points), so a nonlinear radial scale needs no changes anywhere else.
+ */
+function scalePosition(posKm, mode) {
+  const rKm = Math.hypot(posKm[0], posKm[1], posKm[2]);
+  if (rKm === 0) return [0, 0, 0];
+  const rScene = mode === 'sqrt' ? Math.sqrt(rKm) * POSITION_SQRT_SCALE : rKm * POSITION_LINEAR_SCALE;
+  const factor = rScene / rKm;
   // Positions arrive already rotated into whatever frame is currently
   // active (see spkez()'s `ref` calls below) -- for the default inertial
   // view that's ECLIPJ2000, whose Z axis *is* the ecliptic pole by
@@ -1125,32 +1174,80 @@ function kmToScene(posKm) {
   // body-fixed IAU_<BODY> view it's that body's own rotational pole
   // instead. Either way, three.js's default "up" is Y, so swap Y/Z for
   // a natural top-down view.
-  return [auX * scale, auZ * scale, -auY * scale];
+  return [posKm[0] * factor, posKm[2] * factor, -posKm[1] * factor];
 }
 
-/** The whole-system (AU-anchored) position/radius scale -- see kmToScene()/sceneRadiusFor(). */
-const SYSTEM_SCALE = {
-  posToScene: kmToScene,
-  markerRadius: (b) => sceneRadiusFor(b),
-};
+/**
+ * A body's marker radius in scene units, along a chosen radial scale
+ * (`mode`) -- `'sqrt'` is `RADIUS_SCENE_SCALE * sqrt(km)` (unchanged
+ * from the whole-system view's own scale since this file's earliest
+ * version); `'linear'` is one true km-to-scene-unit factor anchored to
+ * `anchorKm` (typically the smallest body actually shown -- see
+ * smallestKnownRadiusKm() -- so it, and everything larger, renders at
+ * a guaranteed-visible size; PRECISE_BODY_RADIUS_UNITS is what that
+ * anchor itself renders as). `null` for `meanRadiusKmFor(b)` (no real
+ * RADII data for this body) falls back to a small placeholder --
+ * per-body (`b.fallbackRadius`) in `sqrt` mode, matching every built-in
+ * body's own hand-picked relative size; flat in `linear` mode, where
+ * every *real* size is already anchored to a true physical scale a
+ * hand-picked fallback has no meaningful relationship to.
+ */
+function scaleRadius(b, mode, anchorKm) {
+  const km = meanRadiusKmFor(b);
+  if (km != null) {
+    return mode === 'sqrt' ? RADIUS_SCENE_SCALE * Math.sqrt(km) : km * (PRECISE_BODY_RADIUS_UNITS / anchorKm);
+  }
+  return mode === 'sqrt' ? b.fallbackRadius * 0.05 : 0.02;
+}
 
 /**
- * The "precise" single-body mode's position/radius scale (see
- * PRECISE_BODY_RADIUS_UNITS above): one linear km-to-scene-unit factor
- * anchored to `centerRadiusKm`, applied identically to *every*
- * position and *every* marker radius in that mode -- true relative
- * size and distance at once, unlike SYSTEM_SCALE's AU-anchored
- * position scale + separately-compressed marker size.
+ * The smallest known real radius (km) among `bodies` -- the anchor for
+ * Linear radius mode's single km-to-scene-unit factor, so whichever
+ * body is smallest still renders at a guaranteed-visible size, not
+ * necessarily CENTER's own radius (which could dwarf a small
+ * satellite). `null` only if literally nothing in `bodies` has a known
+ * real radius -- not expected in practice (every built-in body has
+ * real RADII data, and entering precise mode already requires its own
+ * center to have one -- see enterPreciseMode()).
  */
-function makePreciseScale(centerRadiusKm) {
-  const linScale = PRECISE_BODY_RADIUS_UNITS / centerRadiusKm; // scene units per km
+function smallestKnownRadiusKm(bodies) {
+  const known = bodies.map((b) => meanRadiusKmFor(b)).filter((r) => r != null);
+  return known.length ? Math.min(...known) : null;
+}
+
+/**
+ * Builds a `{ posToScene, markerRadius }` scale object (see `demo.scale`'s
+ * own doc comment below) from independent Position/Radius scale modes
+ * -- the "Position scale"/"Radius scale" View controls. `radiusAnchorKm`
+ * only matters when `radiusMode === 'linear'` (see scaleRadius()).
+ */
+function makeScale({ positionMode, radiusMode, radiusAnchorKm }) {
   return {
-    posToScene: (posKm) => [posKm[0] * linScale, posKm[2] * linScale, -posKm[1] * linScale],
-    markerRadius: (b) => {
-      const km = meanRadiusKmFor(b);
-      return km != null ? km * linScale : 0.02; // small placeholder if RADII is somehow missing
-    },
+    posToScene: (posKm) => scalePosition(posKm, positionMode),
+    markerRadius: (b) => scaleRadius(b, radiusMode, radiusAnchorKm),
   };
+}
+
+/**
+ * makeScale(), but for Linear radius mode the anchor is always freshly
+ * computed from whatever's actually in `demo.bodies` right now (see
+ * smallestKnownRadiusKm()) -- shared by every place `demo.scale` gets
+ * (re)built after the body list is already known: buildScene(),
+ * applyViewSettings()'s precise-mode teardown, enterPreciseMode(), and
+ * applyScaleSettings() (the Position/Radius scale selects' own
+ * handler). Falls back to Sqrt radius (resetting `radiusScaleSelect`
+ * to match) if Linear was requested but nothing currently shown has a
+ * known real radius -- not expected in practice, see
+ * smallestKnownRadiusKm()'s own doc comment.
+ */
+function buildCurrentScale(positionMode, radiusMode) {
+  if (radiusMode === 'linear') {
+    const anchorKm = smallestKnownRadiusKm(demo.bodies);
+    if (anchorKm != null) return makeScale({ positionMode, radiusMode: 'linear', radiusAnchorKm: anchorKm });
+    log('  -> no body with a known real radius to anchor Linear radius scale -- staying on Sqrt.');
+    radiusScaleSelect.value = 'sqrt';
+  }
+  return makeScale({ positionMode, radiusMode: 'sqrt', radiusAnchorKm: null });
 }
 
 function clearBodies() {
@@ -1231,7 +1328,7 @@ async function loadPlanetaryConstants(pool) {
  * every planet/barycenter, and every natural satellite this demo can
  * show. Same reasoning as loadLeapseconds()/loadPlanetaryConstants()
  * above: this repo's own bundled copy, no live NAIF fetch needed for a
- * ~12 KB file that never changes. Used only by computeOrbitalEllipse()
+ * ~12 KB file that never changes. Used only by computeOrbitState()
  * below, to compute each body's own real two-body orbit shape.
  *
  * Always loaded into (and looked up from) `demo.remote.pool`
@@ -1260,12 +1357,46 @@ async function beginSession(remote, { sourceLabel, sourceSizeBytes, counters = n
   await loadPlanetaryConstants(remote.pool);
   await loadGravitationalParameters(remote.pool);
 
-  const et0 = str2et(new Date().toISOString());
+  let et0 = str2et(new Date().toISOString());
+
+  // "Reference epoch" slider bounds: the primary kernel's own real
+  // coverage (min/max across every one of its segments), not an
+  // arbitrary fixed window -- discoverSpkBodies() (already used for
+  // "Add a custom kernel"'s own structural scan) reads this from the
+  // DAF summary records directly, no real position data fetched.
+  // Falls back to a generous +/-3650-day window (today's old fixed
+  // bound) if discovery fails or the kernel is somehow empty, so this
+  // enhancement degrades gracefully rather than blocking kernel load.
+  let kernelStartEt = et0 - 3650 * DAY;
+  let kernelStopEt = et0 + 3650 * DAY;
+  try {
+    const kernelBodies = await discoverSpkBodies(remote.remoteFile);
+    if (kernelBodies.size > 0) {
+      kernelStartEt = Math.min(...[...kernelBodies.values()].map((b) => b.etStart));
+      kernelStopEt = Math.max(...[...kernelBodies.values()].map((b) => b.etEnd));
+    }
+  } catch (err) {
+    log(`  -> couldn't determine ${sourceLabel}'s own real time coverage (${err.message}); ` +
+      `reference epoch stays bounded to +/-3650 days.`);
+  }
+  if (et0 < kernelStartEt || et0 > kernelStopEt) {
+    const clamped = Math.min(Math.max(et0, kernelStartEt), kernelStopEt);
+    log(`  -> "now" (${et2utcCalendar(et0)}) is outside ${sourceLabel}'s own coverage; ` +
+      `reference epoch starts at ${et2utcCalendar(clamped)} instead.`);
+    et0 = clamped;
+  }
   log(`Reference epoch (now, UTC): ${et2utcCalendar(et0)}  (ET ${et0.toFixed(3)} s)`);
 
   demo = {
-    remote, et0, sourceLabel, sourceSizeBytes, counters,
-    bodies: [], systemBodies: [], mode: 'system', preciseBodyId: null, scale: SYSTEM_SCALE,
+    remote, et0, kernelStartEt, kernelStopEt, sourceLabel, sourceSizeBytes, counters,
+    bodies: [], systemBodies: [], mode: 'system', preciseBodyId: null,
+    // Position scale/Radius scale: 'linear' or 'sqrt' each (see the
+    // View controls' own selects, applyScaleSettings(), makeScale()) --
+    // matches today's whole-system view exactly (AU-anchored linear
+    // position, sqrt-compressed radius); only precise mode's own entry
+    // (enterPreciseMode()) picks different defaults (linear/linear).
+    positionScaleMode: 'linear', radiusScaleMode: 'sqrt',
+    scale: makeScale({ positionMode: 'linear', radiusMode: 'sqrt', radiusAnchorKm: null }),
     viewObserver: SSB, viewFrame: INERTIAL_FRAME, viewLabel: 'Solar System Barycenter',
     // ORBIT control state: 'ellipse' (default, analytic two-body
     // curve) or 'trajectory' (real sampled data, one body's own window
@@ -1614,7 +1745,15 @@ async function loadSelectedCustomBodies() {
     }
     const body = {
       target, bodyId: target, name, color: 0xffffff, fallbackRadius: 1.0,
-      iauFrame: null, primaryId: null, isCustom: true,
+      // primaryId: the custom kernel's own declared center for this
+      // body's segment -- almost always the Sun for a real small-body/
+      // comet SPK (Horizons-fetched or otherwise), whose GM is already
+      // loaded (loadGravitationalParameters()), so this alone is what
+      // makes rebuildArcs()'s ellipse-mode loop (and its unbound-orbit
+      // fallback) pick these bodies up by default -- previously always
+      // `null`, which skipped them (`if (b.primaryId == null) continue`)
+      // until the user manually switched to Trajectory mode.
+      iauFrame: null, primaryId: info.center, isCustom: true,
       customIntervalStart: info.etStart, customIntervalEnd: info.etEnd,
       dataStart: info.etStart, dataEnd: info.etEnd,
     };
@@ -1649,9 +1788,15 @@ async function loadSelectedCustomBodies() {
   // same role "now" plays at beginSession() time -- since a custom
   // kernel's valid interval has no reason to overlap wherever et0
   // already was (a mission trajectory from years ago/ahead of "now",
-  // for instance). The +-3650-day "Reference epoch" slider then
-  // scrubs around this new et0 exactly as before.
+  // for instance). The "Reference epoch" slider then scrubs around
+  // this new et0 exactly as before -- its min/max re-expressed as
+  // offsets from the *new* et0 (demo.kernelStartEt/kernelStopEt
+  // themselves are absolute epochs, unaffected by this -- still the
+  // primary kernel's own bounds; only the "days from et0" framing
+  // needs recomputing when et0 itself moves).
   demo.et0 = chosenEt0;
+  timeSlider.min = String((demo.kernelStartEt - demo.et0) / DAY);
+  timeSlider.max = String((demo.kernelStopEt - demo.et0) / DAY);
   timeSlider.value = '0';
   await updateSceneForOffset(0);
 }
@@ -1903,11 +2048,6 @@ function meanRadiusKmFor(b) {
   return b.meanRadiusKm;
 }
 
-/** A body's marker radius in *system-mode* scene units -- see the RADIUS_SCENE_SCALE comment above. */
-function sceneRadiusFor(b) {
-  const km = meanRadiusKmFor(b);
-  return km != null ? RADIUS_SCENE_SCALE * Math.sqrt(km) : b.fallbackRadius * 0.05;
-}
 
 /**
  * (Re)creates the marker THREE.Mesh for each of demo.bodies -- sized by
@@ -1935,8 +2075,11 @@ function ensureMarkers() {
  * (Re)builds each body's orbit-arc line around `centerEt`, in one of
  * two modes (the ORBIT control, `demo.orbitMode`):
  *
- * - `'ellipse'`: the exact analytic ellipse (computeOrbitalEllipse())
- *   around `b.primaryId`, translated into the *current view* by the
+ * - `'ellipse'`: the exact analytic ellipse (computeOrbitState(), bound
+ *   case) around `b.primaryId` -- or, for an unbound (parabolic/
+ *   hyperbolic) orbit, an open arc sampled via prop2b() instead (see
+ *   this function's own code below) -- translated into the *current
+ *   view* by the
  *   primary's own position relative to `demo.viewObserver` at
  *   `centerEt` (zero whenever the primary already IS the current
  *   view's center -- always true in precise mode, and whenever CENTER
@@ -2031,15 +2174,43 @@ function rebuildArcs(centerEt) {
     if (b.target === demo.viewObserver) continue; // degenerate: always (0,0,0) relative to itself
     if (b.primaryId == null) continue; // no real primary to orbit -- no well-defined ellipse
     try {
-      const { a, e, b: semiMinor, pHat, qHat } = computeOrbitalEllipse(b.target, b.primaryId, centerEt, demo.remote.pool);
+      const state = computeOrbitState(b.target, b.primaryId, centerEt, demo.remote.pool);
       const offset = b.primaryId === demo.viewObserver
         ? new THREE.Vector3()
         : new THREE.Vector3(...spkez(b.primaryId, demo.viewObserver, centerEt, 'NONE', demo.viewFrame, demo.remote.pool).position);
-      const curve = new THREE.EllipseCurve(-a * e, 0, a, semiMinor, 0, 2 * Math.PI, false, 0);
-      const arcPoints = curve.getPoints(ORBIT_ELLIPSE_SEGMENTS).map((p) => {
-        const posKm = pHat.clone().multiplyScalar(p.x).add(qHat.clone().multiplyScalar(p.y)).add(offset);
-        return new THREE.Vector3(...demo.scale.posToScene([posKm.x, posKm.y, posKm.z]));
-      });
+      const toScenePoint = (posKm) => new THREE.Vector3(...demo.scale.posToScene([posKm.x, posKm.y, posKm.z]));
+
+      let arcPoints;
+      if (state.invA > 0) {
+        // Bound: the exact closed ellipse, as always.
+        const a = 1 / state.invA;
+        const semiMinor = a * Math.sqrt(Math.max(0, 1 - state.e * state.e));
+        const curve = new THREE.EllipseCurve(-a * state.e, 0, a, semiMinor, 0, 2 * Math.PI, false, 0);
+        arcPoints = curve.getPoints(ORBIT_ELLIPSE_SEGMENTS).map((p) =>
+          toScenePoint(state.pHat.clone().multiplyScalar(p.x).add(state.qHat.clone().multiplyScalar(p.y)).add(offset))
+        );
+      } else {
+        // Unbound (parabolic/hyperbolic): only real for a custom/Horizons
+        // body (no built-in body is ever unbound relative to its own
+        // primary) -- no closed curve exists, so draw an open arc
+        // instead, propagated analytically from the *current* state via
+        // prop2b() (already handles e>=1 uniformly, no new math needed)
+        // across the body's own discovered SPK interval -- a naturally
+        // sensible bound already (for a Horizons fetch, exactly the date
+        // range the user chose), rather than an arbitrary window.
+        if (b.customIntervalStart == null || b.customIntervalEnd == null) {
+          throw new Error('unbound orbit with no known interval to draw it over');
+        }
+        const pvinit = [state.r.x, state.r.y, state.r.z, state.v.x, state.v.y, state.v.z];
+        const samples = Math.max(2, demo.customTrajectorySamples);
+        arcPoints = [];
+        for (let i = 0; i < samples; i++) {
+          const sampleEt = b.customIntervalStart + (b.customIntervalEnd - b.customIntervalStart) * (i / (samples - 1));
+          const [x, y, z] = prop2b(state.mu, pvinit, sampleEt - centerEt);
+          arcPoints.push(toScenePoint(new THREE.Vector3(x, y, z).add(offset)));
+        }
+      }
+
       const arcGeo = new THREE.BufferGeometry().setFromPoints(arcPoints);
       const arcMat = new THREE.LineBasicMaterial({ color: b.color, transparent: true, opacity: 0.45 });
       b.arcLine = new THREE.Line(arcGeo, arcMat);
@@ -2089,8 +2260,9 @@ async function ensureBodyCoverage(b, etStart, etEnd) {
  * DAF record containing that epoch, typically days to weeks wide for
  * DE440/satellite SPKs, so this is rarely revisited even as you
  * scrub). No whole-orbit window needed any more: every body's arc is
- * an analytic ellipse (computeOrbitalEllipse(), rebuildArcs())
- * recomputed fresh from its real state at the *current* reference
+ * an analytic ellipse (or, for an unbound orbit, an open arc --
+ * computeOrbitState(), rebuildArcs()) recomputed fresh from its real
+ * state at the *current* reference
  * epoch, not sampled real trajectory data over a fixed span. Records
  * `primaryId` on `body` -- the real body it orbits (the Sun for a
  * planet, the clicked body for one of its satellites) -- for
@@ -2126,7 +2298,11 @@ async function buildScene() {
   clearBodies();
   demo.mode = 'system';
   demo.preciseBodyId = null;
-  demo.scale = SYSTEM_SCALE;
+  demo.positionScaleMode = 'linear';
+  demo.radiusScaleMode = 'sqrt';
+  demo.scale = makeScale({ positionMode: 'linear', radiusMode: 'sqrt', radiusAnchorKm: null });
+  positionScaleSelect.value = 'linear';
+  radiusScaleSelect.value = 'sqrt';
   if (wasPrecise) resetCameraToDefault();
 
   const before = demo.counters ? { ...demo.counters } : null;
@@ -2144,7 +2320,7 @@ async function buildScene() {
       //
       // The Sun's own primary is `null` -- it isn't orbiting the Sun
       // (itself); every other body's is the Sun. Without this,
-      // computeOrbitalEllipse(Sun, Sun, ...) was self-referential (a
+      // computeOrbitState(Sun, Sun, ...) was self-referential (a
       // zero position vector), throwing "rectilinear orbit (zero
       // angular momentum)" every time rebuildArcs() ran in Ellipse mode
       // -- caught and logged harmlessly (the intended, documented
@@ -2174,12 +2350,20 @@ async function buildScene() {
   buildLegend(bodiesState);
   buildPreciseLegend([]);
 
+  // Bounded by the primary kernel's own real coverage (demo.kernelStartEt/
+  // kernelStopEt, see beginSession()), not a fixed window -- the slider's
+  // own value is always an *offset in days from demo.et0*, so the bounds
+  // are expressed the same way.
+  timeSlider.min = String((demo.kernelStartEt - demo.et0) / DAY);
+  timeSlider.max = String((demo.kernelStopEt - demo.et0) / DAY);
   timeSlider.disabled = false;
   centerSelect.disabled = false;
   frameSelect.disabled = false;
   rotatingCheckbox.disabled = false;
   orbitSelect.disabled = false;
   periodSelect.disabled = false;
+  positionScaleSelect.disabled = false;
+  radiusScaleSelect.disabled = false;
   centerSelect.value = 'SSB';
   rotatingCheckbox.checked = false;
   orbitSelect.value = 'ellipse';
@@ -2340,6 +2524,15 @@ function buildPreciseLegend(satellites) {
     dist.className = 'dist';
     dist.id = `pdist-${b.target}`;
     li.append(swatch, name, dist);
+    // Command/Meta+Click re-aims the camera at this satellite (Look
+    // At), without leaving the system already being precise-viewed --
+    // handlePreciseModeClick()'s own bounce-to-parent already lands
+    // here from the top-level legend; this is the shortcut for
+    // re-aiming at a *different* member once already inside.
+    li.addEventListener('click', (evt) => {
+      if (!demo || !evt.metaKey) return;
+      lookAtBody(b);
+    });
     preciseLegendEl.appendChild(li);
   }
 }
@@ -2427,8 +2620,12 @@ async function applyViewSettings() {
     clearBodies();
     demo.mode = 'system';
     demo.preciseBodyId = null;
-    demo.scale = SYSTEM_SCALE;
     demo.bodies = demo.systemBodies; // already carries its own per-body primaryId/dataStart/dataEnd -- nothing to restore separately
+    // Position/Radius scale stay whatever they already were (like
+    // ORBIT/PERIOD, just below -- not reset here), only the Linear
+    // radius anchor (if that's what's selected) is recomputed for the
+    // whole system now shown, instead of precise mode's own smaller one.
+    demo.scale = buildCurrentScale(demo.positionScaleMode, demo.radiusScaleMode);
     buildPreciseLegend([]);
     resetCameraToDefault();
     centerSelect.disabled = false;
@@ -2487,6 +2684,28 @@ async function applyOrbitPeriodSettings() {
   demo.orbitMode = orbitSelect.value;
   demo.periodMode = periodSelect.value;
   await updateSceneForOffset(Number(timeSlider.value));
+  updateViewStatus();
+}
+
+/**
+ * Position scale/Radius scale's own 'change' handler -- live in both
+ * modes, same reasoning as ORBIT/PERIOD above (never disabled, no
+ * precise-mode teardown). Rebuilds demo.scale (buildCurrentScale() --
+ * a fresh Linear-radius anchor, if that's selected, from whatever's
+ * currently shown), regenerates marker geometry at the new radii
+ * (ensureMarkers() -- updateSceneForOffset() only repositions, it
+ * doesn't resize), repositions/rebuilds everything at the new scale,
+ * then re-frames the camera (fitCameraToScene()) since a scale change
+ * can move the scene's own real extent by orders of magnitude.
+ */
+async function applyScaleSettings() {
+  if (!demo) return;
+  demo.positionScaleMode = positionScaleSelect.value;
+  demo.radiusScaleMode = radiusScaleSelect.value;
+  demo.scale = buildCurrentScale(demo.positionScaleMode, demo.radiusScaleMode);
+  ensureMarkers();
+  await updateSceneForOffset(Number(timeSlider.value));
+  fitCameraToScene();
   updateViewStatus();
 }
 
@@ -2576,12 +2795,13 @@ function recenterCameraAtOrigin() {
 /**
  * "Precise" single-body mode (Command/Meta+Click): centers on `spec`, shows
  * only it and its real satellites (resolveSatellitesFor(), often empty
- * -- see SATELLITE_KERNEL_FOR_BODY's comment), and switches to a scale
- * anchored to `spec`'s own real physical radius (makePreciseScale())
- * instead of the whole-system AU scale -- true relative size/distance
- * for a single system, numerically sane at this scale (unlike the
- * AU-anchored system view, where every planet's radius is many orders
- * of magnitude below a screen pixel).
+ * -- see SATELLITE_KERNEL_FOR_BODY's comment), and switches to Linear
+ * Position/Radius scale (buildCurrentScale()), anchored to the
+ * *smallest* body actually shown -- true relative size/distance for a
+ * single system, numerically sane at this scale (unlike the whole
+ * solar system, where a single linear scale can't make both a visible
+ * Sun and a visible Pluto fit at once) and guaranteeing even the
+ * smallest member stays visible, not just the center.
  */
 /**
  * Opens (or reuses, from demo.satelliteRemotes) a structural-discovery-
@@ -2688,7 +2908,7 @@ async function resolveSatellitesFor(spec) {
   return resolved;
 }
 
-async function enterPreciseMode(spec) {
+async function enterPreciseMode(spec, { lookAtTarget = null } = {}) {
   if (!demo) return;
   log(`Entering precise mode: ${spec.name}...`);
 
@@ -2728,7 +2948,20 @@ async function enterPreciseMode(spec) {
   demo.viewFrame = INERTIAL_FRAME;
   demo.viewLabel = spec.name;
   demo.bodies = included;
-  demo.scale = makePreciseScale(centerRadiusKm);
+  // Precise mode always *enters* on Linear/Linear (true relative size
+  // and distance at once -- the whole point, at this system-of-one-
+  // parent scale, unlike the whole solar system's own Sqrt-radius
+  // default), anchored to the *smallest* body actually shown (see
+  // buildCurrentScale()/smallestKnownRadiusKm()) so a small moon next
+  // to a large planet still renders at a guaranteed-visible size, not
+  // a sub-pixel fraction of the center's own scale -- but, like ORBIT/
+  // PERIOD below, these are still just defaults: the Position/Radius
+  // scale selects stay live and changeable from here (never disabled).
+  demo.positionScaleMode = 'linear';
+  demo.radiusScaleMode = 'linear';
+  demo.scale = buildCurrentScale('linear', 'linear');
+  positionScaleSelect.value = 'linear';
+  radiusScaleSelect.value = 'linear';
   // Precise mode always *enters* on the analytic-ellipse rendering
   // (regardless of what the whole-system view's ORBIT was left at),
   // but -- unlike CENTER/FRAME/ROTATING, still locked below -- ORBIT/
@@ -2751,7 +2984,7 @@ async function enterPreciseMode(spec) {
   // CENTER/FRAME/ROTATING don't apply to precise mode (a fully
   // separate feature -- see applyViewSettings()'s own precise-mode
   // teardown, which re-enables these on the way back out). ORBIT/
-  // PERIOD are left enabled -- see above.
+  // PERIOD/Position scale/Radius scale are left enabled -- see above.
   centerSelect.disabled = true;
   frameSelect.disabled = true;
   rotatingCheckbox.disabled = true;
@@ -2759,12 +2992,25 @@ async function enterPreciseMode(spec) {
   ensureMarkers();
   buildPreciseLegend(included.filter((b) => !b.isPreciseCenter && !b.isCustom));
   await updateSceneForOffset(Number(timeSlider.value));
-  fitCameraForPrecise();
+  fitCameraToScene();
   updateViewStatus();
   updateLegendActiveState();
+
+  // "Looking at the selected body, viewing from the parent" -- entered
+  // via a satellite specifically (handlePreciseModeClick()'s own
+  // bounce-to-parent), not the parent itself directly: the system just
+  // shown is correct either way (`spec` is always the parent here), but
+  // the camera should still distinguish "clicked Io" from "clicked
+  // Europa". `lookAtBody()` only needs the target id (it looks the
+  // body up in demo.bodies itself), so any object carrying the right
+  // `.target` works, even one from a different array.
+  if (lookAtTarget != null) {
+    const focusBody = demo.bodies.find((b) => b.target === lookAtTarget);
+    if (focusBody) lookAtBody(focusBody);
+  }
 }
 
-/** Leaves 'precise' mode, back to the whole-system Solar System Barycenter view -- ROTATING/FRAME/ORBIT stay whatever they already were (independent controls; see applyViewSettings()), only CENTER changes here. */
+/** Leaves 'precise' mode, back to the whole-system Solar System Barycenter view -- ROTATING/FRAME/ORBIT/Position scale/Radius scale stay whatever they already were (independent controls; see applyViewSettings()), only CENTER changes here. */
 async function exitPreciseMode() {
   centerSelect.value = 'SSB';
   await applyViewSettings();
@@ -2780,14 +3026,53 @@ async function exitPreciseMode() {
  * -- so precise mode uses evt.metaKey instead, which is Cmd on macOS
  * and the Windows/Super key elsewhere, neither of which browsers claim
  * for click handling.)
+ *
+ * A materialized *satellite* of a major body (has its own real
+ * `primaryId`, set by prefetchBodyProbe() when it was first resolved --
+ * not true of a top-level planet's own BODIES entry, which has none;
+ * still true of a custom/Horizons body even after it gets a real
+ * `primaryId` too, see loadSelectedCustomBodies(), but those stay
+ * tagged `isCustom` so they're not mistaken for one here) doesn't get
+ * its own precise mode -- moons of moons aren't a thing in this data.
+ * Command+Click on one instead enters precise mode on its *parent*
+ * (same as clicking the parent directly would), then looks at the
+ * satellite specifically -- "looking at the selected body, viewing
+ * from the parent of the system". Clicking a *different* satellite of
+ * a system already being precise-viewed just re-aims the camera at it
+ * (stays in the same system); clicking the currently-viewed body again
+ * (the parent itself, or the specific satellite the view is currently
+ * looking at) exits, same as before.
  */
 function handlePreciseModeClick(b, evt) {
   if (!demo || modeChangeInFlight || !evt.metaKey) return;
   modeChangeInFlight = true;
   const done = () => { modeChangeInFlight = false; };
   const fail = (err) => { log(`ERROR: ${err.message}`); console.error(err); };
-  const alreadyThisPrecise = demo.mode === 'precise' && demo.preciseBodyId === b.bodyId;
-  (alreadyThisPrecise ? exitPreciseMode() : enterPreciseMode(b)).catch(fail).finally(done);
+
+  const isSatellite = !b.isCustom && b.primaryId != null;
+  const preciseTargetId = isSatellite ? b.primaryId : b.bodyId;
+
+  if (demo.mode === 'precise' && demo.preciseBodyId === preciseTargetId) {
+    if (isSatellite && demo.lookAtTarget !== b.target) {
+      lookAtBody(b); // same system, different satellite -- just re-aim
+      done();
+      return;
+    }
+    exitPreciseMode().catch(fail).finally(done);
+    return;
+  }
+
+  if (!isSatellite) {
+    enterPreciseMode(b).catch(fail).finally(done);
+    return;
+  }
+  const parentSpec = demo.systemBodies.find((x) => x.target === b.primaryId);
+  if (!parentSpec) {
+    fail(new Error(`couldn't find ${b.name}'s own parent (body ${b.primaryId}) to enter precise mode on.`));
+    done();
+    return;
+  }
+  enterPreciseMode(parentSpec, { lookAtTarget: b.target }).catch(fail).finally(done);
 }
 
 /**
@@ -2890,7 +3175,7 @@ async function updateSceneForOffset(offsetDays) {
       // planet's own (multi-month/year) period, not its real
       // (hours/days) orbit around the parent -- a physically wrong,
       // expensive-to-sample window. Precise mode's own two-body
-      // ellipse (computeOrbitalEllipse(), around the real parent) is
+      // ellipse (computeOrbitState(), around the real parent) is
       // already exact for satellites; trajectory mode there is only
       // meant for custom bodies (see rebuildArcs()).
       if (demo.mode === 'precise') continue;
@@ -3040,6 +3325,15 @@ for (const control of [orbitSelect, periodSelect]) {
     });
   });
 }
+// Position scale/Radius scale get their own handler too, same reasoning.
+for (const control of [positionScaleSelect, radiusScaleSelect]) {
+  control.addEventListener('change', () => {
+    applyScaleSettings().catch((err) => {
+      log(`ERROR: ${err.message}`);
+      console.error(err);
+    });
+  });
+}
 
 viewStatusEl.addEventListener('click', () => {
   if (demo && demo.mode === 'precise') {
@@ -3161,6 +3455,21 @@ async function detectKernelProxy() {
   proxySectionEl.style.display = '';
   log(`Local kernel proxy detected: ${catalogue.kernels.length} kernels available with no download step. ` +
     `Click one above, or use the file picker below.`);
+
+  // Auto-load the default kernel so the page opens already showing the
+  // solar system, instead of an empty session waiting for a manual
+  // pick -- same loadFromProxy() a click on its own catalogue row would
+  // trigger. `!demo` guards the (unlikely) race where the user already
+  // started a session another way before this async detection finished.
+  const defaultEntry = proxyCatalogue.get(DEFAULT_KERNEL_ID);
+  if (defaultEntry && !demo) {
+    try {
+      await loadFromProxy(defaultEntry);
+    } catch (err) {
+      log(`ERROR loading the default kernel (${DEFAULT_KERNEL_ID}): ${err.message}`);
+      console.error(err);
+    }
+  }
 }
 
 populateViewControls();
