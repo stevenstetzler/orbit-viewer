@@ -380,7 +380,21 @@ also real prefetching cost, per body -- worth knowing before scrubbing
 around with Trajectory active on a kernel with limited real temporal
 coverage (e.g. `de440s` only covers 1849-2150, so Pluto's own
 +-124.5-year Sidereal window can push right up against that edge
-depending on "now"). The curvature step adds one more wrinkle here: it
+depending on "now"). Every computed window is clamped to the loaded
+kernel's own real coverage (`demo.kernelStartEt`/`kernelStopEt` -- the
+same bound the "Reference epoch" slider itself can't be scrubbed
+outside of, see "Orbit-arc shape" above) before it's used for anything
+-- Pluto's real ~249-year window alone is comparable to `de440s`'s
+*entire* ~300-year span, so scrubbing anywhere near either edge of the
+slider's own range reaches past data that simply doesn't exist in any
+kernel, not just data that hasn't been fetched yet; a body whose real
+window would reach past the edge gets its arc silently truncated there
+instead of a wall of chained fetch errors -- and since one oversized
+window also used to widen Center's (and the Sun's) own *shared*
+coverage, without this clamp a single long-period body reaching past
+the edge could break prefetching for every other body sharing that
+coverage too, not just its own arc. The curvature step adds one more
+wrinkle here: it
 needs the **Sun's** own state at every sampled point of *every* body's
 window (not just the Sun's own, possibly narrower, displayed window),
 so the Sun's own prefetch coverage is extended to the same union of

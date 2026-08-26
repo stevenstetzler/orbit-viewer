@@ -1000,29 +1000,51 @@ function sampleArcAdaptive(target, observer, et0, et1, frame, pool, maxSamples =
  * to mirror either), or (Synodic only, non-Sun bodies) `body`'s period
  * happens to coincide exactly with `centerBody`'s (a 1:1 resonance --
  * an infinite synodic period).
+ *
+ * Every returned window is clamped to `[demo.kernelStartEt,
+ * demo.kernelStopEt]` (the loaded primary kernel's own real coverage
+ * -- the same bound the "Reference epoch" slider itself is bounded by,
+ * see beginSession()) before being returned. `et` itself is always
+ * inside that range by construction (the slider can't be scrubbed
+ * outside it), but a body's own *window* around `et` easily isn't --
+ * Pluto's real ~248-year sidereal period alone is comparable to
+ * `de440s`'s entire ~300-year coverage, so anywhere near either edge
+ * of the slider's range, `[et - P/2, et + P/2]` reaches past data that
+ * simply doesn't exist in any kernel, not just data that hasn't been
+ * fetched yet -- no amount of prefetching fixes that. Without this
+ * clamp, that one oversized, unfetchable window was also the window
+ * used to widen CENTER's (and the Sun's) own *shared* coverage (see
+ * updateSceneForOffset()'s centerUnionStart/End) to -- so one body
+ * with a long enough period reaching past the kernel's edge broke
+ * prefetching for every *other* body sharing that same widened
+ * coverage too, not just its own arc. Clamping here means a body whose
+ * real window would reach past the edge just gets its arc silently
+ * truncated at the edge instead -- an honest reflection of "this is as
+ * far as the loaded data goes," not a wall of chained fetch errors.
  */
 function trajectoryWindowForBody(centerBody, body, et, pool, periodMode) {
+  const clampToKernel = ([start, end]) => [Math.max(start, demo.kernelStartEt), Math.min(end, demo.kernelStopEt)];
   try {
     if (body.target === SUN_TARGET && centerBody != null) {
       const mirrorPeriod = siderealPeriodSeconds(centerBody.target, et, pool);
-      return [et - mirrorPeriod / 2, et + mirrorPeriod / 2];
+      return clampToKernel([et - mirrorPeriod / 2, et + mirrorPeriod / 2]);
     }
     const bodyPeriod = siderealPeriodSeconds(body.target, et, pool);
     if (periodMode !== 'synodic' || centerBody == null) {
-      return [et - bodyPeriod / 2, et + bodyPeriod / 2];
+      return clampToKernel([et - bodyPeriod / 2, et + bodyPeriod / 2]);
     }
     const centerPeriod = siderealPeriodSeconds(centerBody.target, et, pool);
     const denom = Math.abs(bodyPeriod - centerPeriod);
     if (denom > 0) {
       const halfSynodic = (centerPeriod * bodyPeriod) / denom / 2;
-      return [et - halfSynodic, et + halfSynodic];
+      return clampToKernel([et - halfSynodic, et + halfSynodic]);
     }
     log(`  -> ${body.name}'s period matches ${centerBody.name}'s exactly (infinite synodic period); using a fallback +-${TRAJECTORY_FALLBACK_HALF_SPAN_DAYS}-day window.`);
   } catch (err) {
     log(`  -> couldn't determine ${body.name}'s ${periodMode} trajectory window (${err.message}); using a fallback +-${TRAJECTORY_FALLBACK_HALF_SPAN_DAYS}-day window.`);
   }
   const halfSpan = TRAJECTORY_FALLBACK_HALF_SPAN_DAYS * DAY;
-  return [et - halfSpan, et + halfSpan];
+  return clampToKernel([et - halfSpan, et + halfSpan]);
 }
 
 // ---------------------------------------------------------------------
