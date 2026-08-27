@@ -599,6 +599,40 @@ catalogue above. Picking a file:
    time (a custom kernel's valid interval has no reason to overlap
    wherever the reference epoch already was).
 
+Loading a custom kernel also **narrows the "Reference epoch" slider's
+own range** to the intersection with this kernel's own real coverage
+(across whichever bodies actually got added, not the popup's own
+combined min/max, if only some were checked) -- not just the primary
+kernel's own bound any more (see "Orbit-arc shape" above). A Horizons
+fetch's own narrow date range (a handful of years, typically) is the
+common case this visibly affects: `de440s`'s own ~300-year range
+narrows down to just the years the fetched object actually has data
+for. A kernel *wider* than what's already loaded has no effect --
+intersecting with a wider range never narrows anything -- since this
+same bound also anchors `trajectoryWindowForBody()`'s own clamp, so
+widening it here could reopen the exact "a body's own real period
+reaches past what some other kernel can supply" failure that clamp
+prevents (see "Orbit-arc shape" above). If a newly-added kernel's own
+range doesn't overlap what's already loaded at all, the range is left
+as-is (logged, not silently ignored) -- the new body's marker and
+ellipse simply won't show at any epoch currently reachable; see the
+per-body coverage check below for what makes that survivable rather
+than an error. A satellite kernel (`jup365.bsp` and friends -- see
+"Command+Click: precise single-body mode" below) narrows the same way,
+the first time it's opened.
+
+Because a custom kernel's own real interval can still be *narrower*
+than the (possibly already-narrowed) reference-epoch range -- multiple
+custom kernels loaded with non-overlapping windows, for instance, or
+one whose own range didn't overlap what was already loaded at all, per
+above -- each custom body's marker and ellipse-mode arc are only drawn
+while the current reference epoch actually falls within *that specific
+body's* own discovered interval; scrubbed outside it, the marker just
+disappears (no error, no wasted query) rather than failing loudly, and
+reappears exactly when scrubbed back into range. Trajectory-mode's own
+white sampled line is unaffected either way -- it's already just the
+body's own full interval, regardless of the current reference epoch.
+
 A custom body's `primaryId` is set to its own SPK segment's real
 `center` (almost always the Sun, for a real small-body/comet/mission
 product) rather than left unset, so it participates in Ellipse mode
@@ -734,7 +768,14 @@ once, verified live: Jupiter fetches `jup365.bsp` (8 moons: the four
 Galilean plus Amalthea/Thebe/Adrastea/Metis) only on the *first*
 Command+Click, Mars fetches `mar099.bsp` (Phobos + Deimos) only on its
 first Command+Click, and returning to Jupiter shows all 8 moons again
-with no new fetch.
+with no new fetch. The first time a satellite kernel like this
+actually opens, it narrows the "Reference epoch" slider's own range
+the same way loading a custom kernel does (see "Adding a custom
+kernel" above) -- so this applies uniformly whether you reach a
+satellite kernel through precise mode, or by Command+Clicking (or
+setting Center/Frame to) a satellite directly from the "Bodies shown"
+legend's own per-row dropdown (see "Satellites: a per-row dropdown"
+below), including View From a satellite specifically.
 
 Precise mode uses the same analytic two-body ellipse as the
 whole-system view (see "Orbit-arc shape" above) -- no separate tuning

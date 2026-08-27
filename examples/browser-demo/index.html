@@ -1136,6 +1136,7 @@ function resetCameraToDefault() {
 function fitCameraToScene() {
   let maxExtent = 0;
   for (const b of demo.bodies) {
+    if (!b.marker.visible) continue; // outside its own known coverage right now -- see bodyHasCoverageAt()
     const dist = b.marker.position.length();
     maxExtent = Math.max(maxExtent, dist + demo.scale.markerRadius(b));
   }
@@ -1546,6 +1547,73 @@ async function beginSession(remote, { sourceLabel, sourceSizeBytes, counters = n
   await buildScene();
 }
 
+/**
+ * Narrows `demo.kernelStartEt`/`kernelStopEt` (the "Reference epoch"
+ * slider's own bounds -- see beginSession() above) to the
+ * *intersection* with a newly-opened kernel's own real coverage
+ * `[newStartEt, newStopEt]`. Called whenever a custom kernel ("Add a
+ * custom kernel"/"Fetch from JPL Horizons", loadSelectedCustomBodies())
+ * or a satellite kernel (openSatelliteKernel()) gets opened into the
+ * session, so the slider never invites scrubbing to a point where
+ * *something* currently loaded -- not just the primary kernel's own
+ * bodies, which is all beginSession() alone accounts for -- has no
+ * data at all.
+ *
+ * Intersection, not union: a custom/satellite kernel is typically
+ * *narrower* than the primary planetary kernel (a Horizons fetch spans
+ * a handful of years; `de440s` spans ~300), so this usually visibly
+ * narrows the range -- the actual point of the feature. A kernel
+ * *wider* than what's already loaded (e.g. `jup365`'s own real
+ * coverage runs further into the future than `de440s`'s) simply has no
+ * effect here, deliberately: the intersection with the narrower
+ * existing bound stays the existing bound. Widening it instead would
+ * silently reopen exactly the failure trajectoryWindowForBody()'s own
+ * clamp exists to prevent -- that same clamp uses this exact bound, so
+ * a body's own real period could again reach past what some *other*,
+ * still-loaded kernel can actually supply.
+ *
+ * If the new kernel's own range doesn't overlap what's already loaded
+ * at all, intersecting would invert the range (`start > stop`) -- left
+ * unchanged instead, just logged: the newly-added body/bodies simply
+ * won't share any epoch with whatever's already on screen, which is
+ * exactly what bodyHasCoverageAt() (used by updateSceneForOffset()'s
+ * marker loop and rebuildArcs()'s ellipse loop) keeps survivable --
+ * hiding a body outside its own known coverage rather than erroring,
+ * not this function's job.
+ *
+ * Only updates `kernelStartEt`/`kernelStopEt` and re-expresses the
+ * "Reference epoch" slider's own min/max relative to whatever
+ * `demo.et0` currently is -- callers decide separately whether the
+ * *current* epoch/slider position itself also needs reclamping into
+ * the (possibly now narrower) range: loadSelectedCustomBodies() always
+ * sets a fresh et0 right after calling this anyway, so it clamps that
+ * new value directly instead; openSatelliteKernel() doesn't otherwise
+ * touch et0 at all, so it reclamps the *current* position explicitly.
+ *
+ * @returns {boolean} whether the range actually narrowed (false if the
+ *   new kernel's range didn't overlap at all, or its intersection with
+ *   the existing bound left that bound unchanged).
+ */
+function narrowKernelRange(newStartEt, newStopEt, label) {
+  const start = Math.max(demo.kernelStartEt, newStartEt);
+  const stop = Math.min(demo.kernelStopEt, newStopEt);
+  if (start > stop) {
+    log(`  -> ${label}'s own real coverage (${et2utcCalendar(newStartEt)} to ${et2utcCalendar(newStopEt)}) ` +
+      `doesn't overlap the session's current reference-epoch range at all -- leaving that range as-is.`);
+    return false;
+  }
+  const narrowed = start !== demo.kernelStartEt || stop !== demo.kernelStopEt;
+  if (narrowed) {
+    log(`  -> reference epoch range narrowed to ${label}'s own real coverage: ` +
+      `${et2utcCalendar(start)} to ${et2utcCalendar(stop)}.`);
+  }
+  demo.kernelStartEt = start;
+  demo.kernelStopEt = stop;
+  timeSlider.min = String((demo.kernelStartEt - demo.et0) / DAY);
+  timeSlider.max = String((demo.kernelStopEt - demo.et0) / DAY);
+  return narrowed;
+}
+
 // ---------------------------------------------------------------------
 // "Add a custom kernel" -- layers extra bodies from a user-supplied
 // .bsp onto the already-open session (see the file input's own
@@ -1881,17 +1949,31 @@ async function loadSelectedCustomBodies() {
   buildLegend(demo.systemBodies);
   customResolutionRow.style.display = '';
 
+  // The "Reference epoch" slider's own overall range narrows to this
+  // kernel's own real coverage too (see narrowKernelRange()) -- across
+  // every body actually added this time, not the popup's own combined
+  // min/max, since an unchecked box (or one that failed to prefetch,
+  // see the `continue` above) can make what's actually loaded narrower
+  // than what the popup originally offered.
+  const addedStart = Math.min(...added.map((b) => b.customIntervalStart));
+  const addedEnd = Math.max(...added.map((b) => b.customIntervalEnd));
+  narrowKernelRange(addedStart, addedEnd, file.name);
+
   // The session's own reference epoch moves to the chosen point --
   // same role "now" plays at beginSession() time -- since a custom
   // kernel's valid interval has no reason to overlap wherever et0
   // already was (a mission trajectory from years ago/ahead of "now",
-  // for instance). The "Reference epoch" slider then scrubs around
-  // this new et0 exactly as before -- its min/max re-expressed as
-  // offsets from the *new* et0 (demo.kernelStartEt/kernelStopEt
-  // themselves are absolute epochs, unaffected by this -- still the
-  // primary kernel's own bounds; only the "days from et0" framing
-  // needs recomputing when et0 itself moves).
-  demo.et0 = chosenEt0;
+  // for instance). Clamped into the just-narrowed range above (the
+  // popup's own epoch slider is bounded by *this* kernel's own min/max
+  // already, but not necessarily by whatever else was loaded before
+  // it -- narrowKernelRange() intersects both). The "Reference epoch"
+  // slider then scrubs around this new et0 exactly as before, min/max
+  // re-expressed as offsets from it.
+  demo.et0 = Math.min(Math.max(chosenEt0, demo.kernelStartEt), demo.kernelStopEt);
+  if (demo.et0 !== chosenEt0) {
+    log(`  -> the chosen reference epoch (${et2utcCalendar(chosenEt0)}) falls outside the narrowed range; ` +
+      `using ${et2utcCalendar(demo.et0)} instead.`);
+  }
   timeSlider.min = String((demo.kernelStartEt - demo.et0) / DAY);
   timeSlider.max = String((demo.kernelStopEt - demo.et0) / DAY);
   timeSlider.value = '0';
@@ -2270,6 +2352,7 @@ function rebuildArcs(centerEt) {
   for (const b of demo.bodies) {
     if (b.target === demo.viewObserver) continue; // degenerate: always (0,0,0) relative to itself
     if (b.primaryId == null) continue; // no real primary to orbit -- no well-defined ellipse
+    if (!bodyHasCoverageAt(b, centerEt)) continue; // no valid state at this epoch -- nothing to compute an ellipse from
     try {
       const state = computeOrbitState(b.target, b.primaryId, centerEt, demo.remote.pool);
       const offset = b.primaryId === demo.viewObserver
@@ -2316,6 +2399,28 @@ function rebuildArcs(centerEt) {
       log(`  -> couldn't draw ${b.name}'s orbit ellipse (${err.message})`);
     }
   }
+}
+
+/**
+ * Whether `b` has any real data at `et` at all -- `false` means "don't
+ * even try to query this body right now," used to skip it cleanly
+ * (hidden marker, no ellipse/prefetch attempt) rather than let a
+ * doomed query fail loudly. Only a body with a *fixed*, narrower-than-
+ * the-session interval of its own -- currently just custom/Horizons
+ * bodies (`customIntervalStart`/`customIntervalEnd`, set once at load
+ * time in loadSelectedCustomBodies(), never widened afterward) -- can
+ * actually answer `false` here. Every other body (the ten standard
+ * ones, any resolved satellite) is assumed in range unconditionally:
+ * their real coverage is exactly what `demo.kernelStartEt`/
+ * `kernelStopEt` already guarantees (every loaded kernel's own real
+ * coverage gets intersected into that same bound as it's opened -- see
+ * narrowKernelRange()), and `et` itself can never leave
+ * `[kernelStartEt, kernelStopEt]` -- the "Reference epoch" slider's
+ * own bounds -- so there's nothing further to check for them.
+ */
+function bodyHasCoverageAt(b, et) {
+  if (b.customIntervalStart == null || b.customIntervalEnd == null) return true;
+  return et >= b.customIntervalStart && et <= b.customIntervalEnd;
 }
 
 /**
@@ -2922,12 +3027,53 @@ function recenterCameraAtOrigin() {
  * hop-plus-verify fallback) -- so a satellite resolved this way can be
  * positioned relative to (or used as CENTER for) any other body in the
  * session, not just within a precise-mode view of its own parent.
+ *
+ * Also narrows the "Reference epoch" range to this kernel's own real
+ * coverage (narrowKernelRange()) the first time it's opened -- a
+ * satellite kernel is just another real data source with its own real
+ * temporal limits, same reasoning as a custom kernel (see
+ * loadSelectedCustomBodies()); this is what makes item 1/2's fix apply
+ * automatically to precise mode (entering it, or picking a satellite
+ * from a "Bodies shown" row's own dropdown, is exactly what triggers
+ * this function) without any precise-mode-specific handling of its
+ * own. Since this only runs once per kernel (guarded by the
+ * `satelliteRemotes` cache check above), it doesn't re-narrow every
+ * time the same satellite kernel's bodies get re-touched later.
  */
 async function openSatelliteKernel(kernelId) {
   if (demo.satelliteRemotes.has(kernelId)) return demo.satelliteRemotes.get(kernelId);
   const entry = proxyCatalogue.get(kernelId);
   log(`  Fetching ${entry.file} (${entry.size}) through the local proxy -- needed once, then cached for this session...`);
   const remoteFile = await openRemoteFile(entry.url);
+
+  try {
+    const kernelBodies = await discoverSpkBodies(remoteFile);
+    if (kernelBodies.size > 0) {
+      const starts = [...kernelBodies.values()].map((b) => b.etStart);
+      const ends = [...kernelBodies.values()].map((b) => b.etEnd);
+      const narrowed = narrowKernelRange(Math.min(...starts), Math.max(...ends), entry.file);
+      // Unlike loadSelectedCustomBodies() (which always sets a fresh
+      // et0 right after narrowing), nothing else here touches et0 --
+      // so if narrowing just pushed the *current* position outside the
+      // new range, reclaim it explicitly rather than leaving the
+      // slider pointing somewhere no longer valid.
+      if (narrowed) {
+        const currentEt = demo.et0 + Number(timeSlider.value) * DAY;
+        if (currentEt < demo.kernelStartEt || currentEt > demo.kernelStopEt) {
+          const clamped = Math.min(Math.max(currentEt, demo.kernelStartEt), demo.kernelStopEt);
+          log(`  -> the current reference epoch (${et2utcCalendar(currentEt)}) is now outside the narrowed ` +
+            `range; moved to ${et2utcCalendar(clamped)}.`);
+          demo.et0 = clamped;
+          timeSlider.min = String((demo.kernelStartEt - demo.et0) / DAY);
+          timeSlider.max = String((demo.kernelStopEt - demo.et0) / DAY);
+          timeSlider.value = '0';
+        }
+      }
+    }
+  } catch (err) {
+    log(`  -> couldn't determine ${entry.file}'s own real time coverage (${err.message}); reference epoch range unaffected.`);
+  }
+
   const remote = {
     remoteFile,
     pool: demo.remote.pool,
@@ -3348,6 +3494,11 @@ async function updateSceneForOffset(offsetDays) {
   }
 
   for (const b of demo.bodies) {
+    if (!bodyHasCoverageAt(b, et)) {
+      b.marker.visible = false;
+      continue;
+    }
+    b.marker.visible = true;
     let position;
     try {
       ({ position } = spkez(b.target, demo.viewObserver, et, 'NONE', demo.viewFrame, demo.remote.pool));
@@ -3367,6 +3518,10 @@ async function updateSceneForOffset(offsetDays) {
   for (const b of demo.systemBodies) {
     const distEl = document.getElementById(`dist-${b.target}`);
     if (!distEl) continue;
+    if (!bodyHasCoverageAt(b, et)) {
+      distEl.textContent = '';
+      continue;
+    }
     try {
       const { position } = spkez(b.target, demo.viewObserver, et, 'NONE', demo.viewFrame, demo.remote.pool);
       distEl.textContent = `${(Math.hypot(...position) / AU_KM).toFixed(2)} AU`;
@@ -3381,6 +3536,10 @@ async function updateSceneForOffset(offsetDays) {
       if (b.target === demo.viewObserver) continue;
       const distEl = document.getElementById(`pdist-${b.target}`);
       if (!distEl) continue;
+      if (!bodyHasCoverageAt(b, et)) {
+        distEl.textContent = '';
+        continue;
+      }
       try {
         const { position } = spkez(b.target, demo.viewObserver, et, 'NONE', demo.viewFrame, demo.remote.pool);
         distEl.textContent = `${Math.hypot(...position).toFixed(0)} km`;
