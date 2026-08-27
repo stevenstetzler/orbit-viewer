@@ -225,10 +225,9 @@ way an earlier version did; instead the arc becomes an **open
 polyline**, sampled via `prop2b()` (NAIF's own universal-variables
 two-body propagator, exported from `src/prop2b.js` -- handles
 elliptical, parabolic, and hyperbolic orbits uniformly, so no separate
-conic-specific geometry is needed) across the body's own real,
-naturally-bounded SPK coverage interval, at a sample count set by the
-"Custom trajectory resolution" slider (the same one custom-body
-Trajectory mode already used -- see "Adding a custom kernel" below).
+conic-specific geometry is needed) uniformly across the body's own
+real, naturally-bounded SPK coverage interval, at a sample count sized
+for ~1-minute real resolution (see "Adding a custom kernel" below).
 Verified live against both a real bound case (Ceres, matching its
 published semi-major axis/eccentricity) and a synthetic hyperbolic
 one.
@@ -644,33 +643,36 @@ something with no known `GM` (rare -- `kernels/gm_de440.tpc` covers
 the Sun, every planet/barycenter, and every natural satellite this
 demo knows) falls back silently to no ellipse at all, same as any
 other GM-lookup failure. Switching Orbit to **Trajectory** still
-renders the older **white sampled trajectory** instead, at a sample
-count set by the "Custom trajectory resolution" slider, independent
-of Orbit/Period's period-scaled scheme -- useful once the vantage
-point moves off the body's own primary, the same reason Trajectory
-mode exists for any other body.
+renders the older **white sampled trajectory** instead -- useful once
+the vantage point moves off the body's own primary, the same reason
+Trajectory mode exists for any other body.
 
-Neither mode samples over the body's *entire* discovered interval any
-more -- that produced an arc spanning wildly more real distance than
-whatever else was on screen (a multi-year Horizons fetch, for
-instance, dwarfing a single planetary system, or a fast hyperbolic
-object's own asymptotic straight-line approach/departure swamping the
-one interesting bend near closest approach -- both looked basically
-broken). Both modes now use one shared, live-recomputed window
-instead: evaluate the body's real state relative to its own primary
-*at the current reference epoch*, and size a window `[et - halfSpan,
-et + halfSpan]` where `halfSpan` is how long, at the body's *current*
-real speed, it'd take to cross the real physical scale of its own
-system -- the farthest distance from that primary to any other real
-body known to orbit it too (the planets, for a Sun-centered body), or,
-with no known siblings, the primary's own physical radius. Clamped to
-the body's own real discovered interval either way. This is inherently
-self-scaling and re-evaluated on every "Reference epoch" scrub: a fast
-close pass gets a short, detailed window; a slow, distant stretch gets
-a longer one, staying proportionate to whatever's actually nearby
-either way. Custom bodies have no known `IAU_<BODY>` orientation, so
-Rotating/Frame don't apply to them ("From" a custom body leaves Frame
-untouched and turns Rotating off).
+Both modes sample uniformly across the body's *entire* discovered
+interval, at however many points give ~1-minute real resolution (up to
+a 20,000-sample ceiling, for a genuinely long interval -- coarser than
+1 minute past that, but still real, still uniform, still the whole
+interval). An earlier version tried a narrower, live-recomputed window
+instead (sized from the body's current speed and the physical scale of
+its own system), meant to keep the arc proportionate to whatever else
+was on screen -- but that fed Trajectory mode's own curvature-based
+adaptive sampler (see "Orbit-arc shape" above) a window whose real
+curvature (especially near a close approach) didn't match the fixed,
+planet-scale step size that sampler assumes, so it spent its entire
+sample budget crawling through the first sliver of the window and had
+to jump straight to the far edge to close it out -- two real segments,
+nothing in between, confirmed live as exactly the "broken" trajectory
+this replaces. The fix: never adaptive for a custom body, in *either*
+mode -- Trajectory mode queries real `spkez()` data uniformly instead
+of `sampleArcAdaptive()`'s own dynamic step, and Ellipse mode's
+`prop2b()` loop (already uniform) just samples the whole interval
+instead of the narrower window. Trajectory mode's own uniform sample
+additionally doesn't depend on the current reference epoch at all
+(each sample's own real position relative to Center only depends on
+Center/Frame and that sample's own fixed time) -- cached per body, and
+only actually re-queried when Center or Frame changes, not on every
+"Reference epoch" scrub. Custom bodies have no known `IAU_<BODY>`
+orientation, so Rotating/Frame don't apply to them ("From" a custom
+body leaves Frame untouched and turns Rotating off).
 
 The key trick making this work: a custom kernel's segments are
 registered into the *same* `KernelPool` the primary kernel already
