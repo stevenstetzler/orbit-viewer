@@ -2251,6 +2251,78 @@ function ensureMarkers() {
 }
 
 /**
+ * The real, physical scale of the system around `primaryId` at `et`
+ * -- the farthest distance from `primaryId` to any other *real* body
+ * already known to orbit it too (the planets, if `primaryId` is the
+ * Sun -- the overwhelmingly common case, since a real small-body/comet
+ * SPK is almost always heliocentric; a planet's own resolved moons, if
+ * `primaryId` is that planet, e.g. a custom body added while centered
+ * on Jupiter in precise mode), or, if none are currently known/
+ * resolved, `primaryId`'s own physical radius -- "how big a stage is
+ * this custom body actually performing on." Only considers *real*
+ * bodies (`!s.isCustom`): another custom body sharing the same primary
+ * isn't a "satellite" of it in any meaningful sense, and letting one
+ * arbitrarily-far-out custom body's own distance set the scale for
+ * another's window would make the whole thing circular. A sibling with
+ * no real coverage at `et` (bodyHasCoverageAt()'s own concern,
+ * elsewhere) is just skipped, not fatal -- its own distance simply
+ * doesn't contribute to the max.
+ *
+ * customBodyTrajectoryWindow() (below) sizes its own sampling window
+ * against this, so the window comes out matched to whatever's actually
+ * visible around the custom body, not an arbitrary fixed span.
+ */
+function systemScaleKm(primaryId, et, pool) {
+  let maxDistKm = 0;
+  for (const s of demo.systemBodies) {
+    if (s.isCustom || s.target === primaryId || s.primaryId !== primaryId) continue;
+    try {
+      const { position } = spkez(s.target, primaryId, et, 'NONE', INERTIAL_FRAME, pool);
+      maxDistKm = Math.max(maxDistKm, Math.hypot(...position));
+    } catch {
+      // No real coverage for this sibling right now -- just skip it.
+    }
+  }
+  if (maxDistKm > 0) return maxDistKm;
+  const parent = demo.systemBodies.find((x) => x.target === primaryId);
+  return (parent && meanRadiusKmFor(parent)) || EARTH_RADIUS_KM;
+}
+
+/**
+ * A custom body's own trajectory-sampling window around `et`: `[et -
+ * halfSpan, et + halfSpan]`, where `halfSpan = systemScaleKm(...) /
+ * speed` -- the time this body takes, at its *current* real speed
+ * relative to its own primary, to cross the real physical scale of the
+ * system it's actually part of.
+ *
+ * Replaces sampling over the body's *entire* discovered interval
+ * (`customIntervalStart`/`customIntervalEnd`, which for a multi-year
+ * Horizons fetch produced an arc spanning wildly more real distance
+ * than the rest of the view -- basically unreadable once zoomed to the
+ * scale of an actual planetary/satellite system, the "basically
+ * broken" trajectory this replaces) with a window that's inherently
+ * matched to whatever's currently on screen: fast and close to its
+ * primary, the window comes out short (a sharp local arc, at the same
+ * scale as the system around it); slow and far out, it comes out
+ * longer, but still proportionate, since "far out" also means the
+ * *system's own scale* -- an outer sibling's own orbital radius, say
+ * -- is larger too.
+ *
+ * Clamped to the body's own real discovered interval either way --
+ * never asks for data this body doesn't actually have, and degrades to
+ * that same full interval if `speed` somehow comes out zero (not
+ * expected for any real moving body, but a saner fallback than a
+ * divide-by-zero window).
+ */
+function customBodyTrajectoryWindow(b, et, pool) {
+  const { velocity } = spkez(b.target, b.primaryId, et, 'NONE', INERTIAL_FRAME, pool);
+  const speed = Math.hypot(...velocity);
+  if (!(speed > 0)) return [b.customIntervalStart, b.customIntervalEnd];
+  const halfSpan = systemScaleKm(b.primaryId, et, pool) / speed;
+  return [Math.max(et - halfSpan, b.customIntervalStart), Math.min(et + halfSpan, b.customIntervalEnd)];
+}
+
+/**
  * (Re)builds each body's orbit-arc line around `centerEt`, in one of
  * two modes (the ORBIT control, `demo.orbitMode`):
  *
@@ -2319,15 +2391,21 @@ function rebuildArcs(centerEt) {
       // A custom body (loadSelectedCustomBodies()) has no known
       // primary/GM to size a period-based window from, so it doesn't
       // participate in demo.trajectoryWindows at all (see
-      // updateSceneForOffset()) -- its own real, full discovered
-      // interval is the window instead, at a flat, user-controlled
-      // sample count (demo.customTrajectorySamples, the "Custom
-      // trajectory resolution" slider) rather than arcSampleBudget()'s
-      // period-loop-scaled scheme.
+      // updateSceneForOffset()) -- customBodyTrajectoryWindow()'s own
+      // system-scale/velocity-sized window instead, at a flat,
+      // user-controlled sample count (demo.customTrajectorySamples,
+      // the "Custom trajectory resolution" slider) rather than
+      // arcSampleBudget()'s period-loop-scaled scheme.
       let windowStart, windowEnd, maxSamples;
       if (b.isCustom) {
-        windowStart = b.customIntervalStart;
-        windowEnd = b.customIntervalEnd;
+        // customBodyTrajectoryWindow() needs this body's own real state
+        // *at* centerEt (to read its current velocity) -- outside its
+        // own known coverage there's no state to read, so skip cleanly
+        // rather than let that query throw uncaught (bodyHasCoverageAt()
+        // is also what hides this body's marker/ellipse right now, see
+        // updateSceneForOffset()/rebuildArcs()'s ellipse loop).
+        if (!bodyHasCoverageAt(b, centerEt)) continue;
+        [windowStart, windowEnd] = customBodyTrajectoryWindow(b, centerEt, demo.remote.pool);
         maxSamples = demo.customTrajectorySamples;
       } else {
         const window = demo.trajectoryWindows?.get(b.target);
@@ -2375,17 +2453,19 @@ function rebuildArcs(centerEt) {
         // primary) -- no closed curve exists, so draw an open arc
         // instead, propagated analytically from the *current* state via
         // prop2b() (already handles e>=1 uniformly, no new math needed)
-        // across the body's own discovered SPK interval -- a naturally
-        // sensible bound already (for a Horizons fetch, exactly the date
-        // range the user chose), rather than an arbitrary window.
+        // over customBodyTrajectoryWindow()'s own system-scale/velocity-
+        // sized span, not the body's entire discovered interval (which,
+        // for a multi-year Horizons fetch, made this arc dwarf the rest
+        // of the view).
         if (b.customIntervalStart == null || b.customIntervalEnd == null) {
           throw new Error('unbound orbit with no known interval to draw it over');
         }
+        const [windowStart, windowEnd] = customBodyTrajectoryWindow(b, centerEt, demo.remote.pool);
         const pvinit = [state.r.x, state.r.y, state.r.z, state.v.x, state.v.y, state.v.z];
         const samples = Math.max(2, demo.customTrajectorySamples);
         arcPoints = [];
         for (let i = 0; i < samples; i++) {
-          const sampleEt = b.customIntervalStart + (b.customIntervalEnd - b.customIntervalStart) * (i / (samples - 1));
+          const sampleEt = windowStart + (windowEnd - windowStart) * (i / (samples - 1));
           const [x, y, z] = prop2b(state.mu, pvinit, sampleEt - centerEt);
           arcPoints.push(toScenePoint(new THREE.Vector3(x, y, z).add(offset)));
         }
@@ -3400,19 +3480,23 @@ async function updateSceneForOffset(offsetDays) {
     for (const b of demo.bodies) {
       if (b.target === demo.viewObserver) continue;
       if (b.isCustom) {
-        // No trajectoryWindows entry (rebuildArcs() uses its own fixed
-        // [customIntervalStart, customIntervalEnd] instead), but its
-        // interval still has to widen CENTER's (and the Sun's, below)
-        // own coverage same as any other body's window would -- every
-        // sample along a custom body's trajectory needs CENTER's own
-        // state at that same instant. Skipping this (as earlier rounds
-        // did) only "worked" when some *other* body's own window
-        // happened to already be wide enough to cover it too -- not
-        // guaranteed, and not true at all in precise mode, where no
-        // other body contributes a period-based window during
+        // No trajectoryWindows entry (rebuildArcs() uses
+        // customBodyTrajectoryWindow()'s own system-scale/velocity-sized
+        // window instead -- computed the same way here, so CENTER's own
+        // widened coverage always matches what rebuildArcs() is about to
+        // actually sample), but that window still has to widen CENTER's
+        // (and the Sun's, below) own coverage same as any other body's
+        // window would -- every sample along a custom body's trajectory
+        // needs CENTER's own state at that same instant. Skipping this
+        // (as earlier rounds did) only "worked" when some *other* body's
+        // own window happened to already be wide enough to cover it too
+        // -- not guaranteed, and not true at all in precise mode, where
+        // no other body contributes a period-based window during
         // (see the mode check below).
-        centerUnionStart = Math.min(centerUnionStart, b.customIntervalStart);
-        centerUnionEnd = Math.max(centerUnionEnd, b.customIntervalEnd);
+        if (!bodyHasCoverageAt(b, et)) continue; // hidden right now (see bodyHasCoverageAt()) -- nothing to widen for
+        const [customWindowStart, customWindowEnd] = customBodyTrajectoryWindow(b, et, demo.remote.pool);
+        centerUnionStart = Math.min(centerUnionStart, customWindowStart);
+        centerUnionEnd = Math.max(centerUnionEnd, customWindowEnd);
         continue;
       }
       // Real satellites don't get a period-based trajectory while in

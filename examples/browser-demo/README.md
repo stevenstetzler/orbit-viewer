@@ -638,20 +638,39 @@ A custom body's `primaryId` is set to its own SPK segment's real
 product) rather than left unset, so it participates in Ellipse mode
 exactly like any of the ten built-in bodies -- a real closed ellipse
 when it's gravitationally bound, or (see "Orbit-arc shape" above) an
-open `prop2b()`-sampled arc across its own discovered interval when
-it isn't (a hyperbolic flyby or an unbound comet, straight from
-Horizons). Only a body centered on something with no known `GM` (rare
--- `kernels/gm_de440.tpc` covers the Sun, every planet/barycenter, and
-every natural satellite this demo knows) falls back silently to no
-ellipse at all, same as any other GM-lookup failure. Switching Orbit to
-**Trajectory** still renders the older **white sampled trajectory**
-instead, over the body's own full discovered interval, at a sample
+open `prop2b()`-sampled arc when it isn't (a hyperbolic flyby or an
+unbound comet, straight from Horizons). Only a body centered on
+something with no known `GM` (rare -- `kernels/gm_de440.tpc` covers
+the Sun, every planet/barycenter, and every natural satellite this
+demo knows) falls back silently to no ellipse at all, same as any
+other GM-lookup failure. Switching Orbit to **Trajectory** still
+renders the older **white sampled trajectory** instead, at a sample
 count set by the "Custom trajectory resolution" slider, independent
 of Orbit/Period's period-scaled scheme -- useful once the vantage
 point moves off the body's own primary, the same reason Trajectory
-mode exists for any other body. Custom bodies have no known
-`IAU_<BODY>` orientation, so Rotating/Frame don't apply to them ("From"
-a custom body leaves Frame untouched and turns Rotating off).
+mode exists for any other body.
+
+Neither mode samples over the body's *entire* discovered interval any
+more -- that produced an arc spanning wildly more real distance than
+whatever else was on screen (a multi-year Horizons fetch, for
+instance, dwarfing a single planetary system, or a fast hyperbolic
+object's own asymptotic straight-line approach/departure swamping the
+one interesting bend near closest approach -- both looked basically
+broken). Both modes now use one shared, live-recomputed window
+instead: evaluate the body's real state relative to its own primary
+*at the current reference epoch*, and size a window `[et - halfSpan,
+et + halfSpan]` where `halfSpan` is how long, at the body's *current*
+real speed, it'd take to cross the real physical scale of its own
+system -- the farthest distance from that primary to any other real
+body known to orbit it too (the planets, for a Sun-centered body), or,
+with no known siblings, the primary's own physical radius. Clamped to
+the body's own real discovered interval either way. This is inherently
+self-scaling and re-evaluated on every "Reference epoch" scrub: a fast
+close pass gets a short, detailed window; a slow, distant stretch gets
+a longer one, staying proportionate to whatever's actually nearby
+either way. Custom bodies have no known `IAU_<BODY>` orientation, so
+Rotating/Frame don't apply to them ("From" a custom body leaves Frame
+untouched and turns Rotating off).
 
 The key trick making this work: a custom kernel's segments are
 registered into the *same* `KernelPool` the primary kernel already
