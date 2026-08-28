@@ -9,7 +9,14 @@
  *
  * `dist-max=2LD` (2 lunar distances), `date-min=1900-01-01`, `sort=date`
  * are fixed -- this proxy always serves the same query the /close-approach/
- * page itself is built around, not an arbitrary passthrough.
+ * page itself is built around, not an arbitrary passthrough. `diameter=true`
+ * asks the API to also include each object's known diameter (from SBDB,
+ * `null` when not known -- most rows), for the table's own Diameter column.
+ * `dist`/`dist_min`/`dist_max` themselves are always in AU regardless of
+ * `dist-max`'s own LD units (there's no `dist-unit` output parameter --
+ * confirmed against the live API, which 400s on it) -- the client converts
+ * to lunar distances for display itself (see close-approach/index.html's
+ * own LD_KM).
  */
 
 const CAD_API_URL = 'https://ssd-api.jpl.nasa.gov/cad.api';
@@ -23,7 +30,7 @@ const CAD_API_URL = 'https://ssd-api.jpl.nasa.gov/cad.api';
  * response that isn't valid JSON.
  */
 export async function fetchCloseApproachData() {
-  const url = `${CAD_API_URL}?${new URLSearchParams({ 'dist-max': '2LD', 'date-min': '1900-01-01', sort: 'date' })}`;
+  const url = `${CAD_API_URL}?${new URLSearchParams({ 'dist-max': '2LD', 'date-min': '1900-01-01', sort: 'date', diameter: 'true' })}`;
   let response;
   try {
     response = await fetch(url);

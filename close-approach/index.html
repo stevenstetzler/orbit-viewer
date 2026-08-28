@@ -30,6 +30,11 @@
   #timeRow { display: flex; align-items: center; gap: 8px; margin: 8px 0; flex: 0 0 auto; }
   #timeSlider { flex: 1 1 auto; }
   #timeLabel { font-variant-numeric: tabular-nums; white-space: nowrap; color: #8892a6; font-size: 12px; flex: 0 0 auto; }
+  #tableSearch {
+    background: #141a26; color: #d7dce5; border: 1px solid #1c2230; border-radius: 4px;
+    padding: 5px 7px; font: inherit; font-size: 12px; width: 100%; box-sizing: border-box;
+    margin: 0 0 8px; flex: 0 0 auto;
+  }
   #tableWrap { flex: 1 1 auto; overflow-y: auto; border: 1px solid #1c2230; border-radius: 4px; min-height: 0; }
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
   thead th {
@@ -68,13 +73,16 @@
     <ul id="legend"></ul>
 
     <h2>Close approaches (<span id="tableCount">0</span>)</h2>
+    <input id="tableSearch" type="text" placeholder="Search designation..." />
     <div id="tableWrap">
       <table>
         <thead>
           <tr>
             <th data-key="des">Designation</th>
-            <th data-key="dist">Distance</th>
+            <th data-key="dist">Distance (LD)</th>
             <th data-key="jd">Date</th>
+            <th data-key="h">H</th>
+            <th data-key="diameter">Diameter (km)</th>
           </tr>
         </thead>
         <tbody id="tableBody"></tbody>
@@ -100,7 +108,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { load, str2et, et2utcCalendar, openRemoteSpk, spkez } from '../src/browser.js';
 import { openRemoteFile } from '../src/lazy/remoteFile.js';
 
-import { DAY, INERTIAL_FRAME, SUN_TARGET } from '../examples/shared/constants.js';
+import { DAY, INERTIAL_FRAME, SUN_TARGET, AU_KM } from '../examples/shared/constants.js';
 import { bodyBySlug, SATELLITE_KERNEL_FOR_BODY } from '../examples/shared/bodies.js';
 import { buildCurrentScale } from '../examples/shared/scale.js';
 import { computeOrbitState, periodFromEllipse, customBodySampleCount } from '../examples/shared/orbitMath.js';
@@ -280,6 +288,28 @@ function reaimCameraAtLookAtTarget() {
   reaimCameraAt(b.marker.position);
 }
 
+/**
+ * Only one close-approach object is ever shown at a time (see
+ * selectCloseApproach() below) -- this removes whichever one is
+ * currently active (matched by `.des`, not a single object reference,
+ * since a Horizons SPK could in principle discover more than one body
+ * for the same close approach) before a new one is added: its marker
+ * and orbit line are pulled from the scene, it's dropped from
+ * `demo.bodies`, and an active Look At target pointed at it is cleared
+ * (rather than left silently pointing at a body that no longer exists).
+ */
+function removeActiveCloseApproach() {
+  if (!demo.activeCloseApproachDes) return;
+  const toRemove = demo.bodies.filter((b) => b.isCloseApproach && b.des === demo.activeCloseApproachDes);
+  for (const b of toRemove) {
+    if (b.marker) scene.remove(b.marker);
+    if (b.arcLine) scene.remove(b.arcLine);
+    if (demo.lookAtTarget === b.target) demo.lookAtTarget = null;
+  }
+  demo.bodies = demo.bodies.filter((b) => !toRemove.includes(b));
+  demo.activeCloseApproachDes = null;
+}
+
 function buildLegend(bodiesState) {
   legendEl.innerHTML = '';
   for (const b of bodiesState) {
@@ -424,7 +454,7 @@ async function beginSession(remote, proxyCatalogue, { sourceLabel, sourceSizeByt
 
   demo = {
     remote, et0, kernelStartEt, kernelStopEt, sourceLabel, sourceSizeBytes, counters, bodies: [],
-    lookAtTarget: null, satelliteRemotes: new Map(),
+    lookAtTarget: null, satelliteRemotes: new Map(), activeCloseApproachDes: null,
   };
   await buildScene(proxyCatalogue);
   await loadCloseApproachTable();
@@ -435,10 +465,18 @@ async function beginSession(remote, proxyCatalogue, { sourceLabel, sourceSizeByt
 // proxied and cached server-side (see scripts/closeApproach.mjs and
 // serve-example.mjs's own handleCloseApproachData()).
 // ---------------------------------------------------------------------
-let closeApproachRows = []; // [{ des, dist, cd, jd }, ...]
+let closeApproachRows = []; // [{ des, dist (LD), cd, jd, h, diameter }, ...]
 let sortKey = 'jd';
 let sortAscending = true;
 let selectedDes = null;
+let searchQuery = '';
+
+// The Moon's own mean distance from Earth, in km -- the conventional
+// definition of one "lunar distance" (LD), used to convert the CAD
+// API's own `dist` field (always in AU -- confirmed live, it has no
+// `dist-unit` output parameter) into the same LD units `dist-max=2LD`
+// itself was filtered in.
+const LD_KM = 384400;
 
 /**
  * JPL's `jd` field is close enough to a plain UTC Julian date (verified
@@ -467,22 +505,31 @@ async function loadCloseApproachTable() {
   const idx = Object.fromEntries(body.fields.map((f, i) => [f, i]));
   closeApproachRows = body.data.map((row) => ({
     des: row[idx.des].trim(),
-    dist: Number(row[idx.dist]),
+    dist: (Number(row[idx.dist]) * AU_KM) / LD_KM,
     cd: row[idx.cd],
     jd: Number(row[idx.jd]),
+    h: row[idx.h] == null ? null : Number(row[idx.h]),
+    diameter: row[idx.diameter] == null ? null : Number(row[idx.diameter]),
   }));
   log(`  -> ${closeApproachRows.length} close approaches (within 2 lunar distances, since 1900).`);
   renderTable();
 }
 
 function renderTable() {
-  const sorted = [...closeApproachRows].sort((a, b) => {
+  const query = searchQuery.trim().toLowerCase();
+  const filtered = query ? closeApproachRows.filter((r) => r.des.toLowerCase().includes(query)) : closeApproachRows;
+  const sorted = [...filtered].sort((a, b) => {
     const av = a[sortKey];
     const bv = b[sortKey];
+    // A `null` h/diameter always sorts last, in either direction, rather
+    // than colliding with 0 (`null - x` is NaN, not a stable comparator).
+    if (av == null && bv == null) return 0;
+    if (av == null) return 1;
+    if (bv == null) return -1;
     const cmp = typeof av === 'string' ? av.localeCompare(bv) : av - bv;
     return sortAscending ? cmp : -cmp;
   });
-  tableCountEl.textContent = String(sorted.length);
+  tableCountEl.textContent = query ? `${sorted.length} / ${closeApproachRows.length}` : String(sorted.length);
   tableBodyEl.innerHTML = '';
   for (const row of sorted) {
     const tr = document.createElement('tr');
@@ -490,10 +537,14 @@ function renderTable() {
     const desTd = document.createElement('td');
     desTd.textContent = row.des;
     const distTd = document.createElement('td');
-    distTd.textContent = `${row.dist.toFixed(5)} AU`;
+    distTd.textContent = row.dist.toFixed(3);
     const cdTd = document.createElement('td');
     cdTd.textContent = row.cd;
-    tr.append(desTd, distTd, cdTd);
+    const hTd = document.createElement('td');
+    hTd.textContent = row.h == null ? '' : row.h.toFixed(2);
+    const diameterTd = document.createElement('td');
+    diameterTd.textContent = row.diameter == null ? '' : row.diameter.toFixed(3);
+    tr.append(desTd, distTd, cdTd, hTd, diameterTd);
     tr.addEventListener('click', () => {
       selectCloseApproach(row).catch((err) => {
         log(`ERROR: ${err.message}`);
@@ -523,6 +574,10 @@ for (const th of document.querySelectorAll('thead th')) {
     renderTable();
   });
 }
+document.getElementById('tableSearch').addEventListener('input', (evt) => {
+  searchQuery = evt.target.value;
+  renderTable();
+});
 
 let closeApproachFetchInFlight = false;
 
@@ -536,6 +591,15 @@ let closeApproachFetchInFlight = false;
  * Horizons-fetched file instead of a user-picked one, and skipping its
  * review modal (there's exactly one object to add here, not an
  * open-ended kernel that might hold several).
+ *
+ * Only one close-approach object is shown at a time: selecting a
+ * different one first removes whatever's currently active
+ * (removeActiveCloseApproach()) before fetching the new one. Once
+ * added, the "Reference epoch" slider is restricted to that object's
+ * own fetched interval (`cd +/- 1 day`) -- there's no real trajectory
+ * data outside it to scrub to anyway -- widened back to the full
+ * 1900-2100 range only while a fetch is in flight (the new object's own
+ * date needs to be reachable before it exists yet to restrict to).
  */
 async function selectCloseApproach(row) {
   if (!demo || closeApproachFetchInFlight) return;
@@ -544,16 +608,28 @@ async function selectCloseApproach(row) {
   renderTable();
   try {
     const et = str2et(jdToDate(row.jd).toISOString());
+
+    // Already the active object -- just jump the epoch within its own
+    // already-restricted slider range and re-aim, no need to refetch.
+    if (demo.activeCloseApproachDes === row.des) {
+      const offsetDays = Math.min(Math.max((et - demo.et0) / DAY, Number(timeSlider.min)), Number(timeSlider.max));
+      timeSlider.value = String(offsetDays);
+      await updateSceneForOffset(offsetDays);
+      lookAtBody(demo.bodies.find((b) => b.isCloseApproach && b.des === row.des));
+      return;
+    }
+
+    removeActiveCloseApproach();
+    ensureMarkers();
+    buildLegend(demo.bodies);
+
+    // Back to the full range while nothing close-approach-specific is
+    // active, so the new object's own (possibly far-off) date is reachable.
+    timeSlider.min = String((demo.kernelStartEt - demo.et0) / DAY);
+    timeSlider.max = String((demo.kernelStopEt - demo.et0) / DAY);
     const offsetDays = Math.min(Math.max((et - demo.et0) / DAY, Number(timeSlider.min)), Number(timeSlider.max));
     timeSlider.value = String(offsetDays);
     await updateSceneForOffset(offsetDays);
-
-    const existing = demo.bodies.find((b) => b.isCloseApproach && b.des === row.des);
-    if (existing) {
-      log(`${row.des} is already in the scene.`);
-      lookAtBody(existing);
-      return;
-    }
 
     log(`Looking up "${row.des}" in JPL's Small-Body Database...`);
     const resolved = await resolveHorizonsObject(row.des);
@@ -601,6 +677,13 @@ async function selectCloseApproach(row) {
       log(`  -> nothing from ${file.name} could be added.`);
       return;
     }
+    demo.activeCloseApproachDes = row.des;
+    const added = demo.bodies.filter((b) => b.isCloseApproach && b.des === row.des);
+    const restrictStart = Math.max(...added.map((b) => b.coverageStart));
+    const restrictEnd = Math.min(...added.map((b) => b.coverageEnd));
+    timeSlider.min = String((restrictStart - demo.et0) / DAY);
+    timeSlider.max = String((restrictEnd - demo.et0) / DAY);
+    timeSlider.value = String(Math.min(Math.max(offsetDays, Number(timeSlider.min)), Number(timeSlider.max)));
     ensureMarkers();
     buildLegend(demo.bodies);
     await updateSceneForOffset(Number(timeSlider.value));
