@@ -1,17 +1,24 @@
 /**
- * Dev server for examples/browser-demo -- static files plus a
- * *range-caching kernel proxy*, which is what makes the demo usable
- * against multi-gigabyte kernels without downloading them first.
+ * Dev server for examples/browser-demo (and the smaller curated pages
+ * built on the same lazy-loading machinery -- /solar-system/,
+ * /<body>/, etc., see the root README's own table) -- static files
+ * plus a *range-caching kernel proxy*, which is what makes any of them
+ * usable against multi-gigabyte kernels without downloading them first.
  *
  *   npm run serve-example              # http://localhost:8080
  *   npm run serve-example -- --port 9000
  *   npm run serve-example -- --block-bytes 262144
  *
- * Two things it serves:
+ * What it serves:
  *
  * 1. The repo, statically, from `/` -- so the demo page at
  *    /examples/browser-demo/ can import ../../src/browser.js and fetch
- *    ../../kernels/naif0012.tls as ordinary same-origin URLs.
+ *    ../../kernels/naif0012.tls as ordinary same-origin URLs. This also
+ *    covers /solar-system/ and /solar-system/trajectory/ (real, literal
+ *    files on disk) with no further routing needed -- but NOT /<body>/
+ *    or /<body>/trajectory/, which have no literal file of their own
+ *    (see matchBodyRoute() below, matched explicitly before falling
+ *    through to this).
  *
  * 2. `/kernels/remote/<file>.bsp` -- a proxy in front of NAIF that
  *    honours HTTP Range requests and caches what it fetches into a
@@ -44,6 +51,16 @@
  *    request is simpler and just as effective as ranging into it would
  *    be).
  *
+ * 4. `/<body>/` and `/<body>/trajectory/` (`<body>` one of
+ *    examples/shared/bodies.js's own BODIES slugs, e.g. `/earth/`,
+ *    `/jupiter/trajectory/`) -- one shared template each
+ *    (examples/shared/templates/body/, .../body-trajectory/) rather
+ *    than one physical file per body: matchBodyRoute() below matches
+ *    the URL directly (there's no literal `earth/index.html` on disk
+ *    for (1) above to find), and the template's own client script
+ *    reads `location.pathname` at load time to know which body it's
+ *    actually showing.
+ *
  * Block size: `--block-bytes` defaults to 64 KiB, matching the block
  * size `src/lazy/remoteFile.js` uses in the browser, so the proxy
  * fetches upstream exactly what the page asked for. Raising it trades
@@ -59,6 +76,7 @@ import { fileURLToPath } from 'node:url';
 import { RangeCache, parseRangeHeader, DEFAULT_BLOCK_BYTES } from './rangeCache.mjs';
 import { KERNELS, SPK_IDS, formatBytes } from '../kernels/sources.mjs';
 import { resolveSbdbObject, fetchHorizonsSpk } from './horizonsSpk.mjs';
+import { BODIES, bodySlug } from '../examples/shared/bodies.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CACHE_DIR = path.join(REPO_ROOT, 'kernels', 'cache');
@@ -66,6 +84,18 @@ const HORIZONS_CACHE_DIR = path.join(CACHE_DIR, 'horizons');
 const PROXY_PREFIX = '/kernels/remote/';
 const HORIZONS_RESOLVE_PREFIX = '/horizons/resolve';
 const HORIZONS_SPK_PREFIX = '/horizons/spk';
+
+// /<body>/ and /<body>/trajectory/ -- one page per BODIES entry (see
+// examples/shared/bodies.js's own bodySlug()), served from a single
+// shared template each rather than one physical file per body: the
+// template's own client-side script reads `location.pathname` to know
+// which body it's showing (see examples/shared/templates/body/index.html
+// and .../body-trajectory/index.html). handleStatic() only ever resolves
+// a literal path on disk, so these two routes are matched explicitly in
+// the request handler below, before falling through to it.
+const BODY_SLUGS = new Set(BODIES.map(bodySlug));
+const BODY_TEMPLATE_PATH = path.join(REPO_ROOT, 'examples', 'shared', 'templates', 'body', 'index.html');
+const BODY_TRAJECTORY_TEMPLATE_PATH = path.join(REPO_ROOT, 'examples', 'shared', 'templates', 'body-trajectory', 'index.html');
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -344,6 +374,32 @@ async function handleHorizonsSpk(req, res, url) {
   res.end(bytes);
 }
 
+/** Serves one file's bytes as `text/html`, the same headers handleStatic() itself uses for an ordinary page. */
+async function serveHtmlFile(res, filePath) {
+  const body = await fs.readFile(filePath);
+  res.writeHead(200, {
+    'content-type': MIME['.html'],
+    'content-length': body.byteLength,
+    'cache-control': 'no-cache',
+  });
+  res.end(body);
+}
+
+/**
+ * Matches `/<body>/` or `/<body>/trajectory/` for a known BODIES slug
+ * (`sun`, `earth`, `jupiter`, ...) -- returns `'body'`/`'body-trajectory'`
+ * (which template to serve) or `null`. Doesn't require a trailing slash
+ * itself; the caller 302-redirects to add one, matching handleStatic()'s
+ * own directory convention, since neither route is a real directory on
+ * disk for handleStatic() to find and redirect on its own.
+ */
+function matchBodyRoute(pathname) {
+  const segments = pathname.split('/').filter(Boolean);
+  if (segments.length === 1 && BODY_SLUGS.has(segments[0])) return 'body';
+  if (segments.length === 2 && segments[1] === 'trajectory' && BODY_SLUGS.has(segments[0])) return 'body-trajectory';
+  return null;
+}
+
 async function handleStatic(req, res, url) {
   let rel = decodeURIComponent(url.pathname);
   if (rel.endsWith('/')) rel += 'index.html';
@@ -384,6 +440,14 @@ const server = http.createServer(async (req, res) => {
       await handleHorizonsResolve(req, res, url);
     } else if (url.pathname === HORIZONS_SPK_PREFIX) {
       await handleHorizonsSpk(req, res, url);
+    } else if (matchBodyRoute(url.pathname) && !url.pathname.endsWith('/')) {
+      // No trailing slash (e.g. /earth, /earth/trajectory) -- redirect to
+      // add one, same as handleStatic() does for a real directory.
+      res.writeHead(302, { location: `${url.pathname}/` }).end();
+    } else if (matchBodyRoute(url.pathname) === 'body') {
+      await serveHtmlFile(res, BODY_TEMPLATE_PATH);
+    } else if (matchBodyRoute(url.pathname) === 'body-trajectory') {
+      await serveHtmlFile(res, BODY_TRAJECTORY_TEMPLATE_PATH);
     } else {
       await handleStatic(req, res, url);
     }
@@ -398,6 +462,7 @@ server.listen(opts.port, () => {
   const total = SPK_IDS.reduce((n, id) => n + KERNELS[id].bytes, 0);
   console.log(`spiceJS example server on http://localhost:${opts.port}`);
   console.log(`  demo:        http://localhost:${opts.port}/examples/browser-demo/`);
+  console.log(`  curated:     http://localhost:${opts.port}/solar-system/ , /solar-system/trajectory/ , /<body>/ , /<body>/trajectory/`);
   console.log(`  kernel list: http://localhost:${opts.port}${PROXY_PREFIX}`);
   console.log(`  horizons:    http://localhost:${opts.port}${HORIZONS_RESOLVE_PREFIX}?sstr=... , ` +
     `${HORIZONS_SPK_PREFIX}?spkid=...&start=...&stop=...`);

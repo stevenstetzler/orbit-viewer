@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>spiceJS: Body</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #05070d; color: #d7dce5; font: 14px/1.4 system-ui, sans-serif; }
+  #app { display: flex; height: 100%; }
+  #sidebar {
+    width: 340px; flex: 0 0 auto; box-sizing: border-box; padding: 16px;
+    overflow-y: auto; background: #0b0e17; border-right: 1px solid #1c2230;
+  }
+  #viewport { flex: 1 1 auto; position: relative; }
+  #viewport canvas { display: block; }
+  h1 { font-size: 16px; margin: 0 0 4px; color: #fff; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: #8892a6; margin: 20px 0 8px; }
+  p.sub { margin: 0 0 16px; color: #8892a6; }
+  a { color: #7fb2ff; }
+  button { background: #1c2230; color: #cdd4e0; border: none; border-radius: 4px; padding: 3px 8px; font: inherit; font-size: 11px; cursor: pointer; }
+  button:disabled { color: #626c80; cursor: default; }
+  #status {
+    white-space: pre-wrap; font: 11px/1.5 ui-monospace, monospace; background: #05070d;
+    border: 1px solid #1c2230; border-radius: 4px; padding: 8px; height: 160px; overflow-y: auto;
+  }
+  #legend { list-style: none; margin: 0; padding: 0; }
+  #legend li { display: flex; align-items: center; gap: 8px; margin: 2px -8px; padding: 4px 8px; border-radius: 4px; }
+  #legend .swatch { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }
+  #legend .name { flex: 1 1 auto; }
+  #legend .dist { color: #8892a6; font-variant-numeric: tabular-nums; }
+  #timeRow { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+  #timeSlider { flex: 1 1 auto; }
+  #timeLabel { font-variant-numeric: tabular-nums; white-space: nowrap; color: #8892a6; font-size: 12px; }
+  #overlayHint { position: absolute; left: 16px; bottom: 12px; color: #626c80; font-size: 11px; pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="sidebar">
+    <h1 id="pageTitle">Body</h1>
+    <p class="sub" id="pageSub"></p>
+
+    <div id="status">Loading...</div>
+
+    <h2>Reference epoch</h2>
+    <div id="timeRow">
+      <input id="timeSlider" type="range" min="-1" max="1" step="any" value="0" disabled />
+    </div>
+    <div id="timeLabel"></div>
+
+    <h2>Bodies shown</h2>
+    <ul id="legend"></ul>
+  </div>
+  <div id="viewport">
+    <div id="overlayHint">Drag to orbit &middot; scroll to zoom</div>
+  </div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.169.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { load, str2et, et2utcCalendar, openRemoteSpk, spkez } from '/src/browser.js';
+import { openRemoteFile } from '/src/lazy/remoteFile.js';
+
+import { DAY, INERTIAL_FRAME } from '/examples/shared/constants.js';
+import { bodyBySlug, SATELLITE_KERNEL_FOR_BODY } from '/examples/shared/bodies.js';
+import { buildCurrentScale } from '/examples/shared/scale.js';
+import { computeOrbitState } from '/examples/shared/orbitMath.js';
+import {
+  loadLeapseconds, loadPlanetaryConstants, loadGravitationalParameters,
+  ensureBodyCoverage, prefetchBodyProbe, bodyHasCoverageAt, resolveSatellitesFor,
+} from '/examples/shared/kernelSession.js';
+
+const ORBIT_ELLIPSE_SEGMENTS = 720;
+
+const statusEl = document.getElementById('status');
+const timeSlider = document.getElementById('timeSlider');
+const timeLabel = document.getElementById('timeLabel');
+const legendEl = document.getElementById('legend');
+const pageTitleEl = document.getElementById('pageTitle');
+const pageSubEl = document.getElementById('pageSub');
+
+function log(line) {
+  statusEl.textContent += (statusEl.textContent.endsWith('\n') || statusEl.textContent === '' ? '' : '\n') + line;
+  statusEl.scrollTop = statusEl.scrollHeight;
+  console.log('[body]', line);
+}
+function resetLog(line) {
+  statusEl.textContent = line;
+}
+
+const DEFAULT_KERNEL_ID = 'de440s';
+
+// Which body this particular URL is for -- e.g. /earth/ -> "earth".
+// The server only ever routes a known slug here (see
+// scripts/serve-example.mjs), but fail visibly rather than silently if
+// that ever isn't true.
+const slug = location.pathname.split('/').filter(Boolean)[0];
+const bodySpec = bodyBySlug(slug);
+if (!bodySpec) {
+  resetLog(`"${slug}" isn't one of this page's known bodies.`);
+  throw new Error(`unknown body slug "${slug}"`);
+}
+document.title = `spiceJS: ${bodySpec.name}`;
+pageTitleEl.textContent = bodySpec.name;
+pageSubEl.textContent = `DE440 ephemeris, 1900–2100, viewed from and looking at ${bodySpec.name}. ` +
+  `Position: Linear · Radius: Linear (one true physical scale) · orbits are the exact analytic ellipse.`;
+
+// ---------------------------------------------------------------------
+// three.js scene setup -- Linear/Linear scale varies hugely by which
+// body/satellites are actually shown, so (unlike /solar-system/) the
+// camera needs dynamic re-framing once the real scene extent is known.
+// ---------------------------------------------------------------------
+const viewport = document.getElementById('viewport');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x05070d);
+const DEFAULT_CAMERA_FAR = 5_000_000;
+const camera = new THREE.PerspectiveCamera(50, viewport.clientWidth / viewport.clientHeight, 0.0005, DEFAULT_CAMERA_FAR);
+const DEFAULT_CAMERA_POSITION = new THREE.Vector3(0, 22, 34);
+camera.position.copy(DEFAULT_CAMERA_POSITION);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(viewport.clientWidth, viewport.clientHeight);
+viewport.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+const centerLight = new THREE.PointLight(0xffffff, 2, 0, 0);
+scene.add(centerLight);
+window.addEventListener('resize', () => {
+  camera.aspect = viewport.clientWidth / viewport.clientHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(viewport.clientWidth, viewport.clientHeight);
+});
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+
+/** Frames the camera around the current scene's real extent -- see examples/browser-demo/index.html's own fitCameraToScene() for the fuller reasoning. */
+function fitCameraToScene() {
+  let maxExtent = 0;
+  for (const b of demo.bodies) {
+    if (!b.marker.visible) continue;
+    const dist = b.marker.position.length();
+    maxExtent = Math.max(maxExtent, dist + scale.markerRadius(b));
+  }
+  const cameraDistance = Math.max(4, maxExtent * 2.5);
+  const dir = DEFAULT_CAMERA_POSITION.clone().normalize();
+  camera.position.copy(dir.multiplyScalar(cameraDistance));
+  const desiredFar = Math.max(DEFAULT_CAMERA_FAR, cameraDistance * 3);
+  if (desiredFar !== camera.far) {
+    camera.far = desiredFar;
+    camera.updateProjectionMatrix();
+  }
+  controls.target.set(0, 0, 0);
+  controls.update();
+}
+
+/** Delta-translate camera move: re-targets controls.target at `newTarget`, preserving the current viewing angle/distance. */
+function reaimCameraAt(newTarget) {
+  const delta = newTarget.clone().sub(controls.target);
+  controls.target.copy(newTarget);
+  camera.position.add(delta);
+  controls.update();
+}
+
+let demo = null;
+let sceneUpdateSeq = 0;
+let scale = null;
+
+function ensureMarkers() {
+  for (const b of demo.bodies) {
+    if (b.marker) scene.remove(b.marker);
+    const geo = new THREE.SphereGeometry(scale.markerRadius(b), 20, 16);
+    const mat = new THREE.MeshStandardMaterial({
+      color: b.color, emissive: b.color, emissiveIntensity: b.target === bodySpec.target ? 1.2 : 0.15,
+    });
+    b.marker = new THREE.Mesh(geo, mat);
+    scene.add(b.marker);
+  }
+}
+
+/** Every satellite's ellipse-mode orbit line around `bodySpec` (the fixed observer here, so the translation offset is always zero). */
+function rebuildArcs(centerEt) {
+  for (const b of demo.bodies) {
+    if (b.arcLine) {
+      scene.remove(b.arcLine);
+      b.arcLine = null;
+    }
+  }
+  for (const b of demo.bodies) {
+    if (b.target === bodySpec.target) continue;
+    if (!bodyHasCoverageAt(b, centerEt)) continue;
+    try {
+      const state = computeOrbitState(b.target, b.primaryId, centerEt, demo.remote.pool);
+      if (state.invA <= 0) throw new Error('unbound orbit -- no closed ellipse to draw');
+      const a = 1 / state.invA;
+      const semiMinor = a * Math.sqrt(Math.max(0, 1 - state.e * state.e));
+      const curve = new THREE.EllipseCurve(-a * state.e, 0, a, semiMinor, 0, 2 * Math.PI, false, 0);
+      const pHat = new THREE.Vector3(...state.pHat);
+      const qHat = new THREE.Vector3(...state.qHat);
+      const arcPoints = curve.getPoints(ORBIT_ELLIPSE_SEGMENTS).map((p) =>
+        new THREE.Vector3(...scale.posToScene([pHat.x * p.x + qHat.x * p.y, pHat.y * p.x + qHat.y * p.y, pHat.z * p.x + qHat.z * p.y]))
+      );
+      const arcGeo = new THREE.BufferGeometry().setFromPoints(arcPoints);
+      const arcMat = new THREE.LineBasicMaterial({ color: b.color, transparent: true, opacity: 0.45 });
+      b.arcLine = new THREE.Line(arcGeo, arcMat);
+      scene.add(b.arcLine);
+    } catch (err) {
+      log(`  -> couldn't draw ${b.name}'s orbit ellipse (${err.message})`);
+    }
+  }
+}
+
+/** "Look at" a satellite: keeps the camera aimed at it as the reference epoch scrubs -- see reaimCameraAtLookAtTarget()'s own role in examples/browser-demo/index.html. */
+function lookAtBody(b) {
+  demo.lookAtTarget = b.target;
+  reaimCameraAtLookAtTarget();
+}
+function reaimCameraAtLookAtTarget() {
+  if (!demo || demo.lookAtTarget == null) return;
+  const b = demo.bodies.find((body) => body.target === demo.lookAtTarget);
+  if (!b || !b.marker) return;
+  reaimCameraAt(b.marker.position);
+}
+
+function buildLegend(bodiesState) {
+  legendEl.innerHTML = '';
+  for (const b of bodiesState) {
+    const li = document.createElement('li');
+    const swatch = document.createElement('span');
+    swatch.className = 'swatch';
+    swatch.style.background = '#' + b.color.toString(16).padStart(6, '0');
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = b.name;
+    const dist = document.createElement('span');
+    dist.className = 'dist';
+    dist.id = `dist-${b.target}`;
+    li.append(swatch, name, dist);
+    if (b.target !== bodySpec.target) {
+      const lookBtn = document.createElement('button');
+      lookBtn.type = 'button';
+      lookBtn.textContent = 'Look';
+      lookBtn.title = `Look at ${b.name}`;
+      lookBtn.addEventListener('click', () => lookAtBody(b));
+      li.append(lookBtn);
+    }
+    legendEl.appendChild(li);
+  }
+}
+
+async function updateSceneForOffset(offsetDays) {
+  if (!demo) return;
+  const mySeq = ++sceneUpdateSeq;
+  const et = demo.et0 + offsetDays * DAY;
+  timeLabel.textContent = `${et2utcCalendar(et)}  (${offsetDays >= 0 ? '+' : ''}${offsetDays.toFixed(2)} d)`;
+
+  for (const b of demo.bodies) {
+    if (!bodyHasCoverageAt(b, et)) continue;
+    try {
+      await ensureBodyCoverage(b, et, et, { counters: demo.counters, log });
+    } catch (err) {
+      log(`  -> couldn't extend prefetch for ${b.name} (${err.message})`);
+    }
+    if (mySeq !== sceneUpdateSeq) return;
+  }
+
+  for (const b of demo.bodies) {
+    if (!bodyHasCoverageAt(b, et)) {
+      b.marker.visible = false;
+      continue;
+    }
+    b.marker.visible = true;
+    try {
+      const { position } = spkez(b.target, bodySpec.target, et, 'NONE', INERTIAL_FRAME, demo.remote.pool);
+      const [x, y, z] = scale.posToScene(position);
+      b.marker.position.set(x, y, z);
+    } catch (err) {
+      log(`  -> couldn't place ${b.name} (${err.message})`);
+    }
+  }
+  centerLight.position.copy(camera.position); // the central body is at the origin; light it from roughly the viewer's side
+
+  for (const b of demo.bodies) {
+    const distEl = document.getElementById(`dist-${b.target}`);
+    if (!distEl) continue;
+    if (b.target === bodySpec.target || !bodyHasCoverageAt(b, et)) {
+      distEl.textContent = '';
+      continue;
+    }
+    try {
+      const { position } = spkez(b.target, bodySpec.target, et, 'NONE', INERTIAL_FRAME, demo.remote.pool);
+      distEl.textContent = `${Math.hypot(...position).toFixed(0)} km`;
+    } catch {
+      distEl.textContent = '';
+    }
+  }
+
+  reaimCameraAtLookAtTarget();
+  rebuildArcs(et);
+}
+
+timeSlider.addEventListener('input', () => {
+  updateSceneForOffset(Number(timeSlider.value)).catch((err) => {
+    log(`ERROR: ${err.message}`);
+    console.error(err);
+  });
+});
+
+async function buildScene(proxyCatalogue) {
+  const centralBody = { ...bodySpec };
+  await prefetchBodyProbe(demo.remote, centralBody, null, demo.et0);
+  const satellites = await resolveSatellitesFor(bodySpec, SATELLITE_KERNEL_FOR_BODY, demo.remote, {
+    et0: demo.et0, proxyCatalogue, satelliteRemotes: demo.satelliteRemotes, openRemoteFileFn: (url) => openRemoteFile(url), log,
+  });
+  demo.bodies = [centralBody, ...satellites];
+  scale = buildCurrentScale('linear', 'linear', demo.bodies, demo.remote.pool, () =>
+    log('  -> no body here has a known real radius to anchor Linear/Linear scale -- unexpected, check pck00011.tpc coverage.')
+  );
+  ensureMarkers();
+  buildLegend(demo.bodies);
+
+  timeSlider.min = String((demo.kernelStartEt - demo.et0) / DAY);
+  timeSlider.max = String((demo.kernelStopEt - demo.et0) / DAY);
+  timeSlider.value = '0';
+  timeSlider.disabled = false;
+  await updateSceneForOffset(0);
+  fitCameraToScene();
+  log(`Scene built: ${bodySpec.name} + ${satellites.length} satellite${satellites.length === 1 ? '' : 's'}. ` +
+    `Drag "Reference epoch" to explore 1900-2100.`);
+}
+
+async function beginSession(remote, proxyCatalogue, { sourceLabel, sourceSizeBytes, counters = null }) {
+  resetLog('Loading leapseconds kernel...');
+  await loadLeapseconds(log);
+  await loadPlanetaryConstants(remote.pool, log);
+  await loadGravitationalParameters(remote.pool, log);
+
+  const kernelStartEt = str2et('1900-01-01T00:00:00');
+  const kernelStopEt = str2et('2100-01-01T00:00:00');
+  let et0 = str2et(new Date().toISOString());
+  et0 = Math.min(Math.max(et0, kernelStartEt), kernelStopEt);
+  log(`Timespan: ${et2utcCalendar(kernelStartEt)} to ${et2utcCalendar(kernelStopEt)}`);
+  log(`Reference epoch (now, UTC): ${et2utcCalendar(et0)}`);
+
+  demo = {
+    remote, et0, kernelStartEt, kernelStopEt, sourceLabel, sourceSizeBytes, counters, bodies: [],
+    lookAtTarget: null, satelliteRemotes: new Map(),
+  };
+  await buildScene(proxyCatalogue);
+}
+
+async function loadFromProxy(entry, proxyCatalogue) {
+  const counters = { requestCount: 0, bytesRead: 0 };
+  const resolveRange = async (url, startByte, endByteExclusive) => {
+    counters.requestCount += 1;
+    counters.bytesRead += endByteExclusive - startByte;
+    const response = await fetch(url, { headers: { Range: `bytes=${startByte}-${endByteExclusive - 1}` } });
+    if (!response.ok) throw new Error(`proxy returned HTTP ${response.status} ${response.statusText}`);
+    return new Uint8Array(await response.arrayBuffer());
+  };
+  log(`Opening ${entry.file} (${entry.size}) through the local proxy...`);
+  const remote = await openRemoteSpk(entry.url, { fileLength: entry.bytes, resolveRange });
+  await beginSession(remote, proxyCatalogue, { sourceLabel: entry.file, sourceSizeBytes: entry.bytes, counters });
+}
+
+async function detectKernelProxy() {
+  let catalogue;
+  try {
+    const response = await fetch('/kernels/remote/', { headers: { accept: 'application/json' } });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    catalogue = await response.json();
+  } catch (err) {
+    resetLog(
+      `Couldn't reach the local kernel proxy (${err.message}).\n` +
+      `This page needs \`npm run serve-example\` running -- see the repo README's ` +
+      `"Running the example website" section, or open /examples/browser-demo/ for the full explorer.`
+    );
+    return;
+  }
+  const proxyCatalogue = new Map((catalogue.kernels ?? []).map((entry) => [entry.id, entry]));
+  const defaultEntry = proxyCatalogue.get(DEFAULT_KERNEL_ID);
+  if (!defaultEntry) {
+    resetLog(`The local proxy doesn't know about "${DEFAULT_KERNEL_ID}" -- check kernels/sources.mjs.`);
+    return;
+  }
+  try {
+    await loadFromProxy(defaultEntry, proxyCatalogue);
+  } catch (err) {
+    log(`ERROR loading ${DEFAULT_KERNEL_ID}: ${err.message}`);
+    console.error(err);
+  }
+}
+
+resetLog('Detecting the local kernel proxy...');
+detectKernelProxy();
+</script>
+</body>
+</html>

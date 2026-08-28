@@ -1,0 +1,619 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>spiceJS: Body Trajectories</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #05070d; color: #d7dce5; font: 14px/1.4 system-ui, sans-serif; }
+  #app { display: flex; height: 100%; }
+  #sidebar {
+    width: 340px; flex: 0 0 auto; box-sizing: border-box; padding: 16px;
+    overflow-y: auto; background: #0b0e17; border-right: 1px solid #1c2230;
+  }
+  #viewport { flex: 1 1 auto; position: relative; }
+  #viewport canvas { display: block; }
+  h1 { font-size: 16px; margin: 0 0 4px; color: #fff; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: #8892a6; margin: 20px 0 8px; }
+  p.sub { margin: 0 0 16px; color: #8892a6; }
+  a { color: #7fb2ff; }
+  button { background: #1c2230; color: #cdd4e0; border: none; border-radius: 4px; padding: 3px 8px; font: inherit; font-size: 11px; cursor: pointer; }
+  button:disabled { color: #626c80; cursor: default; }
+  .buttonRow { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
+  .buttonRow button, #customKernelLoadBtn, #customKernelCancelBtn { padding: 8px 12px; font-size: 14px; }
+  #customKernelLoadBtn { background: #2a5adf; color: #fff; }
+  input[type=file] { display: block; margin: 8px 0; font-size: 12px; color: #8892a6; }
+  #status {
+    white-space: pre-wrap; font: 11px/1.5 ui-monospace, monospace; background: #05070d;
+    border: 1px solid #1c2230; border-radius: 4px; padding: 8px; height: 160px; overflow-y: auto;
+  }
+  #legend { list-style: none; margin: 0; padding: 0; }
+  #legend li { display: flex; align-items: center; gap: 8px; margin: 2px -8px; padding: 4px 8px; border-radius: 4px; }
+  #legend .swatch { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }
+  #legend .name { flex: 1 1 auto; }
+  #legend .dist { color: #8892a6; font-variant-numeric: tabular-nums; }
+  #timeRow { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+  #timeSlider { flex: 1 1 auto; }
+  #timeLabel { font-variant-numeric: tabular-nums; white-space: nowrap; color: #8892a6; font-size: 12px; }
+  #customKernelStatus { font: 11px/1.5 ui-monospace, monospace; color: #8892a6; margin: 6px 0 0; white-space: pre-wrap; }
+  .modalBackdrop {
+    position: fixed; inset: 0; background: rgba(5, 7, 13, 0.72);
+    display: flex; align-items: center; justify-content: center; z-index: 10;
+  }
+  .modalPanel {
+    width: 420px; max-width: calc(100vw - 32px); max-height: calc(100vh - 64px);
+    overflow-y: auto; background: #0b0e17; border: 1px solid #1c2230; border-radius: 8px;
+    padding: 16px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  }
+  #customKernelBodyList { list-style: none; margin: 8px 0; padding: 0; max-height: 260px; overflow-y: auto; }
+  #customKernelBodyList li { display: flex; align-items: baseline; gap: 8px; margin: 2px -6px; padding: 4px 6px; border-radius: 4px; }
+  #customKernelBodyList li:hover { background: #141a26; }
+  #customKernelBodyList .cname { color: #d7dce5; }
+  #customKernelBodyList .cid { color: #626c80; font-size: 11px; }
+  #customKernelBodyList .cinterval { margin-left: auto; color: #626c80; font-size: 11px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  #overlayHint { position: absolute; left: 16px; bottom: 12px; color: #626c80; font-size: 11px; pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="sidebar">
+    <h1 id="pageTitle">Body</h1>
+    <p class="sub" id="pageSub"></p>
+
+    <div id="status">Loading...</div>
+
+    <h2>Reference epoch</h2>
+    <div id="timeRow">
+      <input id="timeSlider" type="range" min="-1" max="1" step="any" value="0" disabled />
+    </div>
+    <div id="timeLabel"></div>
+
+    <h2>Add a custom trajectory</h2>
+    <p class="sub" style="margin:0 0 8px">Any local <code>.bsp</code> (a spacecraft trajectory, say)
+      shown as a real sampled trajectory relative to this system.</p>
+    <input id="customKernelInput" type="file" accept=".bsp,.spk" />
+    <div id="customKernelStatus"></div>
+
+    <h2>Bodies shown</h2>
+    <ul id="legend"></ul>
+  </div>
+  <div id="viewport">
+    <div id="overlayHint">Drag to orbit &middot; scroll to zoom</div>
+  </div>
+</div>
+
+<div id="customKernelModal" class="modalBackdrop" style="display:none">
+  <div class="modalPanel">
+    <h2 id="customKernelModalTitle" style="margin-top:0">Add bodies</h2>
+    <ul id="customKernelBodyList"></ul>
+    <div class="buttonRow">
+      <button id="customKernelLoadBtn" type="button">Load selected</button>
+      <button id="customKernelCancelBtn" type="button">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.169.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { load, str2et, et2utcCalendar, openRemoteSpk, spkez, bodyName } from '/src/browser.js';
+import { openRemoteFile } from '/src/lazy/remoteFile.js';
+
+import { DAY, INERTIAL_FRAME } from '/examples/shared/constants.js';
+import { bodyBySlug, SATELLITE_KERNEL_FOR_BODY } from '/examples/shared/bodies.js';
+import { buildCurrentScale } from '/examples/shared/scale.js';
+import { computeOrbitState, periodFromEllipse, customBodySampleCount } from '/examples/shared/orbitMath.js';
+import {
+  loadLeapseconds, loadPlanetaryConstants, loadGravitationalParameters,
+  discoverSpkBodies, ensureBodyCoverage, prefetchBodyProbe, prefetchCustomBody, bodyHasCoverageAt, resolveSatellitesFor,
+} from '/examples/shared/kernelSession.js';
+
+const statusEl = document.getElementById('status');
+const timeSlider = document.getElementById('timeSlider');
+const timeLabel = document.getElementById('timeLabel');
+const legendEl = document.getElementById('legend');
+const pageTitleEl = document.getElementById('pageTitle');
+const pageSubEl = document.getElementById('pageSub');
+const customKernelInput = document.getElementById('customKernelInput');
+const customKernelStatusEl = document.getElementById('customKernelStatus');
+const customKernelModal = document.getElementById('customKernelModal');
+const customKernelModalTitle = document.getElementById('customKernelModalTitle');
+const customKernelBodyList = document.getElementById('customKernelBodyList');
+const customKernelLoadBtn = document.getElementById('customKernelLoadBtn');
+const customKernelCancelBtn = document.getElementById('customKernelCancelBtn');
+
+function log(line) {
+  statusEl.textContent += (statusEl.textContent.endsWith('\n') || statusEl.textContent === '' ? '' : '\n') + line;
+  statusEl.scrollTop = statusEl.scrollHeight;
+  console.log('[body-trajectory]', line);
+}
+function resetLog(line) {
+  statusEl.textContent = line;
+}
+
+const DEFAULT_KERNEL_ID = 'de440s';
+
+const slug = location.pathname.split('/').filter(Boolean)[0];
+const bodySpec = bodyBySlug(slug);
+if (!bodySpec) {
+  resetLog(`"${slug}" isn't one of this page's known bodies.`);
+  throw new Error(`unknown body slug "${slug}"`);
+}
+document.title = `spiceJS: ${bodySpec.name} trajectories`;
+pageTitleEl.textContent = `${bodySpec.name} trajectories`;
+pageSubEl.textContent = `DE440 ephemeris, 1900–2100, viewed from and looking at ${bodySpec.name}. ` +
+  `Position: Linear · Radius: Linear · orbit lines are each satellite's own real sampled trajectory.`;
+
+const viewport = document.getElementById('viewport');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x05070d);
+const DEFAULT_CAMERA_FAR = 5_000_000;
+const camera = new THREE.PerspectiveCamera(50, viewport.clientWidth / viewport.clientHeight, 0.0005, DEFAULT_CAMERA_FAR);
+const DEFAULT_CAMERA_POSITION = new THREE.Vector3(0, 22, 34);
+camera.position.copy(DEFAULT_CAMERA_POSITION);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(viewport.clientWidth, viewport.clientHeight);
+viewport.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+const centerLight = new THREE.PointLight(0xffffff, 2, 0, 0);
+scene.add(centerLight);
+window.addEventListener('resize', () => {
+  camera.aspect = viewport.clientWidth / viewport.clientHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(viewport.clientWidth, viewport.clientHeight);
+});
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+
+function fitCameraToScene() {
+  let maxExtent = 0;
+  for (const b of demo.bodies) {
+    if (!b.marker.visible) continue;
+    const dist = b.marker.position.length();
+    maxExtent = Math.max(maxExtent, dist + scale.markerRadius(b));
+  }
+  const cameraDistance = Math.max(4, maxExtent * 2.5);
+  const dir = DEFAULT_CAMERA_POSITION.clone().normalize();
+  camera.position.copy(dir.multiplyScalar(cameraDistance));
+  const desiredFar = Math.max(DEFAULT_CAMERA_FAR, cameraDistance * 3);
+  if (desiredFar !== camera.far) {
+    camera.far = desiredFar;
+    camera.updateProjectionMatrix();
+  }
+  controls.target.set(0, 0, 0);
+  controls.update();
+}
+function reaimCameraAt(newTarget) {
+  const delta = newTarget.clone().sub(controls.target);
+  controls.target.copy(newTarget);
+  camera.position.add(delta);
+  controls.update();
+}
+
+let demo = null;
+let sceneUpdateSeq = 0;
+let scale = null;
+
+function ensureMarkers() {
+  for (const b of demo.bodies) {
+    if (b.marker) scene.remove(b.marker);
+    const geo = new THREE.SphereGeometry(scale.markerRadius(b), 20, 16);
+    const mat = new THREE.MeshStandardMaterial({
+      color: b.color, emissive: b.color, emissiveIntensity: b.target === bodySpec.target ? 1.2 : 0.15,
+    });
+    b.marker = new THREE.Mesh(geo, mat);
+    scene.add(b.marker);
+  }
+}
+
+/**
+ * A satellite's own real orbital period around `bodySpec` -- unlike
+ * examples/shared/orbitMath.js's siderealPeriodSeconds() (which assumes
+ * a Sun-relative two-body orbit), this uses computeOrbitState()'s own
+ * `mu`/`invA` around the *actual* central body, so it's correct for a
+ * moon orbiting its planet, not just a planet orbiting the Sun.
+ */
+function satellitePeriodSeconds(satelliteTarget, et) {
+  const state = computeOrbitState(satelliteTarget, bodySpec.target, et, demo.remote.pool);
+  if (state.invA <= 0) throw new Error('orbit around the central body is not bound at this epoch');
+  return periodFromEllipse({ a: 1 / state.invA, mu: state.mu });
+}
+
+/** A custom body's own real trajectory -- uniformly sampled across its entire discovered interval. Cached once (CENTER/FRAME never change on this page). */
+function customBodyTrajectoryPositions(b) {
+  if (b.fullTrajectoryPositions) return b.fullTrajectoryPositions;
+  const n = customBodySampleCount(b.coverageStart, b.coverageEnd);
+  const positions = [];
+  for (let i = 0; i < n; i++) {
+    const sampleEt = b.coverageStart + (b.coverageEnd - b.coverageStart) * (i / (n - 1));
+    try {
+      positions.push(spkez(b.target, bodySpec.target, sampleEt, 'NONE', INERTIAL_FRAME, demo.remote.pool).position);
+    } catch {
+      // Skip this one instant rather than abort the whole line.
+    }
+  }
+  b.fullTrajectoryPositions = positions;
+  return positions;
+}
+
+const SATELLITE_TRAJECTORY_SEGMENTS = 720; // matches the ellipse page's own ORBIT_ELLIPSE_SEGMENTS -- plenty for a near-circular, modest-eccentricity real satellite orbit
+
+/**
+ * A satellite's own real trajectory, plainly and uniformly sampled
+ * across one lap of `window` -- NOT sampleArcAdaptive()'s curvature-based
+ * stepper: that stepper (examples/shared/orbitMath.js's own
+ * trajectoryStepSeconds()/accelerationRelativeToSun()) always measures
+ * curvature relative to the *Sun*, regardless of what observer is
+ * passed in, so it needs the Sun's own SPK coverage prefetched for
+ * every sampled instant -- data this page never loads (CENTER is the
+ * body itself, not the Sun; confirmed live: reusing it here failed with
+ * "no loaded SPK segment" for body 10). A moon's real orbit around its
+ * planet is a much simpler curve (near-circular, one dominant body) than
+ * the heliocentric case that stepper is calibrated for, so plain uniform
+ * sampling is both correct and sufficient here.
+ */
+function sampleSatelliteTrajectory(target, observer, et0, et1) {
+  const positions = [];
+  for (let i = 0; i <= SATELLITE_TRAJECTORY_SEGMENTS; i++) {
+    const et = et0 + (et1 - et0) * (i / SATELLITE_TRAJECTORY_SEGMENTS);
+    positions.push(spkez(target, observer, et, 'NONE', INERTIAL_FRAME, demo.remote.pool).position);
+  }
+  return positions;
+}
+
+/** Every non-central body's trajectory-mode line, relative to `bodySpec`. A real satellite's own window is one lap of its real period around the central body (satellitePeriodSeconds() above). */
+function rebuildArcs(centerEt) {
+  for (const b of demo.bodies) {
+    if (b.arcLine) {
+      scene.remove(b.arcLine);
+      b.arcLine = null;
+    }
+  }
+  for (const b of demo.bodies) {
+    if (b.target === bodySpec.target) continue;
+    try {
+      let positions;
+      if (b.fullyPrefetched) {
+        positions = customBodyTrajectoryPositions(b);
+      } else {
+        if (!bodyHasCoverageAt(b, centerEt)) continue;
+        const period = satellitePeriodSeconds(b.target, centerEt);
+        const window = [centerEt - period / 2, centerEt + period / 2];
+        positions = sampleSatelliteTrajectory(b.target, bodySpec.target, window[0], window[1]);
+      }
+      const arcPoints = positions.map((p) => new THREE.Vector3(...scale.posToScene(p)));
+      const arcGeo = new THREE.BufferGeometry().setFromPoints(arcPoints);
+      const arcMat = new THREE.LineBasicMaterial({ color: b.color, transparent: true, opacity: 0.45 });
+      b.arcLine = new THREE.Line(arcGeo, arcMat);
+      scene.add(b.arcLine);
+    } catch (err) {
+      log(`  -> couldn't draw ${b.name}'s trajectory (${err.message})`);
+    }
+  }
+}
+
+function lookAtBody(b) {
+  demo.lookAtTarget = b.target;
+  reaimCameraAtLookAtTarget();
+}
+function reaimCameraAtLookAtTarget() {
+  if (!demo || demo.lookAtTarget == null) return;
+  const b = demo.bodies.find((body) => body.target === demo.lookAtTarget);
+  if (!b || !b.marker) return;
+  reaimCameraAt(b.marker.position);
+}
+
+function buildLegend(bodiesState) {
+  legendEl.innerHTML = '';
+  for (const b of bodiesState) {
+    const li = document.createElement('li');
+    const swatch = document.createElement('span');
+    swatch.className = 'swatch';
+    swatch.style.background = '#' + b.color.toString(16).padStart(6, '0');
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = b.name;
+    const dist = document.createElement('span');
+    dist.className = 'dist';
+    dist.id = `dist-${b.target}`;
+    li.append(swatch, name, dist);
+    if (b.target !== bodySpec.target) {
+      const lookBtn = document.createElement('button');
+      lookBtn.type = 'button';
+      lookBtn.textContent = 'Look';
+      lookBtn.title = `Look at ${b.name}`;
+      lookBtn.addEventListener('click', () => lookAtBody(b));
+      li.append(lookBtn);
+    }
+    legendEl.appendChild(li);
+  }
+}
+
+async function updateSceneForOffset(offsetDays) {
+  if (!demo) return;
+  const mySeq = ++sceneUpdateSeq;
+  const et = demo.et0 + offsetDays * DAY;
+  timeLabel.textContent = `${et2utcCalendar(et)}  (${offsetDays >= 0 ? '+' : ''}${offsetDays.toFixed(2)} d)`;
+
+  for (const b of demo.bodies) {
+    if (b.fullyPrefetched) continue;
+    if (!bodyHasCoverageAt(b, et)) continue;
+    try {
+      await ensureBodyCoverage(b, et, et, { counters: demo.counters, log });
+    } catch (err) {
+      log(`  -> couldn't extend prefetch for ${b.name} (${err.message})`);
+    }
+    if (mySeq !== sceneUpdateSeq) return;
+  }
+
+  // Widen each real satellite's own coverage to its trajectory window.
+  for (const b of demo.bodies) {
+    if (b.target === bodySpec.target || b.fullyPrefetched) continue;
+    if (!bodyHasCoverageAt(b, et)) continue;
+    try {
+      const period = satellitePeriodSeconds(b.target, et);
+      await ensureBodyCoverage(b, et - period / 2, et + period / 2, { counters: demo.counters, log });
+    } catch (err) {
+      log(`  -> couldn't extend prefetch for ${b.name}'s trajectory (${err.message})`);
+    }
+    if (mySeq !== sceneUpdateSeq) return;
+  }
+
+  for (const b of demo.bodies) {
+    if (!bodyHasCoverageAt(b, et)) {
+      b.marker.visible = false;
+      continue;
+    }
+    b.marker.visible = true;
+    try {
+      const { position } = spkez(b.target, bodySpec.target, et, 'NONE', INERTIAL_FRAME, demo.remote.pool);
+      const [x, y, z] = scale.posToScene(position);
+      b.marker.position.set(x, y, z);
+    } catch (err) {
+      log(`  -> couldn't place ${b.name} (${err.message})`);
+    }
+  }
+  centerLight.position.copy(camera.position);
+
+  for (const b of demo.bodies) {
+    const distEl = document.getElementById(`dist-${b.target}`);
+    if (!distEl) continue;
+    if (b.target === bodySpec.target || !bodyHasCoverageAt(b, et)) {
+      distEl.textContent = '';
+      continue;
+    }
+    try {
+      const { position } = spkez(b.target, bodySpec.target, et, 'NONE', INERTIAL_FRAME, demo.remote.pool);
+      distEl.textContent = `${Math.hypot(...position).toFixed(0)} km`;
+    } catch {
+      distEl.textContent = '';
+    }
+  }
+
+  reaimCameraAtLookAtTarget();
+  rebuildArcs(et);
+}
+
+timeSlider.addEventListener('input', () => {
+  updateSceneForOffset(Number(timeSlider.value)).catch((err) => {
+    log(`ERROR: ${err.message}`);
+    console.error(err);
+  });
+});
+
+async function buildScene(proxyCatalogue) {
+  const centralBody = { ...bodySpec };
+  await prefetchBodyProbe(demo.remote, centralBody, null, demo.et0);
+  const satellites = await resolveSatellitesFor(bodySpec, SATELLITE_KERNEL_FOR_BODY, demo.remote, {
+    et0: demo.et0, proxyCatalogue, satelliteRemotes: demo.satelliteRemotes, openRemoteFileFn: (url) => openRemoteFile(url), log,
+  });
+  demo.bodies = [centralBody, ...satellites];
+  scale = buildCurrentScale('linear', 'linear', demo.bodies, demo.remote.pool, () =>
+    log('  -> no body here has a known real radius to anchor Linear/Linear scale -- unexpected, check pck00011.tpc coverage.')
+  );
+  ensureMarkers();
+  buildLegend(demo.bodies);
+
+  timeSlider.min = String((demo.kernelStartEt - demo.et0) / DAY);
+  timeSlider.max = String((demo.kernelStopEt - demo.et0) / DAY);
+  timeSlider.value = '0';
+  timeSlider.disabled = false;
+  await updateSceneForOffset(0);
+  fitCameraToScene();
+  customKernelInput.disabled = false;
+  log(`Scene built: ${bodySpec.name} + ${satellites.length} satellite${satellites.length === 1 ? '' : 's'}. ` +
+    `Drag "Reference epoch" to explore 1900-2100.`);
+}
+
+async function beginSession(remote, proxyCatalogue, { sourceLabel, sourceSizeBytes, counters = null }) {
+  resetLog('Loading leapseconds kernel...');
+  await loadLeapseconds(log);
+  await loadPlanetaryConstants(remote.pool, log);
+  await loadGravitationalParameters(remote.pool, log);
+
+  const kernelStartEt = str2et('1900-01-01T00:00:00');
+  const kernelStopEt = str2et('2100-01-01T00:00:00');
+  let et0 = str2et(new Date().toISOString());
+  et0 = Math.min(Math.max(et0, kernelStartEt), kernelStopEt);
+  log(`Timespan: ${et2utcCalendar(kernelStartEt)} to ${et2utcCalendar(kernelStopEt)}`);
+  log(`Reference epoch (now, UTC): ${et2utcCalendar(et0)}`);
+
+  demo = {
+    remote, et0, kernelStartEt, kernelStopEt, sourceLabel, sourceSizeBytes, counters, bodies: [],
+    lookAtTarget: null, satelliteRemotes: new Map(),
+  };
+  await buildScene(proxyCatalogue);
+}
+
+// ---------------------------------------------------------------------
+// Add a custom kernel (local file only) -- same discover/review/add
+// flow as /solar-system/trajectory/'s own.
+// ---------------------------------------------------------------------
+let pendingCustomKernel = null;
+
+function openCustomKernelModal(file, remoteFile, discovered) {
+  pendingCustomKernel = { file, remoteFile, discovered };
+  customKernelModalTitle.textContent = `Add bodies from ${file.name}`;
+  customKernelBodyList.innerHTML = '';
+  for (const b of [...discovered.values()].sort((a, z) => a.target - z.target)) {
+    const li = document.createElement('li');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = true;
+    cb.dataset.target = String(b.target);
+    const name = document.createElement('span');
+    name.className = 'cname';
+    name.textContent = bodyName(b.target, demo.remote.pool);
+    const id = document.createElement('span');
+    id.className = 'cid';
+    id.textContent = `(${b.target})`;
+    const interval = document.createElement('span');
+    interval.className = 'cinterval';
+    interval.textContent = `${et2utcCalendar(b.etStart).slice(0, 11)} - ${et2utcCalendar(b.etEnd).slice(0, 11)}`;
+    li.append(cb, name, id, interval);
+    customKernelBodyList.appendChild(li);
+  }
+  customKernelModal.style.display = '';
+}
+function closeCustomKernelModal() {
+  customKernelModal.style.display = 'none';
+  pendingCustomKernel = null;
+}
+customKernelCancelBtn.addEventListener('click', closeCustomKernelModal);
+
+async function loadSelectedCustomBodies() {
+  if (!pendingCustomKernel || !demo) return;
+  const { file, remoteFile, discovered } = pendingCustomKernel;
+  const checkedTargets = [...customKernelBodyList.querySelectorAll('input[type=checkbox]:checked')].map((cb) => Number(cb.dataset.target));
+  closeCustomKernelModal();
+  if (checkedTargets.length === 0) {
+    log(`No bodies selected from ${file.name} -- nothing added.`);
+    return;
+  }
+  customKernelInput.disabled = true;
+  log(`Adding ${checkedTargets.length} body/bodies from ${file.name}...`);
+  const added = [];
+  for (const target of checkedTargets) {
+    const info = discovered.get(target);
+    const name = bodyName(target, demo.remote.pool);
+    try {
+      await prefetchCustomBody(remoteFile, demo.remote.pool, target, info.etStart, info.etEnd, { systemBodies: demo.bodies, counters: demo.counters, log });
+    } catch (err) {
+      log(`  -> skipped ${name} (${target}): ${err.message}`);
+      continue;
+    }
+    const body = {
+      target, bodyId: target, name, color: 0xffffff, fallbackRadius: 1.0,
+      primaryId: info.center, isCustom: true, fullyPrefetched: true,
+      coverageStart: info.etStart, coverageEnd: info.etEnd,
+    };
+    demo.bodies.push(body);
+    added.push(body);
+    log(`  -> added ${name} (${target}), ${et2utcCalendar(info.etStart)} to ${et2utcCalendar(info.etEnd)}`);
+  }
+  customKernelInput.disabled = false;
+  customKernelInput.value = '';
+  if (added.length === 0) {
+    log(`Nothing from ${file.name} could be added (see above).`);
+    return;
+  }
+  ensureMarkers();
+  buildLegend(demo.bodies);
+  await updateSceneForOffset(Number(timeSlider.value));
+}
+customKernelLoadBtn.addEventListener('click', () => {
+  loadSelectedCustomBodies().catch((err) => {
+    log(`ERROR: ${err.message}`);
+    console.error(err);
+  });
+});
+
+async function scanAndOfferCustomKernel(file) {
+  if (!demo) return;
+  customKernelInput.disabled = true;
+  customKernelStatusEl.textContent = `Scanning ${file.name}...`;
+  try {
+    const resolveRange = async (_url, startByte, endByteExclusive) => new Uint8Array(await file.slice(startByte, endByteExclusive).arrayBuffer());
+    const remoteFile = await openRemoteFile(file.name, { fileLength: file.size, resolveRange });
+    const discovered = await discoverSpkBodies(remoteFile);
+    customKernelStatusEl.textContent = `${file.name}: ${discovered.size} body/bodies found.`;
+    if (discovered.size === 0) {
+      log(`${file.name} has no SPK segments -- nothing to add.`);
+    } else {
+      openCustomKernelModal(file, remoteFile, discovered);
+    }
+  } catch (err) {
+    customKernelStatusEl.textContent = `ERROR scanning ${file.name}: ${err.message}`;
+    log(`ERROR scanning ${file.name}: ${err.message}`);
+    console.error(err);
+  } finally {
+    customKernelInput.disabled = false;
+  }
+}
+customKernelInput.addEventListener('change', () => {
+  const file = customKernelInput.files && customKernelInput.files[0];
+  if (!file) return;
+  scanAndOfferCustomKernel(file);
+});
+
+async function loadFromProxy(entry, proxyCatalogue) {
+  const counters = { requestCount: 0, bytesRead: 0 };
+  const resolveRange = async (url, startByte, endByteExclusive) => {
+    counters.requestCount += 1;
+    counters.bytesRead += endByteExclusive - startByte;
+    const response = await fetch(url, { headers: { Range: `bytes=${startByte}-${endByteExclusive - 1}` } });
+    if (!response.ok) throw new Error(`proxy returned HTTP ${response.status} ${response.statusText}`);
+    return new Uint8Array(await response.arrayBuffer());
+  };
+  log(`Opening ${entry.file} (${entry.size}) through the local proxy...`);
+  const remote = await openRemoteSpk(entry.url, { fileLength: entry.bytes, resolveRange });
+  await beginSession(remote, proxyCatalogue, { sourceLabel: entry.file, sourceSizeBytes: entry.bytes, counters });
+}
+
+async function detectKernelProxy() {
+  let catalogue;
+  try {
+    const response = await fetch('/kernels/remote/', { headers: { accept: 'application/json' } });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    catalogue = await response.json();
+  } catch (err) {
+    resetLog(
+      `Couldn't reach the local kernel proxy (${err.message}).\n` +
+      `This page needs \`npm run serve-example\` running -- see the repo README's ` +
+      `"Running the example website" section, or open /examples/browser-demo/ for the full explorer.`
+    );
+    return;
+  }
+  const proxyCatalogue = new Map((catalogue.kernels ?? []).map((entry) => [entry.id, entry]));
+  const defaultEntry = proxyCatalogue.get(DEFAULT_KERNEL_ID);
+  if (!defaultEntry) {
+    resetLog(`The local proxy doesn't know about "${DEFAULT_KERNEL_ID}" -- check kernels/sources.mjs.`);
+    return;
+  }
+  try {
+    await loadFromProxy(defaultEntry, proxyCatalogue);
+  } catch (err) {
+    log(`ERROR loading ${DEFAULT_KERNEL_ID}: ${err.message}`);
+    console.error(err);
+  }
+}
+
+resetLog('Detecting the local kernel proxy...');
+detectKernelProxy();
+</script>
+</body>
+</html>
