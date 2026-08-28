@@ -30,9 +30,12 @@
   }
   #legend { list-style: none; margin: 0; padding: 0; }
   #legend li { display: flex; align-items: center; gap: 8px; margin: 2px -8px; padding: 4px 8px; border-radius: 4px; }
+  #legend li.active { background: #172038; box-shadow: inset 2px 0 0 #7fb2ff; }
   #legend .swatch { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }
   #legend .name { flex: 1 1 auto; }
   #legend .dist { color: #8892a6; font-variant-numeric: tabular-nums; }
+  #legend button { background: #1c2230; color: #cdd4e0; padding: 3px 8px; font-size: 11px; }
+  #legend button:disabled { background: #141a26; color: #454e60; }
   #timeRow { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
   #timeSlider { flex: 1 1 auto; }
   #timeLabel { font-variant-numeric: tabular-nums; white-space: nowrap; color: #8892a6; font-size: 12px; }
@@ -177,6 +180,48 @@ function animate() {
 }
 animate();
 
+/** Delta-translate camera move: re-targets controls.target at `newTarget`, preserving the current viewing angle/distance. */
+function reaimCameraAt(newTarget) {
+  const delta = newTarget.clone().sub(controls.target);
+  controls.target.copy(newTarget);
+  camera.position.add(delta);
+  controls.update();
+}
+/** "Look at" a body: keeps the camera aimed at it as the reference epoch scrubs. */
+function lookAtBody(b) {
+  demo.lookAtTarget = b.target;
+  reaimCameraAtLookAtTarget();
+}
+function reaimCameraAtLookAtTarget() {
+  if (!demo || demo.lookAtTarget == null) return;
+  const b = demo.bodies.find((body) => body.target === demo.lookAtTarget);
+  if (!b || !b.marker) return;
+  reaimCameraAt(b.marker.position);
+}
+
+/**
+ * "View from" a body: makes it the observer everything else is
+ * positioned relative to (demo.viewObserver -- default SUN_TARGET).
+ * Clears any active Look At target (its own scene position is about to
+ * be recomputed relative to the new observer anyway) and recenters the
+ * camera at the origin, which is always the new observer's own
+ * position by construction. customBodyTrajectoryPositions()'s own cache
+ * is keyed by demo.viewObserver, so it recomputes on its own -- no
+ * explicit invalidation needed here.
+ */
+function viewFromBody(b) {
+  if (!demo || demo.viewObserver === b.target) return;
+  demo.viewObserver = b.target;
+  demo.lookAtTarget = null;
+  reaimCameraAt(new THREE.Vector3(0, 0, 0));
+  ensureMarkers();
+  buildLegend(demo.bodies);
+  updateSceneForOffset(Number(timeSlider.value)).catch((err) => {
+    log(`ERROR: ${err.message}`);
+    console.error(err);
+  });
+}
+
 let demo = null;
 let sceneUpdateSeq = 0;
 const scale = makeScale({ positionMode: 'linear', radiusMode: 'sqrt', radiusAnchorKm: null, pool: null });
@@ -186,7 +231,7 @@ function ensureMarkers() {
     if (b.marker) scene.remove(b.marker);
     const geo = new THREE.SphereGeometry(scale.markerRadius(b), 20, 16);
     const mat = new THREE.MeshStandardMaterial({
-      color: b.color, emissive: b.color, emissiveIntensity: b.target === SUN_TARGET ? 1.2 : 0.15,
+      color: b.color, emissive: b.color, emissiveIntensity: b.target === SUN_TARGET || b.target === demo.viewObserver ? 1.2 : 0.15,
     });
     b.marker = new THREE.Mesh(geo, mat);
     scene.add(b.marker);
@@ -196,23 +241,24 @@ function ensureMarkers() {
 /**
  * A custom body's own real trajectory -- uniformly sampled across its
  * entire discovered interval, at customBodySampleCount()'s ~1-minute
- * resolution. Unlike the full explorer's own version of this, CENTER
- * and FRAME never change on this page, so the cache never needs a key
- * -- computed once per body, reused forever.
+ * resolution. FRAME never changes on this page but the observer
+ * (demo.viewObserver, see viewFromBody()) can, so the cache is keyed by
+ * it -- recomputed only when it actually changes, not every tick.
  */
 function customBodyTrajectoryPositions(b) {
-  if (b.fullTrajectoryPositions) return b.fullTrajectoryPositions;
+  const key = demo.viewObserver;
+  if (b.fullTrajectoryCache?.key === key) return b.fullTrajectoryCache.positions;
   const n = customBodySampleCount(b.coverageStart, b.coverageEnd);
   const positions = [];
   for (let i = 0; i < n; i++) {
     const sampleEt = b.coverageStart + (b.coverageEnd - b.coverageStart) * (i / (n - 1));
     try {
-      positions.push(spkez(b.target, SUN_TARGET, sampleEt, 'NONE', INERTIAL_FRAME, demo.remote.pool).position);
+      positions.push(spkez(b.target, demo.viewObserver, sampleEt, 'NONE', INERTIAL_FRAME, demo.remote.pool).position);
     } catch {
       // No real coverage for this one instant -- skip rather than abort the whole line.
     }
   }
-  b.fullTrajectoryPositions = positions;
+  b.fullTrajectoryCache = { key, positions };
   return positions;
 }
 
@@ -225,7 +271,7 @@ function rebuildArcs(centerEt, windows, budgets) {
     }
   }
   for (const b of demo.bodies) {
-    if (b.target === SUN_TARGET) continue;
+    if (b.target === demo.viewObserver) continue;
     try {
       let positions;
       if (b.fullyPrefetched) {
@@ -234,7 +280,7 @@ function rebuildArcs(centerEt, windows, budgets) {
         const window = windows.get(b.target);
         if (!window) continue;
         const maxSamples = budgets.get(b.target);
-        positions = sampleArcAdaptive(b.target, SUN_TARGET, window[0], window[1], INERTIAL_FRAME, demo.remote.pool, maxSamples).map((s) => s.position);
+        positions = sampleArcAdaptive(b.target, demo.viewObserver, window[0], window[1], INERTIAL_FRAME, demo.remote.pool, maxSamples).map((s) => s.position);
       }
       const arcPoints = positions.map((p) => new THREE.Vector3(...scale.posToScene(p)));
       const arcGeo = new THREE.BufferGeometry().setFromPoints(arcPoints);
@@ -251,6 +297,7 @@ function buildLegend(bodiesState) {
   legendEl.innerHTML = '';
   for (const b of bodiesState) {
     const li = document.createElement('li');
+    if (b.target === demo?.viewObserver) li.className = 'active';
     const swatch = document.createElement('span');
     swatch.className = 'swatch';
     swatch.style.background = '#' + b.color.toString(16).padStart(6, '0');
@@ -260,7 +307,18 @@ function buildLegend(bodiesState) {
     const dist = document.createElement('span');
     dist.className = 'dist';
     dist.id = `dist-${b.target}`;
-    li.append(swatch, name, dist);
+    const lookBtn = document.createElement('button');
+    lookBtn.type = 'button';
+    lookBtn.textContent = 'Look';
+    lookBtn.title = `Look at ${b.name}`;
+    lookBtn.addEventListener('click', () => lookAtBody(b));
+    const fromBtn = document.createElement('button');
+    fromBtn.type = 'button';
+    fromBtn.textContent = 'From';
+    fromBtn.title = `View from ${b.name}`;
+    fromBtn.disabled = b.target === demo?.viewObserver;
+    fromBtn.addEventListener('click', () => viewFromBody(b));
+    li.append(swatch, name, dist, lookBtn, fromBtn);
     legendEl.appendChild(li);
   }
 }
@@ -284,16 +342,20 @@ async function updateSceneForOffset(offsetDays) {
     if (mySeq !== sceneUpdateSeq) return;
   }
 
-  // Pass 2: each standard body's own trajectory window (one real lap of
-  // its own sidereal period), and the Sun's own coverage widened to the
-  // union of all of them (needed both as the observer every window is
-  // relative to, and by the curvature-based sampling step).
+  // Pass 2: each other body's own trajectory window (one real lap of its
+  // own sidereal period), then widen coverage for (a) the current
+  // observer (demo.viewObserver -- every window is relative to it) and
+  // (b) the Sun specifically (the curvature-based sampling step always
+  // measures acceleration relative to the Sun, regardless of observer --
+  // see examples/shared/orbitMath.js's accelerationRelativeToSun()),
+  // deduplicated when the observer already IS the Sun.
+  const centerBody = demo.bodies.find((b) => b.target === demo.viewObserver) ?? null;
   const sunBody = demo.bodies.find((b) => b.target === SUN_TARGET) ?? null;
   let centerPeriod = null;
   try {
-    centerPeriod = siderealPeriodSeconds(SUN_TARGET, et, demo.remote.pool);
+    centerPeriod = siderealPeriodSeconds(demo.viewObserver, et, demo.remote.pool);
   } catch {
-    // The Sun has no period of its own -- arcSampleBudget() falls back to its flat ceiling.
+    // The observer has no period of its own (it's the Sun, or unbound) -- arcSampleBudget() falls back to its flat ceiling.
   }
   let earthPeriod = null;
   try {
@@ -306,19 +368,27 @@ async function updateSceneForOffset(offsetDays) {
   let unionStart = et;
   let unionEnd = et;
   for (const b of demo.bodies) {
-    if (b.target === SUN_TARGET) continue;
+    if (b.target === demo.viewObserver) continue;
     if (b.fullyPrefetched) {
       unionStart = Math.min(unionStart, b.coverageStart);
       unionEnd = Math.max(unionEnd, b.coverageEnd);
       continue;
     }
-    const window = trajectoryWindowForBody(sunBody, b, et, demo.remote.pool, 'sidereal', demo.kernelStartEt, demo.kernelStopEt, log);
+    const window = trajectoryWindowForBody(centerBody, b, et, demo.remote.pool, 'sidereal', demo.kernelStartEt, demo.kernelStopEt, log);
     windows.set(b.target, window);
     budgets.set(b.target, arcSampleBudget(window[1] - window[0], centerPeriod, earthPeriod));
     unionStart = Math.min(unionStart, window[0]);
     unionEnd = Math.max(unionEnd, window[1]);
   }
-  if (sunBody) {
+  if (centerBody && !centerBody.fullyPrefetched) {
+    try {
+      await ensureBodyCoverage(centerBody, unionStart, unionEnd, { counters: demo.counters, log });
+    } catch (err) {
+      log(`  -> couldn't extend prefetch for ${centerBody.name} (${err.message})`);
+    }
+    if (mySeq !== sceneUpdateSeq) return;
+  }
+  if (sunBody && sunBody.target !== centerBody?.target) {
     try {
       await ensureBodyCoverage(sunBody, unionStart, unionEnd, { counters: demo.counters, log });
     } catch (err) {
@@ -327,7 +397,7 @@ async function updateSceneForOffset(offsetDays) {
     if (mySeq !== sceneUpdateSeq) return;
   }
   for (const b of demo.bodies) {
-    if (b.target === SUN_TARGET || b.fullyPrefetched) continue;
+    if (b.target === demo.viewObserver || b.fullyPrefetched) continue;
     const window = windows.get(b.target);
     if (!window) continue;
     try {
@@ -345,7 +415,7 @@ async function updateSceneForOffset(offsetDays) {
     }
     b.marker.visible = true;
     try {
-      const { position } = spkez(b.target, SUN_TARGET, et, 'NONE', INERTIAL_FRAME, demo.remote.pool);
+      const { position } = spkez(b.target, demo.viewObserver, et, 'NONE', INERTIAL_FRAME, demo.remote.pool);
       const [x, y, z] = scale.posToScene(position);
       b.marker.position.set(x, y, z);
       if (b.target === SUN_TARGET) sunLight.position.set(x, y, z);
@@ -362,13 +432,14 @@ async function updateSceneForOffset(offsetDays) {
       continue;
     }
     try {
-      const { position } = spkez(b.target, SUN_TARGET, et, 'NONE', INERTIAL_FRAME, demo.remote.pool);
+      const { position } = spkez(b.target, demo.viewObserver, et, 'NONE', INERTIAL_FRAME, demo.remote.pool);
       distEl.textContent = `${(Math.hypot(...position) / AU_KM).toFixed(2)} AU`;
     } catch {
       distEl.textContent = '';
     }
   }
 
+  reaimCameraAtLookAtTarget();
   rebuildArcs(et, windows, budgets);
 }
 
@@ -417,7 +488,7 @@ async function beginSession(remote, { sourceLabel, sourceSizeBytes, counters = n
   log(`Timespan: ${et2utcCalendar(kernelStartEt)} to ${et2utcCalendar(kernelStopEt)}`);
   log(`Reference epoch (now, UTC): ${et2utcCalendar(et0)}`);
 
-  demo = { remote, et0, kernelStartEt, kernelStopEt, sourceLabel, sourceSizeBytes, counters, bodies: [] };
+  demo = { remote, et0, kernelStartEt, kernelStopEt, sourceLabel, sourceSizeBytes, counters, bodies: [], viewObserver: SUN_TARGET, lookAtTarget: null };
   customKernelInput.disabled = false;
   await buildScene();
 }

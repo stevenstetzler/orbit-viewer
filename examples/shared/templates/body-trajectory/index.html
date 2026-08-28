@@ -28,6 +28,7 @@
   }
   #legend { list-style: none; margin: 0; padding: 0; }
   #legend li { display: flex; align-items: center; gap: 8px; margin: 2px -8px; padding: 4px 8px; border-radius: 4px; }
+  #legend li.active { background: #172038; box-shadow: inset 2px 0 0 #7fb2ff; }
   #legend .swatch { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }
   #legend .name { flex: 1 1 auto; }
   #legend .dist { color: #8892a6; font-variant-numeric: tabular-nums; }
@@ -204,6 +205,30 @@ function reaimCameraAt(newTarget) {
   controls.update();
 }
 
+/**
+ * "View from" a body: makes it the observer everything else -- including
+ * `bodySpec` itself, once it's no longer the observer -- is positioned
+ * relative to (demo.viewObserver, default `bodySpec.target`). Clears any
+ * active Look At target and recenters the camera at the origin (always
+ * the new observer's own position). Re-fits the camera afterward: real
+ * km-scale extents can change a lot between observers (e.g. viewing from
+ * a small moon instead of its planet).
+ */
+function viewFromBody(b) {
+  if (!demo || demo.viewObserver === b.target) return;
+  demo.viewObserver = b.target;
+  demo.lookAtTarget = null;
+  reaimCameraAt(new THREE.Vector3(0, 0, 0));
+  ensureMarkers();
+  buildLegend(demo.bodies);
+  updateSceneForOffset(Number(timeSlider.value))
+    .then(() => fitCameraToScene())
+    .catch((err) => {
+      log(`ERROR: ${err.message}`);
+      console.error(err);
+    });
+}
+
 let demo = null;
 let sceneUpdateSeq = 0;
 let scale = null;
@@ -213,7 +238,7 @@ function ensureMarkers() {
     if (b.marker) scene.remove(b.marker);
     const geo = new THREE.SphereGeometry(scale.markerRadius(b), 20, 16);
     const mat = new THREE.MeshStandardMaterial({
-      color: b.color, emissive: b.color, emissiveIntensity: b.target === bodySpec.target ? 1.2 : 0.15,
+      color: b.color, emissive: b.color, emissiveIntensity: b.target === demo.viewObserver ? 1.2 : 0.15,
     });
     b.marker = new THREE.Mesh(geo, mat);
     scene.add(b.marker);
@@ -233,20 +258,36 @@ function satellitePeriodSeconds(satelliteTarget, et) {
   return periodFromEllipse({ a: 1 / state.invA, mu: state.mu });
 }
 
-/** A custom body's own real trajectory -- uniformly sampled across its entire discovered interval. Cached once (CENTER/FRAME never change on this page). */
+/**
+ * `b`'s own real period, for sizing its trajectory-mode window -- always
+ * a satellite's own real period around `bodySpec` (satellitePeriodSeconds()
+ * above), EXCEPT when `b` is `bodySpec` itself and the current observer
+ * (demo.viewObserver, see viewFromBody()) is a different, satellite body:
+ * `bodySpec`'s own motion relative to that observer is then exactly the
+ * mirror of the observer's own real orbit around `bodySpec` -- the same
+ * "CENTER's own mirror" trick the heliocentric pages use for the Sun
+ * (examples/shared/orbitMath.js's own trajectoryWindowForBody()).
+ */
+function trajectoryPeriodFor(b, et) {
+  if (b.target === bodySpec.target) return satellitePeriodSeconds(demo.viewObserver, et);
+  return satellitePeriodSeconds(b.target, et);
+}
+
+/** A custom body's own real trajectory -- uniformly sampled across its entire discovered interval. Cache keyed by the current observer (demo.viewObserver, see viewFromBody()). */
 function customBodyTrajectoryPositions(b) {
-  if (b.fullTrajectoryPositions) return b.fullTrajectoryPositions;
+  const key = demo.viewObserver;
+  if (b.fullTrajectoryCache?.key === key) return b.fullTrajectoryCache.positions;
   const n = customBodySampleCount(b.coverageStart, b.coverageEnd);
   const positions = [];
   for (let i = 0; i < n; i++) {
     const sampleEt = b.coverageStart + (b.coverageEnd - b.coverageStart) * (i / (n - 1));
     try {
-      positions.push(spkez(b.target, bodySpec.target, sampleEt, 'NONE', INERTIAL_FRAME, demo.remote.pool).position);
+      positions.push(spkez(b.target, demo.viewObserver, sampleEt, 'NONE', INERTIAL_FRAME, demo.remote.pool).position);
     } catch {
       // Skip this one instant rather than abort the whole line.
     }
   }
-  b.fullTrajectoryPositions = positions;
+  b.fullTrajectoryCache = { key, positions };
   return positions;
 }
 
@@ -259,8 +300,8 @@ const SATELLITE_TRAJECTORY_SEGMENTS = 720; // matches the ellipse page's own ORB
  * trajectoryStepSeconds()/accelerationRelativeToSun()) always measures
  * curvature relative to the *Sun*, regardless of what observer is
  * passed in, so it needs the Sun's own SPK coverage prefetched for
- * every sampled instant -- data this page never loads (CENTER is the
- * body itself, not the Sun; confirmed live: reusing it here failed with
+ * every sampled instant -- data this page never loads (the observer is
+ * always a body in this system, never the Sun; confirmed live: reusing it failed with
  * "no loaded SPK segment" for body 10). A moon's real orbit around its
  * planet is a much simpler curve (near-circular, one dominant body) than
  * the heliocentric case that stepper is calibrated for, so plain uniform
@@ -275,8 +316,14 @@ function sampleSatelliteTrajectory(target, observer, et0, et1) {
   return positions;
 }
 
-/** Every non-central body's trajectory-mode line, relative to `bodySpec`. A real satellite's own window is one lap of its real period around the central body (satellitePeriodSeconds() above). */
-function rebuildArcs(centerEt) {
+/**
+ * Every other body's trajectory-mode line, relative to the current
+ * observer (demo.viewObserver). `windows` is `Map<target, [et0, et1]>`,
+ * from updateSceneForOffset()'s own per-tick computation (trajectoryPeriodFor()) --
+ * shared rather than recomputed here so the window sizing and the actual
+ * prefetch/coverage widening always agree.
+ */
+function rebuildArcs(centerEt, windows) {
   for (const b of demo.bodies) {
     if (b.arcLine) {
       scene.remove(b.arcLine);
@@ -284,16 +331,15 @@ function rebuildArcs(centerEt) {
     }
   }
   for (const b of demo.bodies) {
-    if (b.target === bodySpec.target) continue;
+    if (b.target === demo.viewObserver) continue;
     try {
       let positions;
       if (b.fullyPrefetched) {
         positions = customBodyTrajectoryPositions(b);
       } else {
-        if (!bodyHasCoverageAt(b, centerEt)) continue;
-        const period = satellitePeriodSeconds(b.target, centerEt);
-        const window = [centerEt - period / 2, centerEt + period / 2];
-        positions = sampleSatelliteTrajectory(b.target, bodySpec.target, window[0], window[1]);
+        const window = windows.get(b.target);
+        if (!window) continue;
+        positions = sampleSatelliteTrajectory(b.target, demo.viewObserver, window[0], window[1]);
       }
       const arcPoints = positions.map((p) => new THREE.Vector3(...scale.posToScene(p)));
       const arcGeo = new THREE.BufferGeometry().setFromPoints(arcPoints);
@@ -321,6 +367,7 @@ function buildLegend(bodiesState) {
   legendEl.innerHTML = '';
   for (const b of bodiesState) {
     const li = document.createElement('li');
+    if (b.target === demo?.viewObserver) li.className = 'active';
     const swatch = document.createElement('span');
     swatch.className = 'swatch';
     swatch.style.background = '#' + b.color.toString(16).padStart(6, '0');
@@ -330,15 +377,18 @@ function buildLegend(bodiesState) {
     const dist = document.createElement('span');
     dist.className = 'dist';
     dist.id = `dist-${b.target}`;
-    li.append(swatch, name, dist);
-    if (b.target !== bodySpec.target) {
-      const lookBtn = document.createElement('button');
-      lookBtn.type = 'button';
-      lookBtn.textContent = 'Look';
-      lookBtn.title = `Look at ${b.name}`;
-      lookBtn.addEventListener('click', () => lookAtBody(b));
-      li.append(lookBtn);
-    }
+    const lookBtn = document.createElement('button');
+    lookBtn.type = 'button';
+    lookBtn.textContent = 'Look';
+    lookBtn.title = `Look at ${b.name}`;
+    lookBtn.addEventListener('click', () => lookAtBody(b));
+    const fromBtn = document.createElement('button');
+    fromBtn.type = 'button';
+    fromBtn.textContent = 'From';
+    fromBtn.title = `View from ${b.name}`;
+    fromBtn.disabled = b.target === demo?.viewObserver;
+    fromBtn.addEventListener('click', () => viewFromBody(b));
+    li.append(swatch, name, dist, lookBtn, fromBtn);
     legendEl.appendChild(li);
   }
 }
@@ -360,13 +410,47 @@ async function updateSceneForOffset(offsetDays) {
     if (mySeq !== sceneUpdateSeq) return;
   }
 
-  // Widen each real satellite's own coverage to its trajectory window.
+  // Each other body's own trajectory window (one real lap of its own
+  // period -- trajectoryPeriodFor(), which also handles bodySpec's own
+  // mirror-trick window when it isn't the current observer), then widen
+  // coverage for the current observer itself (demo.viewObserver -- every
+  // window below is relative to it, and a satellite observer's own
+  // single-point probe from buildScene()/resolveSatellitesFor() may not
+  // be wide enough on its own) and for each windowed body in turn.
+  const windows = new Map();
+  let unionStart = et;
+  let unionEnd = et;
   for (const b of demo.bodies) {
-    if (b.target === bodySpec.target || b.fullyPrefetched) continue;
+    if (b.target === demo.viewObserver) continue;
+    if (b.fullyPrefetched) {
+      unionStart = Math.min(unionStart, b.coverageStart);
+      unionEnd = Math.max(unionEnd, b.coverageEnd);
+      continue;
+    }
     if (!bodyHasCoverageAt(b, et)) continue;
     try {
-      const period = satellitePeriodSeconds(b.target, et);
-      await ensureBodyCoverage(b, et - period / 2, et + period / 2, { counters: demo.counters, log });
+      const period = trajectoryPeriodFor(b, et);
+      const window = [et - period / 2, et + period / 2];
+      windows.set(b.target, window);
+      unionStart = Math.min(unionStart, window[0]);
+      unionEnd = Math.max(unionEnd, window[1]);
+    } catch (err) {
+      log(`  -> couldn't determine ${b.name}'s trajectory window (${err.message})`);
+    }
+  }
+  const observerBody = demo.bodies.find((b) => b.target === demo.viewObserver);
+  if (observerBody && !observerBody.fullyPrefetched) {
+    try {
+      await ensureBodyCoverage(observerBody, unionStart, unionEnd, { counters: demo.counters, log });
+    } catch (err) {
+      log(`  -> couldn't extend prefetch for ${observerBody.name} (${err.message})`);
+    }
+    if (mySeq !== sceneUpdateSeq) return;
+  }
+  for (const [target, window] of windows) {
+    const b = demo.bodies.find((x) => x.target === target);
+    try {
+      await ensureBodyCoverage(b, window[0], window[1], { counters: demo.counters, log });
     } catch (err) {
       log(`  -> couldn't extend prefetch for ${b.name}'s trajectory (${err.message})`);
     }
@@ -380,7 +464,7 @@ async function updateSceneForOffset(offsetDays) {
     }
     b.marker.visible = true;
     try {
-      const { position } = spkez(b.target, bodySpec.target, et, 'NONE', INERTIAL_FRAME, demo.remote.pool);
+      const { position } = spkez(b.target, demo.viewObserver, et, 'NONE', INERTIAL_FRAME, demo.remote.pool);
       const [x, y, z] = scale.posToScene(position);
       b.marker.position.set(x, y, z);
     } catch (err) {
@@ -392,12 +476,12 @@ async function updateSceneForOffset(offsetDays) {
   for (const b of demo.bodies) {
     const distEl = document.getElementById(`dist-${b.target}`);
     if (!distEl) continue;
-    if (b.target === bodySpec.target || !bodyHasCoverageAt(b, et)) {
+    if (b.target === demo.viewObserver || !bodyHasCoverageAt(b, et)) {
       distEl.textContent = '';
       continue;
     }
     try {
-      const { position } = spkez(b.target, bodySpec.target, et, 'NONE', INERTIAL_FRAME, demo.remote.pool);
+      const { position } = spkez(b.target, demo.viewObserver, et, 'NONE', INERTIAL_FRAME, demo.remote.pool);
       distEl.textContent = `${Math.hypot(...position).toFixed(0)} km`;
     } catch {
       distEl.textContent = '';
@@ -405,7 +489,7 @@ async function updateSceneForOffset(offsetDays) {
   }
 
   reaimCameraAtLookAtTarget();
-  rebuildArcs(et);
+  rebuildArcs(et, windows);
 }
 
 timeSlider.addEventListener('input', () => {
@@ -454,7 +538,7 @@ async function beginSession(remote, proxyCatalogue, { sourceLabel, sourceSizeByt
 
   demo = {
     remote, et0, kernelStartEt, kernelStopEt, sourceLabel, sourceSizeBytes, counters, bodies: [],
-    lookAtTarget: null, satelliteRemotes: new Map(),
+    viewObserver: bodySpec.target, lookAtTarget: null, satelliteRemotes: new Map(),
   };
   await buildScene(proxyCatalogue);
 }

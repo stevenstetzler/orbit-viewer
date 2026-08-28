@@ -247,15 +247,12 @@ function buildLegend(bodiesState) {
     const dist = document.createElement('span');
     dist.className = 'dist';
     dist.id = `dist-${b.target}`;
-    li.append(swatch, name, dist);
-    if (b.target !== bodySpec.target) {
-      const lookBtn = document.createElement('button');
-      lookBtn.type = 'button';
-      lookBtn.textContent = 'Look';
-      lookBtn.title = `Look at ${b.name}`;
-      lookBtn.addEventListener('click', () => lookAtBody(b));
-      li.append(lookBtn);
-    }
+    const lookBtn = document.createElement('button');
+    lookBtn.type = 'button';
+    lookBtn.textContent = 'Look';
+    lookBtn.title = b.target === bodySpec.target ? `Look at ${b.name} (recenter)` : `Look at ${b.name}`;
+    lookBtn.addEventListener('click', () => lookAtBody(b));
+    li.append(swatch, name, dist, lookBtn);
     legendEl.appendChild(li);
   }
 }

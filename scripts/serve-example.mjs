@@ -61,6 +61,10 @@
  *    reads `location.pathname` at load time to know which body it's
  *    actually showing.
  *
+ * 5. `/close-approach/data` -- proxies (and, in memory, caches --
+ *    see handleCloseApproachData()) JPL's Close-Approach Data API for
+ *    /close-approach/'s own sortable table. Same CORS reasoning as (3).
+ *
  * Block size: `--block-bytes` defaults to 64 KiB, matching the block
  * size `src/lazy/remoteFile.js` uses in the browser, so the proxy
  * fetches upstream exactly what the page asked for. Raising it trades
@@ -76,6 +80,7 @@ import { fileURLToPath } from 'node:url';
 import { RangeCache, parseRangeHeader, DEFAULT_BLOCK_BYTES } from './rangeCache.mjs';
 import { KERNELS, SPK_IDS, formatBytes } from '../kernels/sources.mjs';
 import { resolveSbdbObject, fetchHorizonsSpk } from './horizonsSpk.mjs';
+import { fetchCloseApproachData } from './closeApproach.mjs';
 import { BODIES, bodySlug } from '../examples/shared/bodies.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -84,6 +89,7 @@ const HORIZONS_CACHE_DIR = path.join(CACHE_DIR, 'horizons');
 const PROXY_PREFIX = '/kernels/remote/';
 const HORIZONS_RESOLVE_PREFIX = '/horizons/resolve';
 const HORIZONS_SPK_PREFIX = '/horizons/spk';
+const CLOSE_APPROACH_DATA_PREFIX = '/close-approach/data';
 
 // /<body>/ and /<body>/trajectory/ -- one page per BODIES entry (see
 // examples/shared/bodies.js's own bodySlug()), served from a single
@@ -374,6 +380,38 @@ async function handleHorizonsSpk(req, res, url) {
   res.end(bytes);
 }
 
+// In-memory cache for the CAD API's own response -- it's a bounded,
+// slow-changing dataset (new/refined close approaches, not a live feed),
+// so refetching it on every /close-approach/ page load would just be
+// slower for no benefit. Kept in memory (not on disk, unlike the SPK
+// caches above) since it's cheap to refetch on a server restart and
+// small enough (~1000s of rows) that there's no real cost either way.
+let closeApproachCache = null; // { data, fetchedAt } once populated
+const CLOSE_APPROACH_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+/** GET /close-approach/data -- proxies (and caches) the CAD API query /close-approach/'s own table is built from. */
+async function handleCloseApproachData(req, res) {
+  const fresh = closeApproachCache && Date.now() - closeApproachCache.fetchedAt < CLOSE_APPROACH_CACHE_TTL_MS;
+  if (fresh) {
+    return sendJson(res, 200, closeApproachCache.data);
+  }
+  console.log('  [close-approach] fetching close-approach data from the CAD API...');
+  let data;
+  try {
+    data = await fetchCloseApproachData();
+  } catch (err) {
+    console.error(`  [close-approach] ${err.message}`);
+    if (closeApproachCache) {
+      console.error('  [close-approach] serving the last successful fetch instead (stale).');
+      return sendJson(res, 200, closeApproachCache.data);
+    }
+    return sendJson(res, 502, { error: err.message });
+  }
+  console.log(`  [close-approach] ${data.count} close approaches.`);
+  closeApproachCache = { data, fetchedAt: Date.now() };
+  sendJson(res, 200, data);
+}
+
 /** Serves one file's bytes as `text/html`, the same headers handleStatic() itself uses for an ordinary page. */
 async function serveHtmlFile(res, filePath) {
   const body = await fs.readFile(filePath);
@@ -440,6 +478,8 @@ const server = http.createServer(async (req, res) => {
       await handleHorizonsResolve(req, res, url);
     } else if (url.pathname === HORIZONS_SPK_PREFIX) {
       await handleHorizonsSpk(req, res, url);
+    } else if (url.pathname === CLOSE_APPROACH_DATA_PREFIX) {
+      await handleCloseApproachData(req, res);
     } else if (matchBodyRoute(url.pathname) && !url.pathname.endsWith('/')) {
       // No trailing slash (e.g. /earth, /earth/trajectory) -- redirect to
       // add one, same as handleStatic() does for a real directory.
@@ -462,7 +502,7 @@ server.listen(opts.port, () => {
   const total = SPK_IDS.reduce((n, id) => n + KERNELS[id].bytes, 0);
   console.log(`spiceJS example server on http://localhost:${opts.port}`);
   console.log(`  demo:        http://localhost:${opts.port}/examples/browser-demo/`);
-  console.log(`  curated:     http://localhost:${opts.port}/solar-system/ , /solar-system/trajectory/ , /<body>/ , /<body>/trajectory/`);
+  console.log(`  curated:     http://localhost:${opts.port}/solar-system/ , /solar-system/trajectory/ , /<body>/ , /<body>/trajectory/ , /close-approach/`);
   console.log(`  kernel list: http://localhost:${opts.port}${PROXY_PREFIX}`);
   console.log(`  horizons:    http://localhost:${opts.port}${HORIZONS_RESOLVE_PREFIX}?sstr=... , ` +
     `${HORIZONS_SPK_PREFIX}?spkid=...&start=...&stop=...`);

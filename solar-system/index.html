@@ -36,12 +36,10 @@
   #legend .swatch { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }
   #legend .name { flex: 1 1 auto; }
   #legend .dist { color: #8892a6; font-variant-numeric: tabular-nums; }
+  #legend button { background: #1c2230; color: #cdd4e0; padding: 3px 8px; font-size: 11px; }
   #timeRow { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
   #timeSlider { flex: 1 1 auto; }
   #timeLabel { font-variant-numeric: tabular-nums; white-space: nowrap; color: #8892a6; font-size: 12px; }
-  .dateRow { display: flex; gap: 8px; margin: 6px 0; }
-  .dateRow > div { flex: 1 1 auto; }
-  .dateRow label { display: block; color: #8892a6; font-size: 11px; margin-bottom: 2px; }
   #horizonsStatus { font: 11px/1.5 ui-monospace, monospace; color: #8892a6; margin: 6px 0 0; white-space: pre-wrap; }
   #horizonsCandidateList { list-style: none; margin: 6px 0 0; padding: 0; display: none; }
   #horizonsCandidateList li { display: block; margin: 3px -8px; padding: 6px 8px; border-radius: 4px; cursor: pointer; border: 1px solid transparent; }
@@ -85,12 +83,8 @@
 
     <h2>Fetch from JPL Horizons</h2>
     <p class="sub" style="margin:0 0 8px">Any small body/comet Horizons knows, added as a real
-      trajectory over whatever part of 1900&ndash;2100 you ask for.</p>
+      trajectory over the whole 1900&ndash;2100 timespan.</p>
     <input id="horizonsCommandInput" type="text" placeholder="e.g. Ceres, 1P/Halley, 99942" />
-    <div class="dateRow">
-      <div><label for="horizonsStartInput">Start</label><input id="horizonsStartInput" type="date" min="1900-01-01" max="2100-01-01" /></div>
-      <div><label for="horizonsStopInput">Stop</label><input id="horizonsStopInput" type="date" min="1900-01-01" max="2100-01-01" /></div>
-    </div>
     <div class="buttonRow">
       <button id="horizonsFetchBtn" type="button" disabled>Fetch</button>
     </div>
@@ -145,8 +139,6 @@ const timeSlider = document.getElementById('timeSlider');
 const timeLabel = document.getElementById('timeLabel');
 const legendEl = document.getElementById('legend');
 const horizonsCommandInput = document.getElementById('horizonsCommandInput');
-const horizonsStartInput = document.getElementById('horizonsStartInput');
-const horizonsStopInput = document.getElementById('horizonsStopInput');
 const horizonsFetchBtn = document.getElementById('horizonsFetchBtn');
 const horizonsStatusEl = document.getElementById('horizonsStatus');
 const horizonsCandidateListEl = document.getElementById('horizonsCandidateList');
@@ -166,6 +158,10 @@ function resetLog(line) {
 }
 
 const DEFAULT_KERNEL_ID = 'de440s';
+// Every Horizons fetch on this page always covers the page's own whole
+// timespan -- no per-fetch date pickers (see fetchFromHorizons()).
+const HORIZONS_START = '1900-01-01';
+const HORIZONS_STOP = '2100-01-01';
 
 // ---------------------------------------------------------------------
 // three.js scene setup -- fixed Position=Linear/Radius=Sqrt scale, so
@@ -199,6 +195,25 @@ function animate() {
   renderer.render(scene, camera);
 }
 animate();
+
+/** Delta-translate camera move: re-targets controls.target at `newTarget`, preserving the current viewing angle/distance. */
+function reaimCameraAt(newTarget) {
+  const delta = newTarget.clone().sub(controls.target);
+  controls.target.copy(newTarget);
+  camera.position.add(delta);
+  controls.update();
+}
+/** "Look at" a body: keeps the camera aimed at it as the reference epoch scrubs. */
+function lookAtBody(b) {
+  demo.lookAtTarget = b.target;
+  reaimCameraAtLookAtTarget();
+}
+function reaimCameraAtLookAtTarget() {
+  if (!demo || demo.lookAtTarget == null) return;
+  const b = demo.bodies.find((body) => body.target === demo.lookAtTarget);
+  if (!b || !b.marker) return;
+  reaimCameraAt(b.marker.position);
+}
 
 let demo = null;
 let sceneUpdateSeq = 0;
@@ -283,7 +298,12 @@ function buildLegend(bodiesState) {
     const dist = document.createElement('span');
     dist.className = 'dist';
     dist.id = `dist-${b.target}`;
-    li.append(swatch, name, dist);
+    const lookBtn = document.createElement('button');
+    lookBtn.type = 'button';
+    lookBtn.textContent = 'Look';
+    lookBtn.title = `Look at ${b.name}`;
+    lookBtn.addEventListener('click', () => lookAtBody(b));
+    li.append(swatch, name, dist, lookBtn);
     legendEl.appendChild(li);
   }
 }
@@ -336,6 +356,7 @@ async function updateSceneForOffset(offsetDays) {
     }
   }
 
+  reaimCameraAtLookAtTarget();
   rebuildArcs(et);
 }
 
@@ -384,7 +405,7 @@ async function beginSession(remote, { sourceLabel, sourceSizeBytes, counters = n
   log(`Timespan: ${et2utcCalendar(kernelStartEt)} to ${et2utcCalendar(kernelStopEt)}`);
   log(`Reference epoch (now, UTC): ${et2utcCalendar(et0)}`);
 
-  demo = { remote, et0, kernelStartEt, kernelStopEt, sourceLabel, sourceSizeBytes, counters, bodies: [] };
+  demo = { remote, et0, kernelStartEt, kernelStopEt, sourceLabel, sourceSizeBytes, counters, bodies: [], lookAtTarget: null };
   horizonsFetchBtn.disabled = !proxyCatalogue;
   await buildScene();
 }
@@ -535,15 +556,11 @@ function showHorizonsCandidates(candidates, { start, stop }) {
 
 async function fetchFromHorizons() {
   const sstr = horizonsCommandInput.value.trim();
-  const start = horizonsStartInput.value;
-  const stop = horizonsStopInput.value;
+  const start = HORIZONS_START;
+  const stop = HORIZONS_STOP;
   clearHorizonsCandidates();
   if (!sstr) {
     horizonsStatusEl.textContent = 'Enter an object name or designation first.';
-    return;
-  }
-  if (!start || !stop) {
-    horizonsStatusEl.textContent = 'Pick a start and stop date first.';
     return;
   }
   horizonsFetchBtn.disabled = true;
@@ -577,21 +594,6 @@ horizonsFetchBtn.addEventListener('click', () => {
     console.error(err);
   });
 });
-
-// Default Horizons start/stop: a modest +-2-year window around today,
-// clamped into 1900-2100 (the <input>'s own min/max already enforce
-// this for anything the user picks by hand).
-{
-  const clampDate = (d) => new Date(Math.min(Math.max(d.getTime(), Date.UTC(1900, 0, 1)), Date.UTC(2100, 0, 1)));
-  const fmt = (d) => d.toISOString().slice(0, 10);
-  const today = new Date();
-  const start = new Date(today);
-  start.setFullYear(start.getFullYear() - 2);
-  const stop = new Date(today);
-  stop.setFullYear(stop.getFullYear() + 2);
-  horizonsStartInput.value = fmt(clampDate(start));
-  horizonsStopInput.value = fmt(clampDate(stop));
-}
 
 // ---------------------------------------------------------------------
 // Kernel loading -- de440s only, through the local proxy. No file
