@@ -355,20 +355,22 @@ budget on a body that implies few loops while starving one that implies
 many: measured live, centered on Earth in Sidereal mode, Jupiter's
 window implies ~12 loops, Neptune's ~164 -- a shared 400-point cap gave
 Jupiter a smooth ~34 points/loop but Neptune only ~2.4, badly aliased.
-Each body's own budget now targets ~24 points/loop (`ceil(loops * 24)`),
-clamped to [100, 2000] (the floor keeps a handful of fast, low-loop
-bodies -- Mercury, Venus, Mars, none of which were ever hitting even the
-old flat cap -- untouched; the ceiling bounds worst-case cost). Verified
-live: Jupiter now settles at 282 points (~24/loop, matching its own
-natural resolution almost exactly, and *fewer* than the old flat 400);
-Saturn at 704 (~24/loop); Uranus and Neptune both hit the 2000-point
-ceiling (~24 and ~12 points/loop respectively -- Neptune's own ~164
-implied loops need more than the ceiling allows for the full target
-density, a real, accepted trade-off against render/compute cost, still
-a 5x improvement over the old flat cap). The added compute cost is
-real: measured live, a full trajectory-mode re-render centered on Earth
-(the single most expensive case, since Earth's own fast motion drives
-every other body's implied loop count up) takes ~200ms of synchronous
+Each body's own budget targets ~48 points/loop (`ceil(loops * 48)`,
+`ARC_SAMPLES_PER_LOOP` -- doubled from an original 24, for a visibly
+finer curve, along with `ARC_MIN_SAMPLES`/`ARC_MAX_SAMPLES` so the
+whole budget curve scales uniformly), clamped to [200, 4000] (the
+floor keeps a handful of fast, low-loop bodies -- Mercury, Venus, Mars
+-- comfortably resolved regardless of loop count; the ceiling bounds
+worst-case cost). Centered on Earth in Sidereal mode, Jupiter (~12
+loops) settles around 564 points, well under the ceiling; Saturn
+around 1400; Uranus and Neptune both hit the 4000-point ceiling
+(Neptune's own ~164 implied loops would want far more than that for
+the full target density -- a real, accepted trade-off against
+render/compute cost). The added compute cost is
+real: measured live at the original (undoubled) tuning, a full
+trajectory-mode re-render centered on Earth (the single most expensive
+case, since Earth's own fast motion drives every other body's implied
+loop count up) took ~200ms of synchronous
 work -- noticeable on a slider drag, not a hang.
 
 Because each window is real (and, in Synodic mode, can be very long for

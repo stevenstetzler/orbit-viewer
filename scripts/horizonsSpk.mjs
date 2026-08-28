@@ -55,9 +55,17 @@ const HORIZONS_API_URL = 'https://ssd.jpl.nasa.gov/api/horizons.api';
  * provisional designation, a fragment like "141P-A") against JPL's
  * Small-Body Database. Returns one of:
  *
- * - `{ status: 'found', spkid, fullname }` -- unambiguous match
- *   (`body.object` present). `spkid` is what fetchHorizonsSpk() below
- *   needs; `fullname` is just for display.
+ * - `{ status: 'found', spkid, fullname, shortname }` -- unambiguous
+ *   match (`body.object` present). `spkid` is what fetchHorizonsSpk()
+ *   below needs; `fullname`/`shortname` are just for display --
+ *   `shortname` (e.g. `"1 Ceres"`, `"99942 Apophis"`) is the more
+ *   compact of the two (`fullname` adds a parenthesized provisional
+ *   designation, e.g. `"1 Ceres (A801 AA)"`) but isn't always present
+ *   (confirmed directly -- SBDB omits it for at least comets and
+ *   unnumbered/provisional-only objects, e.g. `1P/Halley` and
+ *   `137108 (1999 AN10)` both come back with `fullname` only) -- a
+ *   caller wanting the shorter form should fall back to `fullname`
+ *   when `shortname` is missing.
  * - `{ status: 'ambiguous', candidates: [{ pdes, name }, ...] }` --
  *   more than one object matches (`body.list` present -- e.g.
  *   `sstr=141P` matches the parent comet and each numbered fragment).
@@ -97,7 +105,7 @@ export async function resolveSbdbObject(sstr) {
     throw new Error(`SBDB API returned an unexpected response: HTTP ${response.status} ${response.statusText}`);
   }
   if (body.object) {
-    return { status: 'found', spkid: body.object.spkid, fullname: body.object.fullname };
+    return { status: 'found', spkid: body.object.spkid, fullname: body.object.fullname, shortname: body.object.shortname };
   }
   if (Array.isArray(body.list)) {
     return { status: 'ambiguous', candidates: body.list.map(({ pdes, name }) => ({ pdes, name })) };

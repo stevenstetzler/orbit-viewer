@@ -633,7 +633,7 @@ const INERTIAL_FRAME = 'ECLIPJ2000';
 // concern driving the choice the way there was for the old
 // sampled-trajectory design -- a single fixed, generous point count is
 // all this needs, for any body, any eccentricity, any epoch.
-const ORBIT_ELLIPSE_SEGMENTS = 180;
+const ORBIT_ELLIPSE_SEGMENTS = 360; // doubled from the original 180 for a visibly smoother curve, at negligible extra cost -- it's still a single fixed point count, not sampled per-body/per-epoch
 
 /**
  * A body's real (osculating) two-body orbit state relative to
@@ -842,9 +842,9 @@ function siderealPeriodSeconds(targetId, et, pool) {
 // (arcSampleBudget()), not one flat cap shared by every body -- see
 // trajectoryStepSeconds()/sampleArcAdaptive() below.
 
-const ARC_MAX_SAMPLES = 2000; // absolute ceiling on points per body per arc, regardless of loop count -- bounds worst-case render/prefetch/compute cost
-const ARC_MIN_SAMPLES = 100; // floor on the per-body budget below (see arcSampleBudget()) -- comfortably above what a fast, low-loop-count body (Mercury/Venus/Mars, all well under 100 today) already needs on its own, so the budget never *truncates* a body that wasn't hitting any cap to begin with
-const ARC_SAMPLES_PER_LOOP = 24; // target sample density per implied "lap" of CENTER around the Sun within a body's own window -- see arcSampleBudget()
+const ARC_MAX_SAMPLES = 4000; // absolute ceiling on points per body per arc, regardless of loop count -- bounds worst-case render/prefetch/compute cost (doubled from the original 2000 for a visibly finer trajectory-mode curve)
+const ARC_MIN_SAMPLES = 200; // floor on the per-body budget below (see arcSampleBudget()) -- comfortably above what a fast, low-loop-count body (Mercury/Venus/Mars, all well under 100 today) already needs on its own, so the budget never *truncates* a body that wasn't hitting any cap to begin with (doubled alongside ARC_MAX_SAMPLES/ARC_SAMPLES_PER_LOOP, so the whole budget curve scales uniformly)
+const ARC_SAMPLES_PER_LOOP = 48; // target sample density per implied "lap" of CENTER around the Sun within a body's own window -- see arcSampleBudget() (doubled alongside ARC_MIN_SAMPLES/ARC_MAX_SAMPLES)
 const TRAJECTORY_STEP_EPSILON_KM = 0.01 * AU_KM; // epsilon: the max positional error per step the dt formula solves for, in the same spatial units as position
 const TRAJECTORY_FALLBACK_HALF_SPAN_DAYS = 30; // used only if a period computation genuinely fails (e.g. an unbound osculating state, or missing prefetch coverage) or (Synodic only) a body's period happens to exactly match CENTER's (infinite synodic period)
 
@@ -857,9 +857,9 @@ const TRAJECTORY_FALLBACK_HALF_SPAN_DAYS = 30; // used only if a period computat
  * not the displayed body's own (possibly much longer or shorter) period.
  * A flat cap shared by every body wastes budget on a body that needs
  * few loops (Jupiter, ~12 within its own Sidereal window centered on
- * Earth, converges under 300 points) while starving one that needs many
- * (Neptune, ~164) -- this scales each body's own ceiling instead,
- * clamped to [ARC_MIN_SAMPLES, ARC_MAX_SAMPLES]. Falls back to the flat
+ * Earth) while starving one that needs many (Neptune, ~164) -- this
+ * scales each body's own ceiling instead, clamped to [ARC_MIN_SAMPLES,
+ * ARC_MAX_SAMPLES]. Falls back to the flat
  * ARC_MAX_SAMPLES ceiling if `centerPeriodSeconds` is `null` (CENTER has
  * no real period of its own to lap-count against -- the SSB, or the Sun
  * as CENTER, only reachable with ORBIT manually forced to Trajectory
@@ -2048,7 +2048,7 @@ async function resolveHorizonsObject(sstr) {
  * a synthetic File -- from that point on it's the *exact* same
  * review/select/add flow as picking a local .bsp above. `label` is
  * just for the status line/log and the synthetic filename (SBDB's own
- * `fullname`, when available -- discoverSpkBodies() reads the actual
+ * `shortname`, when available -- discoverSpkBodies() reads the actual
  * NAIF ID(s) from the SPK's own segments, not from this name).
  */
 async function addHorizonsBody({ spkid, label, start, stop }) {
@@ -2099,7 +2099,7 @@ function showHorizonsCandidates(candidates, { start, stop }) {
           throw new Error(resolved.message || `couldn't resolve ${pdes} to a single object.`);
         }
         clearHorizonsCandidates();
-        await addHorizonsBody({ spkid: resolved.spkid, label: resolved.fullname || pdes, start, stop });
+        await addHorizonsBody({ spkid: resolved.spkid, label: resolved.shortname || resolved.fullname || pdes, start, stop });
       } catch (err) {
         horizonsStatusEl.textContent = `ERROR: ${err.message}`;
         log(`ERROR fetching ${pdes} from Horizons: ${err.message}`);
@@ -2155,7 +2155,7 @@ async function fetchFromHorizons() {
       showHorizonsCandidates(resolved.candidates, { start, stop });
       return;
     }
-    await addHorizonsBody({ spkid: resolved.spkid, label: resolved.fullname || sstr, start, stop });
+    await addHorizonsBody({ spkid: resolved.spkid, label: resolved.shortname || resolved.fullname || sstr, start, stop });
   } catch (err) {
     horizonsStatusEl.textContent = `ERROR: ${err.message}`;
     log(`ERROR fetching ${sstr} from Horizons: ${err.message}`);
