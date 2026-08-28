@@ -420,6 +420,7 @@ const NAIF_LSK_URL = 'https://naif.jpl.nasa.gov/pub/naif/generic_kernels/lsk/nai
 const NAIF_SPK_URL = 'https://naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/planets/de440s.bsp';
 
 const SUN_TARGET = 10;
+const EARTH_TARGET = 399; // the trajectory-mode sample budget's own reference body -- see arcSampleBudget()
 
 // Bodies to render: NAIF ID (position), display name, color, a fallback
 // marker radius (used only if real RADII data can't be found -- see
@@ -842,7 +843,8 @@ function siderealPeriodSeconds(targetId, et, pool) {
 // (arcSampleBudget()), not one flat cap shared by every body -- see
 // trajectoryStepSeconds()/sampleArcAdaptive() below.
 
-const ARC_MAX_SAMPLES = 4000; // absolute ceiling on points per body per arc, regardless of loop count -- bounds worst-case render/prefetch/compute cost (doubled from the original 2000 for a visibly finer trajectory-mode curve)
+const ARC_MAX_SAMPLES = 4000; // base ceiling on points per body per arc -- calibrated (measured live, see README) for a CENTER whose own period is around Earth's; arcSampleBudget() scales this up for a *faster* CENTER, see its own doc comment (doubled from the original 2000 for a visibly finer trajectory-mode curve)
+const ARC_MAX_SAMPLES_ABSOLUTE_CEILING = 20000; // hard ceiling regardless of how fast CENTER is -- bounds worst-case render/prefetch/compute cost even when CENTER is a satellite (a period of hours/days, not years) -- see arcSampleBudget()
 const ARC_MIN_SAMPLES = 200; // floor on the per-body budget below (see arcSampleBudget()) -- comfortably above what a fast, low-loop-count body (Mercury/Venus/Mars, all well under 100 today) already needs on its own, so the budget never *truncates* a body that wasn't hitting any cap to begin with (doubled alongside ARC_MAX_SAMPLES/ARC_SAMPLES_PER_LOOP, so the whole budget curve scales uniformly)
 const ARC_SAMPLES_PER_LOOP = 48; // target sample density per implied "lap" of CENTER around the Sun within a body's own window -- see arcSampleBudget() (doubled alongside ARC_MIN_SAMPLES/ARC_MAX_SAMPLES)
 const TRAJECTORY_STEP_EPSILON_KM = 0.01 * AU_KM; // epsilon: the max positional error per step the dt formula solves for, in the same spatial units as position
@@ -859,17 +861,49 @@ const TRAJECTORY_FALLBACK_HALF_SPAN_DAYS = 30; // used only if a period computat
  * few loops (Jupiter, ~12 within its own Sidereal window centered on
  * Earth) while starving one that needs many (Neptune, ~164) -- this
  * scales each body's own ceiling instead, clamped to [ARC_MIN_SAMPLES,
- * ARC_MAX_SAMPLES]. Falls back to the flat
- * ARC_MAX_SAMPLES ceiling if `centerPeriodSeconds` is `null` (CENTER has
- * no real period of its own to lap-count against -- the SSB, or the Sun
- * as CENTER, only reachable with ORBIT manually forced to Trajectory
- * there).
+ * an *effective* max -- see below].
+ *
+ * That effective max itself isn't the flat ARC_MAX_SAMPLES either any
+ * more: ARC_MAX_SAMPLES, and the per-loop target this function builds
+ * from it, were both tuned and verified live centered specifically on
+ * *Earth* (see README) -- a body's own "implied loops" scales inversely
+ * with CENTER's own period, so the exact same real window implies far
+ * more loops (and needs far more samples to keep the same per-loop
+ * density) centered on a *faster* body than Earth. Confirmed live,
+ * exactly this way: centered on Mercury (period ~0.24 of Earth's),
+ * Pluto's own ~248-year Sidereal window implies ~1033 Mercury-laps --
+ * ~4.15x more than the ~248 laps the same window implies centered on
+ * Earth -- so the flat ARC_MAX_SAMPLES ceiling that comfortably fit
+ * Earth-centered Neptune left Mercury-centered Neptune and Pluto
+ * visibly under-sampled (their own implied retrograde loops badly
+ * aliased), even after doubling every constant here uniformly -- a
+ * flat ceiling has no way to tell "CENTER is fast" from "the target
+ * implies genuinely many loops," and only the sample *density* problem
+ * this function already solves for the latter, not the former. Scaling
+ * the ceiling itself by `referencePeriodSeconds / centerPeriodSeconds`
+ * (Earth's own period over CENTER's -- `>1`, hence a *larger* effective
+ * ceiling, whenever CENTER is faster than Earth; never smaller than the
+ * base ARC_MAX_SAMPLES for a CENTER at or slower than Earth, since a
+ * slower CENTER's own windows already imply *fewer* loops, not more)
+ * generalizes the same Earth-calibrated density target to any CENTER,
+ * still capped at ARC_MAX_SAMPLES_ABSOLUTE_CEILING regardless (a
+ * satellite as CENTER has a period of hours to days, not years --
+ * without this hard ceiling the ratio alone could demand an
+ * impractical sample count).
+ *
+ * Falls back to the (unscaled) flat ARC_MAX_SAMPLES ceiling if either
+ * period is unavailable (`null`/non-positive -- `centerPeriodSeconds`
+ * for the SSB or the Sun as CENTER, only reachable with ORBIT manually
+ * forced to Trajectory there; `referencePeriodSeconds` only if Earth's
+ * own state genuinely fails to resolve, not expected in practice).
  */
-function arcSampleBudget(windowSpanSeconds, centerPeriodSeconds) {
+function arcSampleBudget(windowSpanSeconds, centerPeriodSeconds, referencePeriodSeconds) {
   if (!(centerPeriodSeconds > 0)) return ARC_MAX_SAMPLES;
   const impliedLoops = windowSpanSeconds / centerPeriodSeconds;
   const target = Math.ceil(Math.max(1, impliedLoops) * ARC_SAMPLES_PER_LOOP);
-  return Math.min(ARC_MAX_SAMPLES, Math.max(ARC_MIN_SAMPLES, target));
+  const scale = referencePeriodSeconds > 0 ? Math.max(1, referencePeriodSeconds / centerPeriodSeconds) : 1;
+  const effectiveMax = Math.min(ARC_MAX_SAMPLES_ABSOLUTE_CEILING, Math.round(ARC_MAX_SAMPLES * scale));
+  return Math.min(effectiveMax, Math.max(ARC_MIN_SAMPLES, target));
 }
 
 /**
@@ -1691,10 +1725,19 @@ let pendingCustomKernel = null; // { file, remoteFile, discovered } while the mo
  * Builds and shows the checkbox+time-selector popup from a completed
  * discoverSpkBodies() scan. All bound state lives on `pendingCustomKernel`
  * until "Load selected" or "Cancel" resolves it.
+ *
+ * `knownNames` (`Map<target, name>`, optional) overrides `bodyName()`'s
+ * own NAIF-ID-table lookup for specific targets -- used for a Horizons
+ * fetch (addHorizonsBody()/fetchFromHorizons()), where the target's
+ * own real NAIF ID (an asteroid/comet-range number like `20000001`,
+ * confirmed live to match SBDB's own `spkid` exactly) is essentially
+ * never in that table, so without this every fetched body would show
+ * as a generic `Body <id>` here despite SBDB already having resolved a
+ * real name for it.
  */
-function openCustomKernelModal(file, remoteFile, discovered) {
+function openCustomKernelModal(file, remoteFile, discovered, knownNames = null) {
   const bodies = [...discovered.values()].sort((a, b) => a.target - b.target);
-  pendingCustomKernel = { file, remoteFile, discovered };
+  pendingCustomKernel = { file, remoteFile, discovered, knownNames };
 
   customKernelModalTitle.textContent = `Add bodies from ${file.name} (${bodies.length} found)`;
   customKernelBodyList.innerHTML = '';
@@ -1706,7 +1749,7 @@ function openCustomKernelModal(file, remoteFile, discovered) {
     checkbox.dataset.target = String(b.target);
     const name = document.createElement('span');
     name.className = 'cname';
-    name.textContent = bodyName(b.target, demo.remote.pool);
+    name.textContent = knownNames?.get(b.target) ?? bodyName(b.target, demo.remote.pool);
     const id = document.createElement('span');
     id.className = 'cid';
     id.textContent = `(${b.target})`;
@@ -1870,7 +1913,7 @@ async function prefetchCustomBody(remoteFile, pool, target, etStart, etEnd) {
  */
 async function loadSelectedCustomBodies() {
   if (!pendingCustomKernel || !demo) return;
-  const { file, remoteFile, discovered } = pendingCustomKernel;
+  const { file, remoteFile, discovered, knownNames } = pendingCustomKernel;
   const checkedTargets = [...customKernelBodyList.querySelectorAll('input[type=checkbox]:checked')]
     .map((cb) => Number(cb.dataset.target));
   const chosenEt0 = Number(customKernelEpochSlider.value);
@@ -1886,7 +1929,7 @@ async function loadSelectedCustomBodies() {
   const added = [];
   for (const target of checkedTargets) {
     const info = discovered.get(target);
-    const name = bodyName(target, demo.remote.pool);
+    const name = knownNames?.get(target) ?? bodyName(target, demo.remote.pool);
     try {
       await prefetchCustomBody(remoteFile, demo.remote.pool, target, info.etStart, info.etEnd);
     } catch (err) {
@@ -1980,8 +2023,13 @@ customKernelLoadBtn.addEventListener('click', () => {
  * only ever touch `file.name`/`.size`/`.slice()`, never `instanceof
  * File`, so a synthetic `File` built from fetched bytes is a drop-in
  * here -- no separate code path needed for where the bytes came from.
+ *
+ * `knownNames` (optional, forwarded to openCustomKernelModal()) is the
+ * Horizons path's own way of passing SBDB's already-resolved name
+ * through -- the file picker's own call site has no such name and
+ * passes nothing, falling back to bodyName()'s NAIF-ID-table lookup.
  */
-async function scanAndOfferCustomKernel(file) {
+async function scanAndOfferCustomKernel(file, knownNames = null) {
   if (!demo) return;
   customKernelInput.disabled = true;
   customKernelStatusEl.textContent = `Scanning ${file.name}...`;
@@ -1996,7 +2044,7 @@ async function scanAndOfferCustomKernel(file) {
     if (discovered.size === 0) {
       log(`${file.name} has no SPK segments -- nothing to add.`);
     } else {
-      openCustomKernelModal(file, remoteFile, discovered);
+      openCustomKernelModal(file, remoteFile, discovered, knownNames);
     }
   } catch (err) {
     customKernelStatusEl.textContent = `ERROR scanning ${file.name}: ${err.message}`;
@@ -2065,7 +2113,14 @@ async function addHorizonsBody({ spkid, label, start, stop }) {
   const file = new File([bytes], `horizons-${safeName}.bsp`, { type: 'application/octet-stream' });
   horizonsStatusEl.textContent = `Fetched ${file.name} (${formatBytesShort(bytes.byteLength)}).`;
   log(`  -> ${formatBytesShort(bytes.byteLength)} from Horizons; scanning for bodies...`);
-  await scanAndOfferCustomKernel(file);
+  // `spkid` is the fetched body's own real NAIF target ID too --
+  // confirmed live (Ceres: spkid "20000001", the SPK's own discovered
+  // target is 20000001) -- so `label` (SBDB's shortname/fullname) can
+  // be handed straight to the "Add bodies" popup as this one target's
+  // known name, rather than falling back to bodyName()'s NAIF-ID-table
+  // lookup, which essentially never has an asteroid/comet-range ID in
+  // it (see scanAndOfferCustomKernel()'s own doc comment).
+  await scanAndOfferCustomKernel(file, new Map([[Number(spkid), label]]));
 }
 
 /**
@@ -2366,6 +2421,16 @@ function rebuildArcs(centerEt) {
     } catch {
       // Falls back to arcSampleBudget()'s own flat-ceiling default.
     }
+    // Earth's own period, also once per tick -- arcSampleBudget()'s own
+    // reference point for how many samples the whole scheme was
+    // calibrated around (see its doc comment); `null` (not expected in
+    // practice) leaves that scaling at 1x, same as before this existed.
+    let earthPeriod = null;
+    try {
+      earthPeriod = siderealPeriodSeconds(EARTH_TARGET, centerEt, demo.remote.pool);
+    } catch {
+      // Falls back to arcSampleBudget()'s own unscaled ceiling.
+    }
     for (const b of demo.bodies) {
       if (b.target === demo.viewObserver) continue;
       // A custom body (loadSelectedCustomBodies()) has no known
@@ -2391,7 +2456,7 @@ function rebuildArcs(centerEt) {
       const window = demo.trajectoryWindows?.get(b.target);
       if (!window) continue; // no synodic window computed for this body this tick -- see updateSceneForOffset()
       const [windowStart, windowEnd] = window;
-      const maxSamples = arcSampleBudget(windowEnd - windowStart, centerPeriod);
+      const maxSamples = arcSampleBudget(windowEnd - windowStart, centerPeriod, earthPeriod);
       try {
         const samples = sampleArcAdaptive(b.target, demo.viewObserver, windowStart, windowEnd, demo.viewFrame, demo.remote.pool, maxSamples);
         const arcPoints = samples.map((s) => new THREE.Vector3(...demo.scale.posToScene(s.position)));

@@ -358,20 +358,53 @@ Jupiter a smooth ~34 points/loop but Neptune only ~2.4, badly aliased.
 Each body's own budget targets ~48 points/loop (`ceil(loops * 48)`,
 `ARC_SAMPLES_PER_LOOP` -- doubled from an original 24, for a visibly
 finer curve, along with `ARC_MIN_SAMPLES`/`ARC_MAX_SAMPLES` so the
-whole budget curve scales uniformly), clamped to [200, 4000] (the
-floor keeps a handful of fast, low-loop bodies -- Mercury, Venus, Mars
--- comfortably resolved regardless of loop count; the ceiling bounds
-worst-case cost). Centered on Earth in Sidereal mode, Jupiter (~12
-loops) settles around 564 points, well under the ceiling; Saturn
-around 1400; Uranus and Neptune both hit the 4000-point ceiling
-(Neptune's own ~164 implied loops would want far more than that for
-the full target density -- a real, accepted trade-off against
-render/compute cost). The added compute cost is
-real: measured live at the original (undoubled) tuning, a full
-trajectory-mode re-render centered on Earth (the single most expensive
-case, since Earth's own fast motion drives every other body's implied
-loop count up) took ~200ms of synchronous
-work -- noticeable on a slider drag, not a hang.
+whole budget curve scales uniformly), clamped to `[200, effective max]`
+(the floor keeps a handful of fast, low-loop bodies -- Mercury, Venus,
+Mars -- comfortably resolved regardless of loop count).
+
+That ceiling isn't a flat 4000 any more, either. It, and the per-loop
+target above, were both tuned and verified live centered specifically
+on **Earth** -- and since "implied loops" is `windowSpan /
+centerPeriod`, the exact same real window implies far more loops (and
+needs far more samples for the same per-loop density) centered on a
+body *faster* than Earth. Confirmed live, exactly this way: centered
+on **Mercury** (period ~0.24 of Earth's), Pluto's own ~248-year
+Sidereal window implies ~1033 Mercury-laps -- ~4.15x more than the
+~248 laps the same window implies centered on Earth -- so the flat
+ceiling that comfortably fit Earth-centered Neptune left
+Mercury-centered Uranus, Neptune, and Pluto visibly under-sampled
+(their own implied retrograde loops badly aliased), even after
+doubling every constant here uniformly. The ceiling now scales by
+`earthPeriod / centerPeriod` (never below the base 4000, since a body
+*slower* than Earth already implies *fewer* loops, not more), capped
+at an absolute `ARC_MAX_SAMPLES_ABSOLUTE_CEILING` of 20000 regardless
+(a satellite as CENTER has a period of hours to days, not years --
+without a hard ceiling the ratio alone could demand an impractical
+sample count, and per-sample cost is real -- see below). Centered on
+Earth (ratio exactly 1x, unaffected by this) in Sidereal mode, Jupiter
+(~12 loops) settles around 564 points, well under the ceiling; Saturn
+around 1400; Uranus and Neptune both hit the (here unscaled) 4000-point
+ceiling. Centered on Mercury instead (ratio ~4.15x, effective ceiling
+~16600), the same Uranus reaches its own full ~48/loop target; Neptune
+and Pluto still fall short of full density (~24 and ~16 points/loop
+respectively -- their own implied loop counts, ~684 and ~1033, still
+exceed even the scaled ceiling) but land at roughly *4x* the points/loop
+a flat ceiling gave them, a real, accepted trade-off against
+render/compute cost, not full resolution at any cost.
+
+The added compute cost is real: measured live at the original
+(undoubled, unscaled) tuning, a full trajectory-mode re-render centered
+on Earth (previously the single most expensive case, since Earth's own
+fast motion drives every other body's implied loop count up) took
+~200ms of synchronous work -- noticeable on a slider drag, not a hang.
+Centered on Mercury, with the ceiling now scaled up ~4.15x, that cost
+is real too -- measured live, ~9200 real (curvature-sampled) points for
+one single body/window pair (Jupiter relative to Mercury, an 80-year
+window) took ~300ms on their own, at roughly 30 microseconds per point
+-- which is why the ceiling is capped at all, rather than scaled
+without limit: a body like Pluto that *wants* tens of thousands of
+points to hit full target density would cost proportionately more,
+compounding across every body drawn in the same tick.
 
 Because each window is real (and, in Synodic mode, can be very long for
 a body whose period is close to Center's own -- a near-1:1 resonance
@@ -736,6 +769,21 @@ designation syntax from the typed string, is what makes this reliable
 for the ambiguous cases (a bare name or a comet's shared parent
 designation) -- Horizons itself has no equivalent "here are your
 options" response, it just picks one interpretation or fails.
+
+The name shown throughout this flow -- the fetch status line/log, the
+synthetic filename, and the fetched body's own row in the "Add bodies"
+popup and (once added) the legend -- is SBDB's own `shortname` (e.g.
+`"1 Ceres"`), falling back to the longer `fullname` (`"1 Ceres (A801
+AA)"`) when `shortname` isn't present -- confirmed live that it isn't
+always: SBDB omits it for at least comets and unnumbered/provisional-
+only objects (`1P/Halley`, `137108 (1999 AN10)`), so the fallback is
+real, not just defensive. This overrides `bodyName()`'s own NAIF-ID-
+table lookup specifically for the fetched body's real target id (its
+own SPK-ID, confirmed live to match the SPK's own discovered NAIF
+target exactly) -- without it, that lookup essentially never finds an
+asteroid/comet-range id in the built-in table, so every fetched body
+would otherwise show as a generic `Body <id>` despite SBDB already
+having resolved a real name for it.
 
 **Needs the local proxy** (`npm run serve-example`) for the same
 reason the kernel catalogue above does: neither `ssd-api.jpl.nasa.gov`
