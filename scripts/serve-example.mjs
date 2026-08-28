@@ -36,9 +36,13 @@
  *    handle), `spk` then fetches that object's trajectory SPK from
  *    Horizons and relays the raw bytes back same-origin. Same CORS
  *    reasoning as (2) above -- neither ssd-api.jpl.nasa.gov nor
- *    ssd.jpl.nasa.gov sends Access-Control-Allow-Origin -- but no
- *    caching (each request is a distinct object/time-range
- *    combination, not a range within one large fixed file).
+ *    ssd.jpl.nasa.gov sends Access-Control-Allow-Origin. Unlike (2),
+ *    `spk` *is* cached now (see handleHorizonsSpk()) -- one whole SPK
+ *    per `spkid` in `kernels/cache/horizons/`, not a byte-range cache
+ *    the way (2) is (a real small-body/comet SPK is small enough --
+ *    tens to hundreds of KB -- that caching the whole thing per
+ *    request is simpler and just as effective as ranging into it would
+ *    be).
  *
  * Block size: `--block-bytes` defaults to 64 KiB, matching the block
  * size `src/lazy/remoteFile.js` uses in the browser, so the proxy
@@ -58,6 +62,7 @@ import { resolveSbdbObject, fetchHorizonsSpk } from './horizonsSpk.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CACHE_DIR = path.join(REPO_ROOT, 'kernels', 'cache');
+const HORIZONS_CACHE_DIR = path.join(CACHE_DIR, 'horizons');
 const PROXY_PREFIX = '/kernels/remote/';
 const HORIZONS_RESOLVE_PREFIX = '/horizons/resolve';
 const HORIZONS_SPK_PREFIX = '/horizons/spk';
@@ -231,6 +236,45 @@ async function handleHorizonsResolve(req, res, url) {
 }
 
 /**
+ * Path pair for a `spkid`'s Horizons cache entry: the fetched SPK
+ * bytes themselves (`<spkid>.bsp`) and a small sidecar JSON recording
+ * the exact `[start, stop]` date-string range actually requested to
+ * produce them -- Horizons' SPK response carries no such metadata
+ * itself, only "here's an SPK," so this is the only record of what it
+ * covers. `start`/`stop` are always `YYYY-MM-DD` (the browser's own
+ * `<input type="date">` fields guarantee this, per the HTML spec), so
+ * they sort chronologically as plain strings -- no date parsing needed
+ * anywhere in this cache.
+ */
+function horizonsCachePaths(spkid) {
+  const safeId = String(spkid).replace(/[^A-Za-z0-9_-]/g, '_') || 'unknown';
+  return {
+    bsp: path.join(HORIZONS_CACHE_DIR, `${safeId}.bsp`),
+    meta: path.join(HORIZONS_CACHE_DIR, `${safeId}.json`),
+  };
+}
+
+/** `{ bytes, start, stop }` for `spkid`'s cached SPK, or `null` if there isn't one (or it's incomplete/corrupt -- treated the same as no cache, not an error). */
+async function readHorizonsCache(spkid) {
+  const { bsp, meta } = horizonsCachePaths(spkid);
+  try {
+    const [bytes, metaRaw] = await Promise.all([fs.readFile(bsp), fs.readFile(meta, 'utf8')]);
+    const { start, stop } = JSON.parse(metaRaw);
+    if (typeof start !== 'string' || typeof stop !== 'string') return null;
+    return { bytes, start, stop };
+  } catch {
+    return null;
+  }
+}
+
+async function writeHorizonsCache(spkid, bytes, start, stop) {
+  const { bsp, meta } = horizonsCachePaths(spkid);
+  await fs.mkdir(HORIZONS_CACHE_DIR, { recursive: true });
+  await fs.writeFile(bsp, bytes);
+  await fs.writeFile(meta, JSON.stringify({ start, stop }));
+}
+
+/**
  * GET /horizons/spk?spkid=<id>&start=<date>&stop=<date> -- fetches
  * the trajectory SPK for an already-resolved `spkid` (from
  * /horizons/resolve above) via Horizons. Success: raw SPK bytes,
@@ -238,6 +282,21 @@ async function handleHorizonsResolve(req, res, url) {
  * object, bad time range, or Horizons itself unreachable): `4xx` JSON
  * `{ error }`, Horizons' own message verbatim -- already specific and
  * actionable, not worth re-wrapping.
+ *
+ * Cached per `spkid` (horizonsCachePaths()/readHorizonsCache()/
+ * writeHorizonsCache() above), in `kernels/cache/horizons/`:
+ *
+ * - The requested `[start, stop]` fits entirely inside what's already
+ *   cached for this `spkid` -- serve the cached bytes directly, no
+ *   Horizons request at all.
+ * - Otherwise (no cache yet, or the request reaches outside it on
+ *   either end) -- fetch a *fresh* SPK over the union of the two
+ *   ranges (`min(cachedStart, start) .. max(cachedStop, stop)`, plain
+ *   string min/max -- see horizonsCachePaths()'s own comment), and
+ *   overwrite the cache with it. Always the *union*, not just the
+ *   missing gap: Horizons has no way to splice two separate SPKs
+ *   together into one, and a single wider request is exactly as cheap
+ *   as a narrow one from Horizons' own side.
  */
 async function handleHorizonsSpk(req, res, url) {
   const spkid = url.searchParams.get('spkid');
@@ -247,13 +306,32 @@ async function handleHorizonsSpk(req, res, url) {
     return sendJson(res, 400, { error: 'spkid, start, and stop query parameters are all required.' });
   }
 
-  console.log(`  [horizons] fetching SPK for spkid ${spkid} (${start} .. ${stop})...`);
+  const cached = await readHorizonsCache(spkid);
   let bytes;
-  try {
-    ({ bytes } = await fetchHorizonsSpk({ spkid, startTime: start, stopTime: stop }));
-  } catch (err) {
-    console.error(`  [horizons] spkid ${spkid}: ${err.message}`);
-    return sendJson(res, 502, { error: err.message });
+  if (cached && start >= cached.start && stop <= cached.stop) {
+    console.log(`  [horizons] spkid ${spkid}: serving cached SPK (${cached.start} .. ${cached.stop}, ` +
+      `covers requested ${start} .. ${stop}) -- no Horizons request needed.`);
+    bytes = cached.bytes;
+  } else {
+    const fetchStart = cached && cached.start < start ? cached.start : start;
+    const fetchStop = cached && cached.stop > stop ? cached.stop : stop;
+    if (cached) {
+      console.log(`  [horizons] spkid ${spkid}: cached range (${cached.start} .. ${cached.stop}) doesn't cover ` +
+        `requested (${start} .. ${stop}) -- re-fetching the union, ${fetchStart} .. ${fetchStop}...`);
+    } else {
+      console.log(`  [horizons] fetching SPK for spkid ${spkid} (${fetchStart} .. ${fetchStop})...`);
+    }
+    try {
+      ({ bytes } = await fetchHorizonsSpk({ spkid, startTime: fetchStart, stopTime: fetchStop }));
+    } catch (err) {
+      console.error(`  [horizons] spkid ${spkid}: ${err.message}`);
+      return sendJson(res, 502, { error: err.message });
+    }
+    try {
+      await writeHorizonsCache(spkid, bytes, fetchStart, fetchStop);
+    } catch (err) {
+      console.error(`  [horizons] spkid ${spkid}: couldn't write cache (${err.message}) -- serving the fetched SPK anyway.`);
+    }
   }
 
   console.log(`  [horizons] spkid ${spkid}: ${formatBytes(bytes.byteLength)}.`);

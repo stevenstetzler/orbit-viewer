@@ -634,7 +634,7 @@ const INERTIAL_FRAME = 'ECLIPJ2000';
 // concern driving the choice the way there was for the old
 // sampled-trajectory design -- a single fixed, generous point count is
 // all this needs, for any body, any eccentricity, any epoch.
-const ORBIT_ELLIPSE_SEGMENTS = 360; // doubled from the original 180 for a visibly smoother curve, at negligible extra cost -- it's still a single fixed point count, not sampled per-body/per-epoch
+const ORBIT_ELLIPSE_SEGMENTS = 720; // doubled again (180 -> 360 -> 720) for a visibly smoother curve, at negligible extra cost -- it's still a single fixed point count, not sampled per-body/per-epoch
 
 /**
  * A body's real (osculating) two-body orbit state relative to
@@ -843,10 +843,10 @@ function siderealPeriodSeconds(targetId, et, pool) {
 // (arcSampleBudget()), not one flat cap shared by every body -- see
 // trajectoryStepSeconds()/sampleArcAdaptive() below.
 
-const ARC_MAX_SAMPLES = 4000; // base ceiling on points per body per arc -- calibrated (measured live, see README) for a CENTER whose own period is around Earth's; arcSampleBudget() scales this up for a *faster* CENTER, see its own doc comment (doubled from the original 2000 for a visibly finer trajectory-mode curve)
-const ARC_MAX_SAMPLES_ABSOLUTE_CEILING = 20000; // hard ceiling regardless of how fast CENTER is -- bounds worst-case render/prefetch/compute cost even when CENTER is a satellite (a period of hours/days, not years) -- see arcSampleBudget()
-const ARC_MIN_SAMPLES = 200; // floor on the per-body budget below (see arcSampleBudget()) -- comfortably above what a fast, low-loop-count body (Mercury/Venus/Mars, all well under 100 today) already needs on its own, so the budget never *truncates* a body that wasn't hitting any cap to begin with (doubled alongside ARC_MAX_SAMPLES/ARC_SAMPLES_PER_LOOP, so the whole budget curve scales uniformly)
-const ARC_SAMPLES_PER_LOOP = 48; // target sample density per implied "lap" of CENTER around the Sun within a body's own window -- see arcSampleBudget() (doubled alongside ARC_MIN_SAMPLES/ARC_MAX_SAMPLES)
+const ARC_MAX_SAMPLES = 8000; // base ceiling on points per body per arc -- calibrated (measured live, see README) for a CENTER whose own period is around Earth's; arcSampleBudget() scales this up for a *faster* CENTER, see its own doc comment (doubled again -- 2000 -> 4000 -> 8000 -- for a visibly finer trajectory-mode curve)
+const ARC_MAX_SAMPLES_ABSOLUTE_CEILING = 40000; // hard ceiling regardless of how fast CENTER is -- bounds worst-case render/prefetch/compute cost even when CENTER is a satellite (a period of hours/days, not years) -- see arcSampleBudget() (doubled alongside ARC_MAX_SAMPLES, so the scaled ceiling's own headroom above the base stays the same multiple)
+const ARC_MIN_SAMPLES = 400; // floor on the per-body budget below (see arcSampleBudget()) -- comfortably above what a fast, low-loop-count body (Mercury/Venus/Mars, all well under 100 today) already needs on its own, so the budget never *truncates* a body that wasn't hitting any cap to begin with (doubled alongside ARC_MAX_SAMPLES/ARC_SAMPLES_PER_LOOP, so the whole budget curve scales uniformly)
+const ARC_SAMPLES_PER_LOOP = 96; // target sample density per implied "lap" of CENTER around the Sun within a body's own window -- see arcSampleBudget() (doubled alongside ARC_MIN_SAMPLES/ARC_MAX_SAMPLES)
 const TRAJECTORY_STEP_EPSILON_KM = 0.01 * AU_KM; // epsilon: the max positional error per step the dt formula solves for, in the same spatial units as position
 const TRAJECTORY_FALLBACK_HALF_SPAN_DAYS = 30; // used only if a period computation genuinely fails (e.g. an unbound osculating state, or missing prefetch coverage) or (Synodic only) a body's period happens to exactly match CENTER's (infinite synodic period)
 

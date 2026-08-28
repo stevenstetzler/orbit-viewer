@@ -355,14 +355,15 @@ budget on a body that implies few loops while starving one that implies
 many: measured live, centered on Earth in Sidereal mode, Jupiter's
 window implies ~12 loops, Neptune's ~164 -- a shared 400-point cap gave
 Jupiter a smooth ~34 points/loop but Neptune only ~2.4, badly aliased.
-Each body's own budget targets ~48 points/loop (`ceil(loops * 48)`,
-`ARC_SAMPLES_PER_LOOP` -- doubled from an original 24, for a visibly
-finer curve, along with `ARC_MIN_SAMPLES`/`ARC_MAX_SAMPLES` so the
-whole budget curve scales uniformly), clamped to `[200, effective max]`
-(the floor keeps a handful of fast, low-loop bodies -- Mercury, Venus,
-Mars -- comfortably resolved regardless of loop count).
+Each body's own budget targets ~96 points/loop (`ceil(loops * 96)`,
+`ARC_SAMPLES_PER_LOOP` -- doubled twice from an original 24 (24 -> 48
+-> 96) for a visibly finer curve, along with `ARC_MIN_SAMPLES`/
+`ARC_MAX_SAMPLES` so the whole budget curve scales uniformly), clamped
+to `[400, effective max]` (the floor keeps a handful of fast, low-loop
+bodies -- Mercury, Venus, Mars -- comfortably resolved regardless of
+loop count).
 
-That ceiling isn't a flat 4000 any more, either. It, and the per-loop
+That ceiling isn't a flat 8000 any more, either. It, and the per-loop
 target above, were both tuned and verified live centered specifically
 on **Earth** -- and since "implied loops" is `windowSpan /
 centerPeriod`, the exact same real window implies far more loops (and
@@ -370,33 +371,39 @@ needs far more samples for the same per-loop density) centered on a
 body *faster* than Earth. Confirmed live, exactly this way: centered
 on **Mercury** (period ~0.24 of Earth's), Pluto's own ~248-year
 Sidereal window implies ~1033 Mercury-laps -- ~4.15x more than the
-~248 laps the same window implies centered on Earth -- so the flat
+~248 laps the same window implies centered on Earth -- so a flat
 ceiling that comfortably fit Earth-centered Neptune left
 Mercury-centered Uranus, Neptune, and Pluto visibly under-sampled
-(their own implied retrograde loops badly aliased), even after
-doubling every constant here uniformly. The ceiling now scales by
-`earthPeriod / centerPeriod` (never below the base 4000, since a body
+(their own implied retrograde loops badly aliased), no matter how much
+every constant here was doubled uniformly. The ceiling now scales by
+`earthPeriod / centerPeriod` (never below the base 8000, since a body
 *slower* than Earth already implies *fewer* loops, not more), capped
-at an absolute `ARC_MAX_SAMPLES_ABSOLUTE_CEILING` of 20000 regardless
+at an absolute `ARC_MAX_SAMPLES_ABSOLUTE_CEILING` of 40000 regardless
 (a satellite as CENTER has a period of hours to days, not years --
 without a hard ceiling the ratio alone could demand an impractical
 sample count, and per-sample cost is real -- see below). Centered on
 Earth (ratio exactly 1x, unaffected by this) in Sidereal mode, Jupiter
-(~12 loops) settles around 564 points, well under the ceiling; Saturn
-around 1400; Uranus and Neptune both hit the (here unscaled) 4000-point
-ceiling. Centered on Mercury instead (ratio ~4.15x, effective ceiling
-~16600), the same Uranus reaches its own full ~48/loop target; Neptune
-and Pluto still fall short of full density (~24 and ~16 points/loop
-respectively -- their own implied loop counts, ~684 and ~1033, still
-exceed even the scaled ceiling) but land at roughly *4x* the points/loop
-a flat ceiling gave them, a real, accepted trade-off against
-render/compute cost, not full resolution at any cost.
+(~12 loops) settles around 1140 points, well under the ceiling; Saturn
+around 2830; Uranus, Neptune, and Pluto all hit the (here unscaled)
+8000-point ceiling (~95, ~49, and ~32 points/loop respectively -- still
+comfortably above the old 24-per-loop starting point even before this
+whole scheme existed). Centered on Mercury instead (ratio ~4.15x,
+effective ceiling ~33200), the same Uranus reaches essentially its full
+~96/loop target; Neptune and Pluto still fall short of full density
+(~49 and ~32 points/loop respectively -- their own implied loop counts,
+~684 and ~1029, still exceed even the scaled ceiling) but land at
+roughly *4x* the points/loop a flat, unscaled ceiling would have given
+them, a real, accepted trade-off against render/compute cost, not full
+resolution at any cost.
 
 The added compute cost is real: measured live at the original
 (undoubled, unscaled) tuning, a full trajectory-mode re-render centered
 on Earth (previously the single most expensive case, since Earth's own
 fast motion drives every other body's implied loop count up) took
-~200ms of synchronous work -- noticeable on a slider drag, not a hang.
+~200ms of synchronous work -- noticeable on a slider drag, not a hang;
+at the current, twice-doubled tuning, expect that figure (and the
+Mercury-centered, ceiling-scaled cost) to grow roughly in step with the
+sample counts above.
 Centered on Mercury, with the ceiling now scaled up ~4.15x, that cost
 is real too -- measured live, ~9200 real (curvature-sampled) points for
 one single body/window pair (Jupiter relative to Mercury, an 80-year
@@ -792,9 +799,28 @@ reason the kernel catalogue above does: neither `ssd-api.jpl.nasa.gov`
 cross-origin at all. The proxy makes both calls on the page's behalf
 (`/horizons/resolve?sstr=...`, `/horizons/spk?spkid=...&start=...&stop=...`)
 and relays the results back same-origin (SBDB's JSON as-is, Horizons'
-decoded SPK bytes) -- no caching, unlike the kernel proxy, since each
-request is a distinct object/time-range combination rather than a
-range within one large fixed file.
+decoded SPK bytes).
+
+`/horizons/spk` is cached, one whole SPK per `spkid`, in
+`kernels/cache/horizons/` (`<spkid>.bsp` plus a `<spkid>.json` sidecar
+recording the `[start, stop]` date range that SPK actually covers --
+Horizons' own response carries no such metadata, so this is the only
+record of it). Unlike the kernel proxy's own byte-range cache -- a real
+small-body/comet SPK is small enough (tens to hundreds of KB, not
+gigabytes) that caching the whole thing per request is simpler and
+just as effective as ranging into it would be. Refetching the *same*
+object over a *different* date range doesn't necessarily mean a fresh
+Horizons request: if the newly-requested range falls entirely inside
+what's already cached, the cached bytes are served directly, no
+network call at all; otherwise a fresh SPK is fetched over the
+*union* of the cached and requested ranges (not just the missing part
+-- Horizons has no way to splice two separate SPKs together, and a
+wider request costs Horizons the same as a narrow one), and the cache
+is overwritten with it, so the *next* request within that wider range
+is a cache hit too. `start`/`stop` are always plain `YYYY-MM-DD`
+strings (the date inputs' own `<input type="date">` guarantees this),
+so the cache compares/combines them as strings directly -- no date
+parsing needed anywhere in it.
 
 ## Command+Click: precise single-body mode
 
