@@ -452,7 +452,13 @@ async function handleStatic(req, res, url) {
   try {
     const stat = await fs.stat(filePath);
     if (stat.isDirectory()) {
-      res.writeHead(302, { location: `${url.pathname.replace(/\/$/, '')}/` }).end();
+      // A relative Location (just the last path segment) is resolved by
+      // the browser against the *original request URI*, not the site
+      // root -- unlike an absolute one, this survives a reverse proxy
+      // that mounts this server under a path prefix (e.g. /spiceJS/)
+      // and strips that prefix before forwarding, with no awareness of
+      // the prefix needed here at all.
+      res.writeHead(302, { location: `${path.basename(url.pathname)}/` }).end();
       return;
     }
     const body = await fs.readFile(filePath);
@@ -482,8 +488,11 @@ const server = http.createServer(async (req, res) => {
       await handleCloseApproachData(req, res);
     } else if (matchBodyRoute(url.pathname) && !url.pathname.endsWith('/')) {
       // No trailing slash (e.g. /earth, /earth/trajectory) -- redirect to
-      // add one, same as handleStatic() does for a real directory.
-      res.writeHead(302, { location: `${url.pathname}/` }).end();
+      // add one, same as handleStatic() does for a real directory. A
+      // relative Location (just the last path segment) survives a
+      // prefix-stripping reverse proxy the same way that one does --
+      // see its own comment for why.
+      res.writeHead(302, { location: `${path.basename(url.pathname)}/` }).end();
     } else if (matchBodyRoute(url.pathname) === 'body') {
       await serveHtmlFile(res, BODY_TEMPLATE_PATH);
     } else if (matchBodyRoute(url.pathname) === 'body-trajectory') {

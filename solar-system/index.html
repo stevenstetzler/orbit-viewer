@@ -71,7 +71,7 @@
     <p class="sub">DE440 planetary ephemeris, 1900&ndash;2100, viewed from the Sun.
       Position: Linear &middot; Radius: Sqrt (the default scale) &middot; orbits are the exact
       analytic ellipse implied by each body's real state.
-      See <a href="/examples/browser-demo/">the full explorer</a> for every other view/scale/mode.</p>
+      See <a href="../examples/browser-demo/">the full explorer</a> for every other view/scale/mode.</p>
 
     <div id="status">Loading...</div>
 
@@ -610,14 +610,14 @@ async function loadFromProxy(entry) {
     return new Uint8Array(await response.arrayBuffer());
   };
   log(`Opening ${entry.file} (${entry.size}) through the local proxy...`);
-  const remote = await openRemoteSpk(entry.url, { fileLength: entry.bytes, resolveRange });
+  const remote = await openRemoteSpk(new URL(`../kernels/remote/${entry.file}`, import.meta.url).href, { fileLength: entry.bytes, resolveRange });
   await beginSession(remote, { sourceLabel: entry.file, sourceSizeBytes: entry.bytes, counters });
 }
 
 async function detectKernelProxy() {
   let catalogue;
   try {
-    const response = await fetch('/kernels/remote/', { headers: { accept: 'application/json' } });
+    const response = await fetch('../kernels/remote/', { headers: { accept: 'application/json' } });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     catalogue = await response.json();
   } catch (err) {

@@ -104,17 +104,17 @@
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { load, str2et, et2utcCalendar, openRemoteSpk, spkez, bodyName } from '/src/browser.js';
-import { openRemoteFile } from '/src/lazy/remoteFile.js';
+import { load, str2et, et2utcCalendar, openRemoteSpk, spkez, bodyName } from '../../src/browser.js';
+import { openRemoteFile } from '../../src/lazy/remoteFile.js';
 
-import { DAY, INERTIAL_FRAME } from '/examples/shared/constants.js';
-import { bodyBySlug, SATELLITE_KERNEL_FOR_BODY } from '/examples/shared/bodies.js';
-import { buildCurrentScale } from '/examples/shared/scale.js';
-import { computeOrbitState, periodFromEllipse, customBodySampleCount } from '/examples/shared/orbitMath.js';
+import { DAY, INERTIAL_FRAME } from '../../examples/shared/constants.js';
+import { bodyBySlug, SATELLITE_KERNEL_FOR_BODY } from '../../examples/shared/bodies.js';
+import { buildCurrentScale } from '../../examples/shared/scale.js';
+import { computeOrbitState, periodFromEllipse, customBodySampleCount } from '../../examples/shared/orbitMath.js';
 import {
   loadLeapseconds, loadPlanetaryConstants, loadGravitationalParameters,
   discoverSpkBodies, ensureBodyCoverage, prefetchBodyProbe, prefetchCustomBody, bodyHasCoverageAt, resolveSatellitesFor,
-} from '/examples/shared/kernelSession.js';
+} from '../../examples/shared/kernelSession.js';
 
 const statusEl = document.getElementById('status');
 const timeSlider = document.getElementById('timeSlider');
@@ -664,14 +664,14 @@ async function loadFromProxy(entry, proxyCatalogue) {
     return new Uint8Array(await response.arrayBuffer());
   };
   log(`Opening ${entry.file} (${entry.size}) through the local proxy...`);
-  const remote = await openRemoteSpk(entry.url, { fileLength: entry.bytes, resolveRange });
+  const remote = await openRemoteSpk(new URL(`../../kernels/remote/${entry.file}`, import.meta.url).href, { fileLength: entry.bytes, resolveRange });
   await beginSession(remote, proxyCatalogue, { sourceLabel: entry.file, sourceSizeBytes: entry.bytes, counters });
 }
 
 async function detectKernelProxy() {
   let catalogue;
   try {
-    const response = await fetch('/kernels/remote/', { headers: { accept: 'application/json' } });
+    const response = await fetch('../../kernels/remote/', { headers: { accept: 'application/json' } });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     catalogue = await response.json();
   } catch (err) {

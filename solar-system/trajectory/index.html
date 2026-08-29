@@ -65,8 +65,8 @@
     <p class="sub">DE440 planetary ephemeris, 1900&ndash;2100, viewed from the Sun.
       Position: Linear &middot; Radius: Sqrt &middot; orbit lines are each body's own real
       sampled trajectory (not an idealized ellipse) over one lap of its own period.
-      See <a href="/solar-system/">the ellipse view</a> or
-      <a href="/examples/browser-demo/">the full explorer</a> for other views.</p>
+      See <a href="../../solar-system/">the ellipse view</a> or
+      <a href="../../examples/browser-demo/">the full explorer</a> for other views.</p>
 
     <div id="status">Loading...</div>
 
@@ -619,14 +619,14 @@ async function loadFromProxy(entry) {
     return new Uint8Array(await response.arrayBuffer());
   };
   log(`Opening ${entry.file} (${entry.size}) through the local proxy...`);
-  const remote = await openRemoteSpk(entry.url, { fileLength: entry.bytes, resolveRange });
+  const remote = await openRemoteSpk(new URL(`../../kernels/remote/${entry.file}`, import.meta.url).href, { fileLength: entry.bytes, resolveRange });
   await beginSession(remote, { sourceLabel: entry.file, sourceSizeBytes: entry.bytes, counters });
 }
 
 async function detectKernelProxy() {
   let catalogue;
   try {
-    const response = await fetch('/kernels/remote/', { headers: { accept: 'application/json' } });
+    const response = await fetch('../../kernels/remote/', { headers: { accept: 'application/json' } });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     catalogue = await response.json();
   } catch (err) {

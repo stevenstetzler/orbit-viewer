@@ -32,6 +32,18 @@ import { parseFileRecord, parseDaf, readWords, FILE_RECORD_BYTES } from '../../s
 import { SSB, INERTIAL_FRAME } from './constants.js';
 import { satellitesFromManifest } from './bodies.js';
 
+// The kernel proxy's own catalogue (scripts/serve-example.mjs's
+// `/kernels/remote/` index) hands back each entry's `url` as a
+// root-absolute path (`/kernels/remote/<file>`) -- fine for a plain,
+// unprefixed deployment, but wrong under a reverse-proxy mount prefix
+// (e.g. `/spiceJS/`), which resolves any root-absolute reference
+// against the domain root, not the mount point. openSatelliteRemote()
+// below ignores that field and rebuilds the same URL itself, anchored
+// to this module's own fixed location via `import.meta.url` (correct
+// regardless of which page, at whatever depth, imported this module --
+// see horizonsClient.js's own doc comment for the same reasoning).
+const SITE_ROOT = new URL('../../', import.meta.url); // examples/shared/ -> site root
+
 export async function loadLeapseconds(log = () => {}) {
   const url = new URL('../../kernels/naif0012.tls', import.meta.url).href;
   await load(url);
@@ -203,7 +215,7 @@ export async function prefetchCustomBody(remoteFile, pool, target, etStart, etEn
  */
 export async function openSatelliteRemote(entry, pool, openRemoteFileFn, log = () => {}) {
   log(`  Fetching ${entry.file} (${entry.size}) through the local proxy...`);
-  const remoteFile = await openRemoteFileFn(entry.url);
+  const remoteFile = await openRemoteFileFn(new URL(`kernels/remote/${entry.file}`, SITE_ROOT).href);
   let discovered = new Map();
   try {
     discovered = await discoverSpkBodies(remoteFile);

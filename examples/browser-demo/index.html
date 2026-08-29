@@ -2083,7 +2083,7 @@ function clearHorizonsCandidates() {
  * are all normal returns for the caller to branch on.
  */
 async function resolveHorizonsObject(sstr) {
-  const response = await fetch(`/horizons/resolve?${new URLSearchParams({ sstr })}`);
+  const response = await fetch(`../../horizons/resolve?${new URLSearchParams({ sstr })}`);
   const body = await response.json().catch(() => null);
   if (!response.ok) throw new Error(body?.error || `HTTP ${response.status} ${response.statusText}`);
   return body;
@@ -2102,7 +2102,7 @@ async function resolveHorizonsObject(sstr) {
 async function addHorizonsBody({ spkid, label, start, stop }) {
   horizonsStatusEl.textContent = `Fetching ${label} (spkid ${spkid}) from Horizons (${start} to ${stop})...`;
   log(`Fetching ${label} (spkid ${spkid}) from JPL Horizons (${start} to ${stop})...`);
-  const url = `/horizons/spk?${new URLSearchParams({ spkid, start, stop })}`;
+  const url = `../../horizons/spk?${new URLSearchParams({ spkid, start, stop })}`;
   const response = await fetch(url);
   if (!response.ok) {
     const body = await response.json().catch(() => null);
@@ -3168,7 +3168,7 @@ async function openSatelliteKernel(kernelId) {
   if (demo.satelliteRemotes.has(kernelId)) return demo.satelliteRemotes.get(kernelId);
   const entry = proxyCatalogue.get(kernelId);
   log(`  Fetching ${entry.file} (${entry.size}) through the local proxy -- needed once, then cached for this session...`);
-  const remoteFile = await openRemoteFile(entry.url);
+  const remoteFile = await openRemoteFile(new URL(`../../kernels/remote/${entry.file}`, import.meta.url).href);
 
   try {
     const kernelBodies = await discoverSpkBodies(remoteFile);
@@ -3790,7 +3790,7 @@ async function loadFromProxy(entry) {
     return new Uint8Array(await response.arrayBuffer());
   };
   log(`Opening ${entry.file} (${entry.size}) through the local proxy -- no download needed...`);
-  const remote = await openRemoteSpk(entry.url, { fileLength: entry.bytes, resolveRange });
+  const remote = await openRemoteSpk(new URL(`../../kernels/remote/${entry.file}`, import.meta.url).href, { fileLength: entry.bytes, resolveRange });
   await beginSession(remote, { sourceLabel: entry.file, sourceSizeBytes: entry.bytes, counters });
 }
 
@@ -3798,7 +3798,7 @@ async function loadFromProxy(entry) {
 async function detectKernelProxy() {
   let catalogue;
   try {
-    const response = await fetch('/kernels/remote/', { headers: { accept: 'application/json' } });
+    const response = await fetch('../../kernels/remote/', { headers: { accept: 'application/json' } });
     if (!response.ok) return;
     catalogue = await response.json();
   } catch {

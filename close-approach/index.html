@@ -494,7 +494,7 @@ async function loadCloseApproachTable() {
   log('Fetching close-approach data from JPL...');
   let body;
   try {
-    const response = await fetch('/close-approach/data');
+    const response = await fetch('data');
     if (!response.ok) throw new Error(`HTTP ${response.status} ${response.statusText}`);
     body = await response.json();
   } catch (err) {
@@ -709,14 +709,14 @@ async function loadFromProxy(entry, proxyCatalogue) {
     return new Uint8Array(await response.arrayBuffer());
   };
   log(`Opening ${entry.file} (${entry.size}) through the local proxy...`);
-  const remote = await openRemoteSpk(entry.url, { fileLength: entry.bytes, resolveRange });
+  const remote = await openRemoteSpk(new URL(`../kernels/remote/${entry.file}`, import.meta.url).href, { fileLength: entry.bytes, resolveRange });
   await beginSession(remote, proxyCatalogue, { sourceLabel: entry.file, sourceSizeBytes: entry.bytes, counters });
 }
 
 async function detectKernelProxy() {
   let catalogue;
   try {
-    const response = await fetch('/kernels/remote/', { headers: { accept: 'application/json' } });
+    const response = await fetch('../kernels/remote/', { headers: { accept: 'application/json' } });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     catalogue = await response.json();
   } catch (err) {
