@@ -115,8 +115,8 @@
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { load, str2et, et2utcCalendar, openRemoteSpk, spkez } from '../src/browser.js';
-import { openRemoteFile } from '../src/lazy/remoteFile.js';
+import { load, str2et, et2utcCalendar, openRemoteSpk, spkez } from '../node_modules/spicejs/src/browser.js';
+import { openRemoteFile } from '../node_modules/spicejs/src/lazy/remoteFile.js';
 
 import { DAY, INERTIAL_FRAME, SUN_TARGET, AU_KM } from '../examples/shared/constants.js';
 import { bodyBySlug, SATELLITE_KERNEL_FOR_BODY } from '../examples/shared/bodies.js';

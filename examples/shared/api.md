@@ -3,7 +3,7 @@
 Plain ES modules, under `examples/shared/`, that hold the non-UI logic
 behind the curated demo pages -- `/solar-system/`, `/solar-system/trajectory/`,
 `/<body>/`, `/<body>/trajectory/`, `/close-approach/` (see the root
-[README](../../README.md#running-the-example-website--visualization-tool)
+[README](../../README.md#install-and-run)
 for what each page shows). Every function here is pure/parametrized: none
 of them hold onto a page's own session state, read the DOM, or touch
 three.js -- a page imports what it needs, keeps its own `demo` object
@@ -329,7 +329,7 @@ already does. Every entered epoch is turned into ET via `str2et()` (a
 `" TDB"`/`" TDT"` label in the text itself always wins over the TAI
 checkbox, exactly like `str2et()`'s own label handling); a bare TAI
 value (no label, checkbox checked) goes through `taiToEt()` instead,
-which needs no leapseconds kernel at all (see `src/time/deltet.js`).
+which needs no leapseconds kernel at all (see spiceJS's `src/time/deltet.js`).
 Call the returned `refresh()` once per `updateSceneForOffset()` tick
 (right where it already updates `timeLabel`) so these controls always
 show whatever last moved the reference epoch, from any source -- the
@@ -382,8 +382,8 @@ forever.
 **An unbound orbit** (`state.invA <= 0` -- only possible for a
 custom/Horizons body; no built-in body is ever unbound relative to its
 own primary): no closed curve exists, so propagate the same state
-analytically instead, via `prop2b()` (`src/prop2b.js`, exported from
-`src/browser.js` -- a universal-variable two-body propagator that
+analytically instead, via `prop2b()` (spiceJS's `src/prop2b.js`, exported
+from `src/browser.js` -- a universal-variable two-body propagator that
 handles parabolic/hyperbolic orbits the same way it handles elliptical
 ones):
 

@@ -14,8 +14,8 @@
  * If fetches hang or 403 in your environment, see perf/README.md's note
  * about Node's built-in fetch() and proxies (NODE_USE_ENV_PROXY=1).
  */
-import { openRemoteFile } from '../src/lazy/remoteFile.js';
-import { parseFileRecord, parseDaf, readWords, FILE_RECORD_BYTES } from '../src/daf.js';
+import { openRemoteFile } from '../node_modules/spicejs/src/lazy/remoteFile.js';
+import { parseFileRecord, parseDaf, readWords, FILE_RECORD_BYTES } from '../node_modules/spicejs/src/daf.js';
 import { KERNELS, SPK_IDS, resolveKernel, formatBytes, etToApproxYear } from '../kernels/sources.mjs';
 
 const WORDS_PER_RECORD = FILE_RECORD_BYTES / 8;

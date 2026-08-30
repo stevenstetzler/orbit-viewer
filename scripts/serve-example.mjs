@@ -12,8 +12,12 @@
  * What it serves:
  *
  * 1. The repo, statically, from `/` -- so the demo page at
- *    /examples/browser-demo/ can import ../../src/browser.js and fetch
- *    ../../kernels/naif0012.tls as ordinary same-origin URLs. This also
+ *    /examples/browser-demo/ can import
+ *    ../../node_modules/spicejs/src/browser.js and fetch
+ *    ../../kernels/naif0012.tls as ordinary same-origin URLs (`spicejs`
+ *    is a git dependency -- see package.json -- so its `src/` tree
+ *    lands in node_modules and is servable the same way any other file
+ *    in this repo is). This also
  *    covers /solar-system/ and /solar-system/trajectory/ (real, literal
  *    files on disk) with no further routing needed -- but NOT /<body>/
  *    or /<body>/trajectory/, which have no literal file of their own
@@ -509,7 +513,7 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(opts.port, () => {
   const total = SPK_IDS.reduce((n, id) => n + KERNELS[id].bytes, 0);
-  console.log(`spiceJS example server on http://localhost:${opts.port}`);
+  console.log(`orbit-viewer example server on http://localhost:${opts.port}`);
   console.log(`  demo:        http://localhost:${opts.port}/examples/browser-demo/`);
   console.log(`  curated:     http://localhost:${opts.port}/solar-system/ , /solar-system/trajectory/ , /<body>/ , /<body>/trajectory/ , /close-approach/`);
   console.log(`  kernel list: http://localhost:${opts.port}${PROXY_PREFIX}`);

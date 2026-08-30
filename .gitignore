@@ -1,0 +1,6 @@
+node_modules/
+
+# Kernels fetched from NAIF at runtime: whole-file downloads
+# (npm run download-spk) and the sparse range-cache + block bitmaps
+# the example server fills on demand (npm run serve-example).
+kernels/cache/

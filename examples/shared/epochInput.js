@@ -27,7 +27,7 @@
  * kernelStopEt/et0 computation already relies on this exact same
  * default-pool convention, so this module just matches it.
  */
-import { str2et, parseTimeString, taiToEt, et2utc, et2tai } from '../../src/browser.js';
+import { str2et, parseTimeString, taiToEt, et2utc, et2tai } from '../../node_modules/spicejs/src/browser.js';
 
 /**
  * @param {HTMLElement} container - controls are appended here

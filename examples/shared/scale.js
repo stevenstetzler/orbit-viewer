@@ -6,7 +6,7 @@
  * of them read a module-level session object -- so any page can keep
  * its own local session state and just pass in whatever's needed.
  */
-import { bodyValues } from '../../src/browser.js';
+import { bodyValues } from '../../node_modules/spicejs/src/browser.js';
 import { POSITION_LINEAR_SCALE, POSITION_SQRT_SCALE, RADIUS_SCENE_SCALE, PRECISE_BODY_RADIUS_UNITS } from './constants.js';
 
 /**

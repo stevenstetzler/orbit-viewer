@@ -6,7 +6,7 @@
  * a plain `[x, y, z]` array, so this module stays usable from a Node
  * script (tests, benchmarks) as well as any page's own three.js scene.
  */
-import { spkez, bodyValues } from '../../src/browser.js';
+import { spkez, bodyValues } from '../../node_modules/spicejs/src/browser.js';
 import { SUN_TARGET, SSB, INERTIAL_FRAME, DAY, ARC_MAX_SAMPLES, ARC_MAX_SAMPLES_ABSOLUTE_CEILING, ARC_MIN_SAMPLES, ARC_SAMPLES_PER_LOOP, TRAJECTORY_STEP_EPSILON_KM, TRAJECTORY_FALLBACK_HALF_SPAN_DAYS, CUSTOM_TRAJECTORY_RESOLUTION_SECONDS, CUSTOM_TRAJECTORY_MAX_SAMPLES } from './constants.js';
 
 const vSub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];

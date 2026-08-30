@@ -1,0 +1,31 @@
+{
+  "name": "orbit-viewer",
+  "version": "0.1.0",
+  "description": "A solar system / orbit viewer built on the DE440 planetary ephemeris and spiceJS, for reading and using real NAIF SPK/PCK kernels in the browser.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "serve-example": "node scripts/serve-example.mjs",
+    "download-spk": "node scripts/download-spk.mjs",
+    "inspect-spk": "node scripts/inspect-spk.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "spice",
+    "naif",
+    "orbit",
+    "ephemeris",
+    "solar-system",
+    "three.js"
+  ],
+  "license": "GPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stevenstetzler/orbit-viewer.git"
+  },
+  "dependencies": {
+    "spicejs": "github:stevenstetzler/spiceJS#8c8740284e2483d15812ebe87eb6fb0b4f70de40"
+  }
+}

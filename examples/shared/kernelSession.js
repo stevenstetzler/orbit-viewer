@@ -26,9 +26,9 @@
  *     (a custom/Horizons body), which never needs ensureBodyCoverage()
  *     again.
  */
-import { load, spkez } from '../../src/browser.js';
-import { prefetchSpkQuery, prefetchSpkBodySegment } from '../../src/lazy/prefetch.js';
-import { parseFileRecord, parseDaf, readWords, FILE_RECORD_BYTES } from '../../src/daf.js';
+import { load, spkez } from '../../node_modules/spicejs/src/browser.js';
+import { prefetchSpkQuery, prefetchSpkBodySegment } from '../../node_modules/spicejs/src/lazy/prefetch.js';
+import { parseFileRecord, parseDaf, readWords, FILE_RECORD_BYTES } from '../../node_modules/spicejs/src/daf.js';
 import { SSB, INERTIAL_FRAME } from './constants.js';
 import { satellitesFromManifest } from './bodies.js';
 

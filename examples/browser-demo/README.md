@@ -1,6 +1,6 @@
 # Browser demo: DE440 in three.js, loaded lazily
 
-A real, live demo of `openRemoteSpk()` (see `docs/lazy-loading.md`)
+A real, live demo of `openRemoteSpk()` (see spiceJS's `docs/lazy-loading.md`)
 running in an actual browser: opens showing the live Solar System
 already plotted (`de440s` auto-loaded through the local kernel proxy
 the moment it's detected -- see "Running it" below), or pick a real
@@ -67,7 +67,7 @@ below). `de440.bsp` (~114 MB, covers roughly 1550-2650, vs. de440s's
 1849-2150) works identically -- the whole point of `openRemoteSpk()`
 is that the file's total size barely matters, since only a small
 fraction of it around *now* is ever actually read.
-`crossval/dss17.bsp` (a tiny 7 KB kernel committed to this repo) also
+`kernels/dss17.bsp` (a tiny 7 KB kernel committed to this repo) also
 loads, but it only has ground-station segments, not planetary ones, so
 nothing will plot -- use it only to sanity-check that the page loads
 without errors.
@@ -82,8 +82,8 @@ without errors.
 3. Opens the picked file with `openRemoteSpk(file.name, { fileLength:
    file.size, resolveRange })`, where `resolveRange` is just
    `file.slice(start, end).arrayBuffer()` -- the same lazy-fetch
-   machinery `docs/lazy-loading.md` describes for a real network URL,
-   here reading from local disk instead of over HTTP.
+   machinery spiceJS's `docs/lazy-loading.md` describes for a real
+   network URL, here reading from local disk instead of over HTTP.
 4. For each body, calls `prefetch({ target, observer: 0, etStart: et0,
    etEnd: et0 })` -- a minimal probe at the reference epoch, just
    enough to read one state. Evaluates ordinary `spkez()` once at the
@@ -95,7 +95,7 @@ without errors.
    position.
 5. Logs how many range reads it took and how many total bytes were
    actually touched, out of the file's real size -- so you can see the
-   lazy-loading savings live, not just in `perf/report.md`. Scrubbing
+   lazy-loading savings live, not just in spiceJS's `perf/README.md`. Scrubbing
    the reference epoch re-prefetches incrementally, per body, only as
    far as you've actually scrubbed -- already-fetched bytes are never
    re-fetched.
@@ -223,7 +223,7 @@ closed ellipse to draw at all, so `computeOrbitState()` (the shared
 function underlying Ellipse mode -- see below) never throws on it the
 way an earlier version did; instead the arc becomes an **open
 polyline**, sampled via `prop2b()` (NAIF's own universal-variables
-two-body propagator, exported from `src/prop2b.js` -- handles
+two-body propagator, exported from spiceJS's `src/prop2b.js` -- handles
 elliptical, parabolic, and hyperbolic orbits uniformly, so no separate
 conic-specific geometry is needed) uniformly across the body's own
 real, naturally-bounded SPK coverage interval, at a sample count sized
@@ -451,7 +451,7 @@ Sun (10), Mercury (199), Venus (299), Earth (399), Mars (4), Jupiter
 (5), Saturn (6), Uranus (7), Neptune (8), Pluto (9). Mercury/Venus use
 their own body IDs (DE440 carries dedicated segments for them); the
 outer planets stay barycenter-based for *position* (their own offset
-from the barycenter isn't separately modeled -- see `perf/README.md`),
+from the barycenter isn't separately modeled -- see spiceJS's `perf/README.md`),
 though see "View controls" above for how their *orientation* (Frame +
 Rotating) still uses the real planet. The Moon isn't in this default
 list even though DE440 carries it -- at the whole-system AU scale its marker position
@@ -496,7 +496,7 @@ see "Orbit-arc shape" above).
 - **Frame**: which body's `IAU_<BODY>` orientation to use *if*
   Rotating is checked (via `spkez()`'s `ref` parameter, using the
   classic text-PCK orientation formula and `kernels/pck00011.tpc`'s
-  real constants -- see `src/bodyOrientation.js`). Independent of
+  real constants -- see spiceJS's `src/bodyOrientation.js`). Independent of
   Center -- e.g. Center=Earth with Frame=`IAU_JUPITER` is a perfectly
   ordinary "positions relative to Earth, oriented as Jupiter rotates"
   view, since `spkez()`'s frame rotation doesn't require the frame's
@@ -751,8 +751,8 @@ without leaving the page: type an identifier, pick a start/stop date
 feeds directly into "Adding a custom kernel" above -- same structural
 scan, same "Add bodies" popup, same everything -- since a Horizons SPK
 *is* an ordinary `.bsp` file (segment type 21, "extended difference
-lines" -- see [`README.md`](../../README.md)'s segment-type list),
-Horizons just base64-encodes it in its JSON response.
+lines" -- see spiceJS's [README](https://github.com/stevenstetzler/spiceJS#readme)'s
+segment-type list), Horizons just base64-encodes it in its JSON response.
 
 **Two steps, both against real JPL APIs** (see `scripts/horizonsSpk.mjs`
 for the exact request shapes and the quirks each one has):

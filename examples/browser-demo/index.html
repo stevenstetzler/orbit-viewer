@@ -312,7 +312,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import {
   load, str2et, et2utc, et2tai, et2utcCalendar, parseTimeString, taiToEt,
   openRemoteSpk, spkez, bodyValues, kclear, bodyName, prop2b,
-} from '../../src/browser.js';
+} from '../../node_modules/spicejs/src/browser.js';
 import { KERNELS as KERNEL_MANIFEST } from '../../kernels/sources.mjs';
 // Lower-level lazy-loading primitives, used only by the "Add a custom
 // kernel" flow below (discoverSpkBodies()/loadCustomKernel()) --
@@ -322,9 +322,9 @@ import { KERNELS as KERNEL_MANIFEST } from '../../kernels/sources.mjs';
 // exactly one pool at a time -- see src/spk.js). Importing these
 // directly instead lets a custom kernel's segments be registered into
 // demo.remote.pool itself -- see loadCustomKernel()'s own comment.
-import { openRemoteFile } from '../../src/lazy/remoteFile.js';
-import { prefetchSpkQuery, prefetchSpkBodySegment } from '../../src/lazy/prefetch.js';
-import { parseFileRecord, parseDaf, readWords, FILE_RECORD_BYTES } from '../../src/daf.js';
+import { openRemoteFile } from '../../node_modules/spicejs/src/lazy/remoteFile.js';
+import { prefetchSpkQuery, prefetchSpkBodySegment } from '../../node_modules/spicejs/src/lazy/prefetch.js';
+import { parseFileRecord, parseDaf, readWords, FILE_RECORD_BYTES } from '../../node_modules/spicejs/src/daf.js';
 
 const statusEl = document.getElementById('status');
 const fileInput = document.getElementById('fileInput');
