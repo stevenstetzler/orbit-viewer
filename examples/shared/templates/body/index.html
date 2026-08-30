@@ -98,11 +98,17 @@ function resetLog(line) {
 
 const DEFAULT_KERNEL_ID = 'de440s';
 
-// Which body this particular URL is for -- e.g. /earth/ -> "earth".
-// The server only ever routes a known slug here (see
+// Which body this particular URL is for -- e.g. /earth/ -> "earth". The
+// server only ever routes a known slug here (see
 // scripts/serve-example.mjs), but fail visibly rather than silently if
-// that ever isn't true.
-const slug = location.pathname.split('/').filter(Boolean)[0];
+// that ever isn't true. Read from the *end* of the path, not the
+// start: this page is always served with exactly one path segment
+// after the site's own root -- /<body>/ -- but that root can itself be
+// anything (bare domain, or a reverse-proxied subpath like
+// /spiceJS/earth/), so the slug is whichever segment is last, not
+// whichever happens to be first.
+const pathSegments = location.pathname.split('/').filter(Boolean);
+const slug = pathSegments[pathSegments.length - 1];
 const bodySpec = bodyBySlug(slug);
 if (!bodySpec) {
   resetLog(`"${slug}" isn't one of this page's known bodies.`);

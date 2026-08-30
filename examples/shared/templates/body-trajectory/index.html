@@ -141,7 +141,12 @@ function resetLog(line) {
 
 const DEFAULT_KERNEL_ID = 'de440s';
 
-const slug = location.pathname.split('/').filter(Boolean)[0];
+// Read from the end of the path, not the start (see the /<body>/
+// template's own comment on this) -- this page is always /<body>/
+// trajectory/, i.e. the body slug is the second-to-last segment,
+// however many segments precede it as the site's own mount root.
+const pathSegments = location.pathname.split('/').filter(Boolean);
+const slug = pathSegments[pathSegments.length - 2];
 const bodySpec = bodyBySlug(slug);
 if (!bodySpec) {
   resetLog(`"${slug}" isn't one of this page's known bodies.`);
