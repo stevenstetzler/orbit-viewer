@@ -112,12 +112,12 @@
   }
 }
 </script>
+<!-- Classic script, not a module: window.spicejs -- see solar-system/index.html's
+     own comment for why (GitHub release assets don't send CORS headers). -->
+<script src="https://github.com/stevenstetzler/spiceJS/releases/download/v0.1.1/spicejs.global.min.js"></script>
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { load, str2et, et2utcCalendar, openRemoteSpk, spkez } from '../node_modules/spicejs/src/browser.js';
-import { openRemoteFile } from '../node_modules/spicejs/src/lazy/remoteFile.js';
-
 import { DAY, INERTIAL_FRAME, SUN_TARGET, AU_KM } from '../examples/shared/constants.js';
 import { bodyBySlug, SATELLITE_KERNEL_FOR_BODY } from '../examples/shared/bodies.js';
 import { buildCurrentScale } from '../examples/shared/scale.js';
@@ -128,6 +128,8 @@ import {
 } from '../examples/shared/kernelSession.js';
 import { resolveHorizonsObject, fetchHorizonsSpk, safeFileFragment } from '../examples/shared/horizonsClient.js';
 import { mountEpochControls } from '../examples/shared/epochInput.js';
+
+const { load, str2et, et2utcCalendar, openRemoteSpk, openRemoteFile, spkez } = window.spicejs;
 
 const bodySpec = bodyBySlug('earth');
 

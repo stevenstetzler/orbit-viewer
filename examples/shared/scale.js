@@ -6,8 +6,11 @@
  * of them read a module-level session object -- so any page can keep
  * its own local session state and just pass in whatever's needed.
  */
-import { bodyValues } from '../../node_modules/spicejs/src/browser.js';
 import { POSITION_LINEAR_SCALE, POSITION_SQRT_SCALE, RADIUS_SCENE_SCALE, PRECISE_BODY_RADIUS_UNITS } from './constants.js';
+
+// spicejs comes from a plain <script src=".../spicejs.global.min.js">
+// tag (window.spicejs) -- see kernelSession.js's own doc comment for why.
+const { bodyValues } = window.spicejs;
 
 /**
  * Applies one *uniform* km-to-scene-unit `factor` to a km position

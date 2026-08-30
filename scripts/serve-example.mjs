@@ -12,12 +12,15 @@
  * What it serves:
  *
  * 1. The repo, statically, from `/` -- so the demo page at
- *    /examples/browser-demo/ can import
- *    ../../node_modules/spicejs/src/browser.js and fetch
- *    ../../kernels/naif0012.tls as ordinary same-origin URLs (`spicejs`
- *    is a git dependency -- see package.json -- so its `src/` tree
- *    lands in node_modules and is servable the same way any other file
- *    in this repo is). This also
+ *    /examples/browser-demo/ can import its own examples/shared/*.js
+ *    modules and fetch ../../kernels/naif0012.tls as ordinary
+ *    same-origin URLs. `spicejs` itself is NOT served from here --
+ *    every page loads it straight from spiceJS's own version-tagged
+ *    GitHub Release via a plain <script src="..."> tag (window.spicejs,
+ *    not an npm/node_modules import -- see modules.md's "Depends on
+ *    spicejs directly" for why: GitHub's release-asset CDN doesn't
+ *    send CORS headers, which an ES-module `import` requires but a
+ *    classic script doesn't). This also
  *    covers /solar-system/ and /solar-system/trajectory/ (real, literal
  *    files on disk) with no further routing needed -- but NOT /<body>/
  *    or /<body>/trajectory/, which have no literal file of their own

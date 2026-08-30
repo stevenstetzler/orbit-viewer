@@ -11,10 +11,12 @@ Two layers, each usable independently of the other:
 2. **[The visualization layer](#2-visualization-layer-threejs)**
    (`examples/`, `solar-system/`, `close-approach/`) -- renders real
    trajectories and orbit ellipses in the browser with `three.js`.
-   Depends on `spicejs` (an npm/git dependency, not part of this repo --
-   see [github.com/stevenstetzler/spiceJS](https://github.com/stevenstetzler/spiceJS))
-   directly, and on layer 1 over HTTP (fetches `/horizons/*`,
-   `/close-approach/data`).
+   Depends on `spicejs` (not part of this repo -- see
+   [github.com/stevenstetzler/spiceJS](https://github.com/stevenstetzler/spiceJS))
+   directly -- every browser page loads it from spiceJS's own
+   version-tagged GitHub Release (`window.spicejs`, not an npm import;
+   see "Depends on `spicejs` directly" below for why) -- and on layer 1
+   over HTTP (fetches `/horizons/*`, `/close-approach/data`).
 
 Layer 2 is the only one that depends on the other -- it calls layer 1
 over plain HTTP (`/horizons/*`, `/close-approach/data`). Layer 1 is a
@@ -24,9 +26,12 @@ bytes Horizons already produced, without parsing them itself.
 This repo used to be one layer of a three-layer split inside
 [spiceJS](https://github.com/stevenstetzler/spiceJS) itself (that
 repo's own `modules.md` called this "layer 3"); it now lives here,
-depending on spiceJS's public package (`spicejs`, resolved via
-`node_modules/spicejs` -- see `package.json`) the same way any other
-application would, rather than importing a sibling `src/` directly.
+depending on spiceJS's public package the same way any other
+application would, rather than importing a sibling `src/` directly --
+as an npm/git dependency (`spicejs`, resolved via `node_modules/spicejs`
+-- see `package.json`) for the Node-only tooling under `scripts/`, and
+as a released, minified browser bundle for every page layer 2 itself
+serves (see below).
 
 A worked example of both layers at once is at the
 [bottom of this file](#how-the-two-fit-together-one-request-end-to-end).
@@ -107,28 +112,40 @@ vectors alike -- from live kernel data, in the browser, with
   share this code (its own copy of `epochInput.js`'s widget is kept in
   sync by hand for the same reason).
 
-**Depends on `spicejs` directly** -- every page imports `str2et`/
-`et2utcCalendar`/`spkez`/`bodyValues`/`prop2b`/`openRemoteSpk`/
-`openRemoteFile` etc. from `node_modules/spicejs/src/browser.js` (a few
-files, like `examples/shared/kernelSession.js` and `examples/browser-demo/
-index.html`'s own "Add a custom kernel" flow, reach past that public
-entry point into `spicejs`'s own `src/lazy/remoteFile.js`/`src/daf.js`
-directly -- lower-level primitives not part of the package's declared
-`exports`, imported by raw relative path rather than the bare `spicejs`
-specifier for exactly that reason) -- **and on layer 1 over HTTP**, via
-`examples/shared/horizonsClient.js` and `/close-approach/data`.
+**Depends on `spicejs` directly** -- every page loads a version-tagged
+[GitHub Release](https://github.com/stevenstetzler/spiceJS/releases) of
+`spicejs.global.min.js` via a plain `<script src="...">` tag (classic,
+not a module), attaching everything spiceJS exports onto `window.spicejs`
+-- `str2et`/`et2utcCalendar`/`spkez`/`bodyValues`/`prop2b`/`openRemoteSpk`/
+`openRemoteFile`/`discoverSpkBodies`/`prefetchSpkQuery`/`prefetchSpkBodySegment`,
+all read off `window.spicejs` (`const { load, ... } = window.spicejs;`),
+never `import`ed as an ES module. That's deliberate, not stylistic:
+GitHub's release-asset CDN doesn't send `Access-Control-Allow-Origin`,
+and a module script's `import` always fetches in CORS mode, so a
+cross-origin `import ... from '<release URL>'` fails outright -- a
+classic `<script src>` has no such requirement. The classic script tag
+is placed before every page's own `<script type="module">` (each of
+which transitively imports `examples/shared/kernelSession.js`, which
+is where most of `window.spicejs` actually gets read), so it's always
+populated first -- module scripts only ever run after the document has
+finished parsing, strictly after any earlier synchronous `<script>` --
+**and on layer 1 over HTTP**, via `examples/shared/horizonsClient.js`
+and `/close-approach/data`.
 
 **Served by `scripts/serve-example.mjs`**, which -- beyond layer 1's
-own endpoints -- also: serves the whole repo statically (so any page
-can `import` straight from `node_modules/spicejs/src/...`, the same
-same-origin way it imports its own `examples/shared/*.js`), proxies and
-range-caches the large remote SPKs at `/kernels/remote/<file>.bsp`
-(`scripts/rangeCache.mjs` -- the server-side mirror of `spicejs`'s own
-`src/lazy/remoteFile.js` in-browser caching), and routes
-`/<body>/`/`/<body>/trajectory/` to their shared templates.
-`scripts/download-spk.mjs`/`scripts/inspect-spk.mjs` are
-kernel-catalogue tooling this layer's proxy and `kernels/sources.mjs`
-both lean on.
+own endpoints -- also: serves the whole repo statically (own
+`examples/shared/*.js`, its curated pages, `kernels/*.tls`/`.tpc` --
+`spicejs` itself is fetched from its own GitHub Release, not served
+from here), proxies and range-caches the large remote SPKs at
+`/kernels/remote/<file>.bsp` (`scripts/rangeCache.mjs` -- the
+server-side mirror of `spicejs`'s own `src/lazy/remoteFile.js`
+in-browser caching), and routes `/<body>/`/`/<body>/trajectory/` to
+their shared templates. `scripts/download-spk.mjs`/`scripts/inspect-spk.mjs`
+are kernel-catalogue tooling this layer's proxy and `kernels/sources.mjs`
+both lean on -- these two are the one place `spicejs` is still consumed
+as an ordinary npm dependency (`node_modules/spicejs`, an
+`import ... from 'spicejs'` ES-module import) rather than the release
+bundle, since they're Node CLIs, not browser pages.
 
 ## How the two fit together: one request, end to end
 

@@ -14,13 +14,21 @@
  * If fetches hang or 403 in your environment, see perf/README.md's note
  * about Node's built-in fetch() and proxies (NODE_USE_ENV_PROXY=1).
  */
-import { openRemoteFile } from '../node_modules/spicejs/src/lazy/remoteFile.js';
-import { parseFileRecord, parseDaf, readWords, FILE_RECORD_BYTES } from '../node_modules/spicejs/src/daf.js';
+import { openRemoteFile, discoverSpkBodies } from 'spicejs';
+import { parseDaf } from '../node_modules/spicejs/src/daf.js';
 import { KERNELS, SPK_IDS, resolveKernel, formatBytes, etToApproxYear } from '../kernels/sources.mjs';
 
-const WORDS_PER_RECORD = FILE_RECORD_BYTES / 8;
-
-/** Walk the summary-record chain, fetching one record at a time -- mirrors src/lazy/prefetch.js's ensureSummaryRecords(). */
+/**
+ * Structural discovery itself (walking the summary-record chain,
+ * fetching one record at a time, then grouping by target) is spicejs's
+ * own discoverSpkBodies() now, not hand-rolled here. The one thing it
+ * doesn't report -- the raw, ungrouped segment count (`--check` doesn't
+ * compare it, but the report line below prints it) -- comes from a
+ * second, free `parseDaf()` call: by the time discoverSpkBodies()
+ * returns, every summary-record byte it touched is already sitting in
+ * remoteFile.buffer, so re-parsing it is pure computation, not a
+ * second fetch.
+ */
 async function readStructure(url) {
   let requests = 0;
   let bytes = 0;
@@ -34,32 +42,16 @@ async function readStructure(url) {
     },
   });
 
-  await remoteFile.ensureRange(0, FILE_RECORD_BYTES);
-  const fileRecord = parseFileRecord(remoteFile.buffer);
-  let recordNumber = fileRecord.fward;
-  const visited = new Set();
-  while (recordNumber !== 0) {
-    if (visited.has(recordNumber)) throw new Error(`summary record chain loops at ${recordNumber}`);
-    visited.add(recordNumber);
-    const startByte = (recordNumber - 1) * FILE_RECORD_BYTES;
-    await remoteFile.ensureRange(startByte, startByte + FILE_RECORD_BYTES);
-    const addr = (recordNumber - 1) * WORDS_PER_RECORD + 1;
-    recordNumber = Math.round(readWords(remoteFile.buffer, fileRecord.littleEndian, addr, addr)[0]);
-  }
-
+  const bodies = await discoverSpkBodies(remoteFile);
   const daf = parseDaf(remoteFile.buffer);
-  const targets = new Map();
+
   const segmentTypes = new Set();
   let etMin = Infinity;
   let etMax = -Infinity;
-  for (const summary of daf.summaries) {
-    const [target, center, , type] = summary.ic;
-    const [begin, end] = summary.dc;
-    segmentTypes.add(type);
-    etMin = Math.min(etMin, begin);
-    etMax = Math.max(etMax, end);
-    if (!targets.has(target)) targets.set(target, { id: target, center, types: new Set() });
-    targets.get(target).types.add(type);
+  for (const b of bodies.values()) {
+    for (const type of b.types) segmentTypes.add(type);
+    etMin = Math.min(etMin, b.etStart);
+    etMax = Math.max(etMax, b.etEnd);
   }
 
   return {
@@ -69,7 +61,9 @@ async function readStructure(url) {
     segmentCount: daf.summaries.length,
     segmentTypes: [...segmentTypes].sort((a, b) => a - b),
     etCoverage: [etMin, etMax],
-    targets: [...targets.values()].sort((a, b) => a.id - b.id),
+    targets: [...bodies.values()]
+      .map((b) => ({ id: b.target, center: b.center, types: b.types }))
+      .sort((a, b) => a.id - b.id),
   };
 }
 

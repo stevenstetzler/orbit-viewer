@@ -26,6 +26,6 @@
     "url": "git+https://github.com/stevenstetzler/orbit-viewer.git"
   },
   "dependencies": {
-    "spicejs": "github:stevenstetzler/spiceJS#8c8740284e2483d15812ebe87eb6fb0b4f70de40"
+    "spicejs": "github:stevenstetzler/spiceJS#v0.1.1"
   }
 }

@@ -20,21 +20,33 @@ over the network per visit -- see "Bandwidth per view" below.
 
 - **Node >= 18** (`package.json`'s `engines` field) -- that's the whole
   runtime requirement for everything in this repo.
-- Depends on [`spicejs`](https://github.com/stevenstetzler/spiceJS)
-  (a git dependency -- see `package.json`), installed the ordinary way:
-  `npm install` pulls it into `node_modules/spicejs`.
-- No build step, anywhere. `examples/`, the curated pages, and
-  `node_modules/spicejs/src/` are all plain ES modules, loaded directly
-  by Node's `import` or the browser's native
+- Depends on [`spicejs`](https://github.com/stevenstetzler/spiceJS) two
+  different ways, for two different consumers: a git dependency (see
+  `package.json`, `npm install` pulls it into `node_modules/spicejs`)
+  for the Node-only tooling under `scripts/` (`inspect-spk.mjs`,
+  `download-spk.mjs`); and, separately, spiceJS's own version-tagged
+  GitHub Release -- every browser page loads `spicejs.global.min.js`
+  from there directly via a plain `<script src="...">` tag
+  (`window.spicejs`), **not** from `node_modules` at all, and not as an
+  ES-module `import` either (see `modules.md`'s "Depends on `spicejs`
+  directly" for why: GitHub's release-asset CDN doesn't send CORS
+  headers, which a module script's `import` requires but a classic
+  `<script src>` doesn't). `npm install` is still needed for the CLI
+  tooling above, but a page load itself needs no local spicejs install
+  at all -- it always reaches out to GitHub for the bundle, live.
+- No build step, anywhere, in this repo. `examples/` and the curated
+  pages are plain ES modules, loaded directly by the browser's native
   `<script type="module">`/import maps -- nothing here needs
-  webpack/vite/esbuild/etc. to run.
+  webpack/vite/esbuild/etc. to run (spiceJS's own release bundle is
+  already built, by spiceJS's own `npm run build` -- see that repo's
+  `scripts/build.mjs` -- before it ever reaches this repo).
 - `pip install spiceypy` is only needed on the *spicejs* side (its own
   `npm run crossval`/`npm run perf`), not for anything in this repo.
 
 ```sh
 git clone https://github.com/stevenstetzler/orbit-viewer.git
 cd orbit-viewer
-npm install   # pulls in spicejs (github:stevenstetzler/spiceJS)
+npm install   # pulls in spicejs for scripts/inspect-spk.mjs & download-spk.mjs (github:stevenstetzler/spiceJS) -- the browser pages fetch their own copy straight from GitHub Releases, no install needed for those
 ```
 
 ## 1. Running the example visualization site, locally
@@ -49,9 +61,11 @@ One Node process, `scripts/serve-example.mjs`, does two jobs at once:
 - **Serves the repo as static files** -- `examples/browser-demo/`, the
   curated `/solar-system/`, `/solar-system/trajectory/`, `/<body>/`,
   `/<body>/trajectory/`, and `/close-approach/` pages, and everything
-  under `examples/shared/`/`node_modules/spicejs/src/` those pages
-  `import` directly as ES modules. No server-side templating or
-  rendering -- what you fetch is what ships to the browser.
+  under `examples/shared/` those pages `import` directly as ES modules
+  (`spicejs` itself is fetched from its own GitHub Release, not served
+  here -- see "Requirements" above). No server-side templating or
+  rendering -- what you fetch (plus that one external release fetch) is
+  what ships to the browser.
 - **Proxies three real JPL/NAIF APIs**, same-origin, because none of
   them send an `Access-Control-Allow-Origin` header (confirmed live,
   see spicejs's `docs/lazy-loading.md` and `examples/browser-demo/README.md`'s
@@ -140,6 +154,13 @@ things worth deciding up front:
   requirements above). For a fully offline/air-gapped deployment, vendor
   a local copy and edit each page's import map -- `examples/browser-demo/README.md`'s
   "Notes" section flags this same tradeoff.
+- **spicejs itself loads straight from GitHub Releases** (a `<script src>`
+  tag naming a specific tag, see `modules.md`) -- same requirement as
+  three.js above, needs visitors' *browsers* to reach `github.com`
+  (which the actual download redirects through to `objects.githubusercontent.com`).
+  Vendoring a local copy for an offline deployment means downloading
+  `spicejs.global.min.js` from a real spiceJS release yourself and
+  pointing each page's `<script src>` at it instead.
 - **No built-in auth or rate limiting.** Every visitor's page can
   trigger a real request to NAIF/SBDB/Horizons on your server's behalf
   (a kernel range read, an SBDB resolve, a Horizons SPK generation, a

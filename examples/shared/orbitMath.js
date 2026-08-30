@@ -3,11 +3,17 @@
  * `examples/browser-demo/index.html` (see that file's own comments for
  * the full "why" behind the vis-viva/curvature-based-step math; not
  * repeated here in full). No three.js dependency: every vector here is
- * a plain `[x, y, z]` array, so this module stays usable from a Node
- * script (tests, benchmarks) as well as any page's own three.js scene.
+ * a plain `[x, y, z]` array, so this module stays usable from any
+ * page's own three.js scene without three.js itself as a dependency.
+ * Not currently usable standalone from a Node script (no `window`
+ * there) -- spicejs comes from a plain <script src=".../spicejs.global.min.js">
+ * tag (window.spicejs), not an ES module import; see kernelSession.js's
+ * own doc comment for why. Nothing under scripts/ imports this module
+ * today, so that's latent rather than a live break.
  */
-import { spkez, bodyValues } from '../../node_modules/spicejs/src/browser.js';
 import { SUN_TARGET, SSB, INERTIAL_FRAME, DAY, ARC_MAX_SAMPLES, ARC_MAX_SAMPLES_ABSOLUTE_CEILING, ARC_MIN_SAMPLES, ARC_SAMPLES_PER_LOOP, TRAJECTORY_STEP_EPSILON_KM, TRAJECTORY_FALLBACK_HALF_SPAN_DAYS, CUSTOM_TRAJECTORY_RESOLUTION_SECONDS, CUSTOM_TRAJECTORY_MAX_SAMPLES } from './constants.js';
+
+const { spkez, bodyValues } = window.spicejs;
 
 const vSub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 const vAdd = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];

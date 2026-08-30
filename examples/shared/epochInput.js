@@ -27,7 +27,11 @@
  * kernelStopEt/et0 computation already relies on this exact same
  * default-pool convention, so this module just matches it.
  */
-import { str2et, parseTimeString, taiToEt, et2utc, et2tai } from '../../node_modules/spicejs/src/browser.js';
+// spicejs comes from a plain <script src=".../spicejs.global.min.js">
+// tag (window.spicejs), not an ES module import -- see kernelSession.js's
+// own doc comment for why (GitHub release assets don't send CORS
+// headers, which a module-script `import` requires).
+const { str2et, parseTimeString, taiToEt, et2utc, et2tai } = window.spicejs;
 
 /**
  * @param {HTMLElement} container - controls are appended here

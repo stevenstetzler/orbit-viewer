@@ -26,11 +26,20 @@
  *     (a custom/Horizons body), which never needs ensureBodyCoverage()
  *     again.
  */
-import { load, spkez } from '../../node_modules/spicejs/src/browser.js';
-import { prefetchSpkQuery, prefetchSpkBodySegment } from '../../node_modules/spicejs/src/lazy/prefetch.js';
-import { parseFileRecord, parseDaf, readWords, FILE_RECORD_BYTES } from '../../node_modules/spicejs/src/daf.js';
 import { SSB, INERTIAL_FRAME } from './constants.js';
 import { satellitesFromManifest } from './bodies.js';
+
+// spicejs comes from a plain <script src="https://github.com/.../spicejs.global.min.js">
+// tag (window.spicejs), not an ES module import -- GitHub's release-asset
+// CDN doesn't send Access-Control-Allow-Origin, so a cross-origin
+// `import ... from '<release URL>'` (which module scripts always fetch
+// in CORS mode) fails; a classic script has no such requirement. The
+// classic script tag is placed before every page's own <script type="module">
+// (which transitively imports this file), so window.spicejs is always
+// already populated by the time this module's own top-level code runs
+// -- module scripts execute only after the document has finished
+// parsing, strictly after any earlier synchronous <script> has run.
+const { load, spkez, prefetchSpkQuery, prefetchSpkBodySegment, discoverSpkBodies } = window.spicejs;
 
 // The kernel proxy's own catalogue (scripts/serve-example.mjs's
 // `/kernels/remote/` index) hands back each entry's `url` as a
@@ -74,45 +83,14 @@ export function bodyHasCoverageAt(b, et) {
   return et >= b.coverageStart && et <= b.coverageEnd;
 }
 
-/**
- * Structurally scans a DAF's own summary records for every body it
- * carries -- target, declared center, real [etStart, etEnd] coverage
- * (unioned across however many segments that target has) -- with no
- * position/state data actually fetched. Returns `Map<target, { target,
- * center, etStart, etEnd, types: Set<segmentType> }>`.
- */
-export async function discoverSpkBodies(remoteFile) {
-  const WORDS_PER_RECORD = FILE_RECORD_BYTES / 8;
-  await remoteFile.ensureRange(0, FILE_RECORD_BYTES);
-  const fileRecord = parseFileRecord(remoteFile.buffer);
-  let recordNumber = fileRecord.fward;
-  const visited = new Set();
-  while (recordNumber !== 0) {
-    if (visited.has(recordNumber)) throw new Error(`summary record chain loops at ${recordNumber}`);
-    visited.add(recordNumber);
-    const startByte = (recordNumber - 1) * FILE_RECORD_BYTES;
-    await remoteFile.ensureRange(startByte, startByte + FILE_RECORD_BYTES);
-    const addr = (recordNumber - 1) * WORDS_PER_RECORD + 1;
-    recordNumber = Math.round(readWords(remoteFile.buffer, fileRecord.littleEndian, addr, addr)[0]);
-  }
-
-  const daf = parseDaf(remoteFile.buffer);
-  const bodies = new Map();
-  for (const summary of daf.summaries) {
-    const [target, center, , type] = summary.ic;
-    const [begin, end] = summary.dc;
-    let b = bodies.get(target);
-    if (!b) {
-      b = { target, center, etStart: begin, etEnd: end, types: new Set() };
-      bodies.set(target, b);
-    } else {
-      b.etStart = Math.min(b.etStart, begin);
-      b.etEnd = Math.max(b.etEnd, end);
-    }
-    b.types.add(type);
-  }
-  return bodies;
-}
+// Re-exported so every page that already imports discoverSpkBodies
+// (alongside ensureBodyCoverage()/prefetchBodyProbe()/... below) from
+// this module doesn't need its own separate import line -- the
+// structural DAF summary-record scan itself now lives in spicejs
+// directly (Map<target, { target, center, etStart, etEnd, types:
+// Set<segmentType> }>, no position/state data fetched), not
+// hand-rolled here against daf.js's raw primitives.
+export { discoverSpkBodies };
 
 /**
  * Widens `b`'s own prefetched range to cover `[etStart, etEnd]`, a
