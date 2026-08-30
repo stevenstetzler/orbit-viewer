@@ -13,6 +13,14 @@ math work unmodified whether a page is drawing ellipses around the Sun,
 real sampled moon trajectories around a planet, or a close-approach
 object flying past Earth.
 
+One deliberate exception: [`epochInput.js`](epochInput.js) *does* touch
+the DOM -- it mounts the calendar/JD text entry + datetime-local picker
++ UTC/TAI toggle every curated page's "Reference epoch" section has, and
+those are the same handful of `<input>`s and event listeners on all
+five pages. Sharing that one small, self-contained UI widget avoids five
+near-identical copies without pulling any of the *math* modules below
+into touching the DOM.
+
 `examples/browser-demo/index.html` -- the original, full-featured demo
 this module set was extracted from -- is **not** built on this API. It
 stays a single, self-contained file on purpose, so there's always one
@@ -30,6 +38,7 @@ the reasoning summarized here.
 | [`orbitMath.js`](orbitMath.js) | Two-body orbit geometry (for ellipses) and real-trajectory sampling. |
 | [`kernelSession.js`](kernelSession.js) | Loading text kernels, structurally scanning a kernel's own body list, and the lazy prefetch strategy every body's data follows. |
 | [`horizonsClient.js`](horizonsClient.js) | The two network calls behind "fetch a body from JPL Horizons." |
+| [`epochInput.js`](epochInput.js) | The "Reference epoch" text/datetime/UTC-TAI controls (DOM-touching -- see the exception noted above). |
 
 None of them import three.js or touch the DOM; a page's own `<script>`
 does that part (see [Rendering a trajectory](#rendering-a-trajectory-putting-it-together)
@@ -305,6 +314,27 @@ then fetches that object's actual trajectory SPK, server-cached per
 feed straight into `discoverSpkBodies()`/`prefetchCustomBody()` above,
 exactly like a locally-uploaded `.bsp` would -- there's no separate
 code path for where the bytes came from.
+
+## `epochInput.js`
+
+```js
+mountEpochControls(container, { getEt0, getCurrentEt, getOffsetBounds, setOffsetDays, log? }) -> { refresh(), setEnabled(enabled) }
+```
+Mounts the "Reference epoch" text entry (calendar or `JD ...`) +
+datetime-local picker + UTC/TAI checkbox into `container`, wired to a
+page's existing `timeSlider`/`updateSceneForOffset(offsetDays)` pair --
+`setOffsetDays()` is expected to move `timeSlider.value` and re-run the
+page's own scene update, same as the slider's own `input` listener
+already does. Every entered epoch is turned into ET via `str2et()` (a
+`" TDB"`/`" TDT"` label in the text itself always wins over the TAI
+checkbox, exactly like `str2et()`'s own label handling); a bare TAI
+value (no label, checkbox checked) goes through `taiToEt()` instead,
+which needs no leapseconds kernel at all (see `src/time/deltet.js`).
+Call the returned `refresh()` once per `updateSceneForOffset()` tick
+(right where it already updates `timeLabel`) so these controls always
+show whatever last moved the reference epoch, from any source -- the
+slider, "Look At", loading a new kernel, or these controls themselves.
+Call `setEnabled(true)` alongside `timeSlider.disabled = false`.
 
 ## Rendering a trajectory: putting it together
 

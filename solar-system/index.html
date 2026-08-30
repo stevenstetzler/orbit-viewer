@@ -40,6 +40,15 @@
   #timeRow { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
   #timeSlider { flex: 1 1 auto; }
   #timeLabel { font-variant-numeric: tabular-nums; white-space: nowrap; color: #8892a6; font-size: 12px; }
+  .epochControls { margin: 6px 0 4px; display: flex; flex-direction: column; gap: 6px; }
+  .epochRow { display: flex; gap: 6px; align-items: center; }
+  .epochRow input[type=text], .epochRow input[type=datetime-local] {
+    flex: 1 1 auto; min-width: 0; background: #141a26; color: #d7dce5; border: 1px solid #1c2230;
+    border-radius: 4px; padding: 5px 7px; font: inherit; box-sizing: border-box;
+  }
+  .epochTaiRow { display: flex; align-items: center; gap: 6px; color: #8892a6; font-size: 11px; cursor: pointer; }
+  .epochTaiRow input[type=checkbox] { margin: 0; }
+  .epochError { color: #ff8080; font-size: 11px; min-height: 13px; }
   #horizonsStatus { font: 11px/1.5 ui-monospace, monospace; color: #8892a6; margin: 6px 0 0; white-space: pre-wrap; }
   #horizonsCandidateList { list-style: none; margin: 6px 0 0; padding: 0; display: none; }
   #horizonsCandidateList li { display: block; margin: 3px -8px; padding: 6px 8px; border-radius: 4px; cursor: pointer; border: 1px solid transparent; }
@@ -80,6 +89,7 @@
       <input id="timeSlider" type="range" min="-1" max="1" step="any" value="0" disabled />
     </div>
     <div id="timeLabel"></div>
+    <div id="epochControls"></div>
 
     <h2>Fetch from JPL Horizons</h2>
     <p class="sub" style="margin:0 0 8px">Any small body/comet Horizons knows, added as a real
@@ -133,10 +143,21 @@ import {
   discoverSpkBodies, ensureBodyCoverage, prefetchBodyProbe, prefetchCustomBody, bodyHasCoverageAt,
 } from '../examples/shared/kernelSession.js';
 import { resolveHorizonsObject, fetchHorizonsSpk, formatBytesShort, safeFileFragment } from '../examples/shared/horizonsClient.js';
+import { mountEpochControls } from '../examples/shared/epochInput.js';
 
 const statusEl = document.getElementById('status');
 const timeSlider = document.getElementById('timeSlider');
 const timeLabel = document.getElementById('timeLabel');
+const epochControls = mountEpochControls(document.getElementById('epochControls'), {
+  getEt0: () => demo.et0,
+  getCurrentEt: () => demo.et0 + Number(timeSlider.value) * DAY,
+  getOffsetBounds: () => ({ min: Number(timeSlider.min), max: Number(timeSlider.max) }),
+  setOffsetDays: (offsetDays) => {
+    timeSlider.value = String(offsetDays);
+    return updateSceneForOffset(offsetDays);
+  },
+  log,
+});
 const legendEl = document.getElementById('legend');
 const horizonsCommandInput = document.getElementById('horizonsCommandInput');
 const horizonsFetchBtn = document.getElementById('horizonsFetchBtn');
@@ -313,6 +334,7 @@ async function updateSceneForOffset(offsetDays) {
   const mySeq = ++sceneUpdateSeq;
   const et = demo.et0 + offsetDays * DAY;
   timeLabel.textContent = `${et2utcCalendar(et)}  (${offsetDays >= 0 ? '+' : ''}${offsetDays.toFixed(2)} d)`;
+  epochControls.refresh(); // keep the text/datetime/TAI fields in sync however the epoch just moved
 
   for (const b of demo.bodies) {
     if (b.fullyPrefetched) continue; // Horizons body -- already covers its whole own interval
@@ -388,6 +410,7 @@ async function buildScene() {
   timeSlider.max = String((demo.kernelStopEt - demo.et0) / DAY);
   timeSlider.value = '0';
   timeSlider.disabled = false;
+  epochControls.setEnabled(true);
   await updateSceneForOffset(0);
   log('Scene built. Drag "Reference epoch" to explore 1900-2100; scroll/drag the view to look around.');
 }

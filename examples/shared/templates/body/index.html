@@ -30,6 +30,15 @@
   #timeRow { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
   #timeSlider { flex: 1 1 auto; }
   #timeLabel { font-variant-numeric: tabular-nums; white-space: nowrap; color: #8892a6; font-size: 12px; }
+  .epochControls { margin: 6px 0 4px; display: flex; flex-direction: column; gap: 6px; }
+  .epochRow { display: flex; gap: 6px; align-items: center; }
+  .epochRow input[type=text], .epochRow input[type=datetime-local] {
+    flex: 1 1 auto; min-width: 0; background: #141a26; color: #d7dce5; border: 1px solid #1c2230;
+    border-radius: 4px; padding: 5px 7px; font: inherit; box-sizing: border-box;
+  }
+  .epochTaiRow { display: flex; align-items: center; gap: 6px; color: #8892a6; font-size: 11px; cursor: pointer; }
+  .epochTaiRow input[type=checkbox] { margin: 0; }
+  .epochError { color: #ff8080; font-size: 11px; min-height: 13px; }
   #overlayHint { position: absolute; left: 16px; bottom: 12px; color: #626c80; font-size: 11px; pointer-events: none; }
 </style>
 </head>
@@ -46,6 +55,7 @@
       <input id="timeSlider" type="range" min="-1" max="1" step="any" value="0" disabled />
     </div>
     <div id="timeLabel"></div>
+    <div id="epochControls"></div>
 
     <h2>Bodies shown</h2>
     <ul id="legend"></ul>
@@ -77,12 +87,23 @@ import {
   loadLeapseconds, loadPlanetaryConstants, loadGravitationalParameters,
   ensureBodyCoverage, prefetchBodyProbe, bodyHasCoverageAt, resolveSatellitesFor,
 } from '../examples/shared/kernelSession.js';
+import { mountEpochControls } from '../examples/shared/epochInput.js';
 
 const ORBIT_ELLIPSE_SEGMENTS = 720;
 
 const statusEl = document.getElementById('status');
 const timeSlider = document.getElementById('timeSlider');
 const timeLabel = document.getElementById('timeLabel');
+const epochControls = mountEpochControls(document.getElementById('epochControls'), {
+  getEt0: () => demo.et0,
+  getCurrentEt: () => demo.et0 + Number(timeSlider.value) * DAY,
+  getOffsetBounds: () => ({ min: Number(timeSlider.min), max: Number(timeSlider.max) }),
+  setOffsetDays: (offsetDays) => {
+    timeSlider.value = String(offsetDays);
+    return updateSceneForOffset(offsetDays);
+  },
+  log,
+});
 const legendEl = document.getElementById('legend');
 const pageTitleEl = document.getElementById('pageTitle');
 const pageSubEl = document.getElementById('pageSub');
@@ -268,6 +289,7 @@ async function updateSceneForOffset(offsetDays) {
   const mySeq = ++sceneUpdateSeq;
   const et = demo.et0 + offsetDays * DAY;
   timeLabel.textContent = `${et2utcCalendar(et)}  (${offsetDays >= 0 ? '+' : ''}${offsetDays.toFixed(2)} d)`;
+  epochControls.refresh();
 
   for (const b of demo.bodies) {
     if (!bodyHasCoverageAt(b, et)) continue;
@@ -338,6 +360,7 @@ async function buildScene(proxyCatalogue) {
   timeSlider.max = String((demo.kernelStopEt - demo.et0) / DAY);
   timeSlider.value = '0';
   timeSlider.disabled = false;
+  epochControls.setEnabled(true);
   await updateSceneForOffset(0);
   fitCameraToScene();
   log(`Scene built: ${bodySpec.name} + ${satellites.length} satellite${satellites.length === 1 ? '' : 's'}. ` +

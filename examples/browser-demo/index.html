@@ -65,6 +65,15 @@
   #timeRow { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
   #timeSlider { flex: 1 1 auto; }
   #timeLabel { font-variant-numeric: tabular-nums; white-space: nowrap; color: #8892a6; font-size: 12px; }
+  .epochControls { margin: 6px 0 4px; display: flex; flex-direction: column; gap: 6px; }
+  .epochRow { display: flex; gap: 6px; align-items: center; }
+  .epochRow input[type=text], .epochRow input[type=datetime-local] {
+    flex: 1 1 auto; min-width: 0; background: #141a26; color: #d7dce5; border: 1px solid #1c2230;
+    border-radius: 4px; padding: 5px 7px; font: inherit; box-sizing: border-box;
+  }
+  .epochTaiRow { display: flex; align-items: center; gap: 6px; color: #8892a6; font-size: 11px; cursor: pointer; }
+  .epochTaiRow input[type=checkbox] { margin: 0; }
+  .epochError { color: #ff8080; font-size: 11px; min-height: 13px; }
   .controlGrid { display: grid; grid-template-columns: auto 1fr; gap: 6px 10px; align-items: center; margin: 8px 0 16px; }
   .controlGrid label { color: #8892a6; font-size: 12px; }
   select {
@@ -152,6 +161,7 @@
       <span id="timeLabel">&ndash;</span>
     </div>
     <input id="timeSlider" type="range" min="-3650" max="3650" step="any" value="0" disabled style="width:100%" />
+    <div id="epochControls"></div>
     <p class="sub" style="margin:6px 0 0">
       Position in time (UTC, &plusmn;10 years around now) to view live
       marker positions and orbit-arc lines at. Each body's orbit-arc
@@ -299,7 +309,10 @@
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { load, str2et, et2utcCalendar, openRemoteSpk, spkez, bodyValues, kclear, bodyName, prop2b } from '../../src/browser.js';
+import {
+  load, str2et, et2utc, et2tai, et2utcCalendar, parseTimeString, taiToEt,
+  openRemoteSpk, spkez, bodyValues, kclear, bodyName, prop2b,
+} from '../../src/browser.js';
 import { KERNELS as KERNEL_MANIFEST } from '../../kernels/sources.mjs';
 // Lower-level lazy-loading primitives, used only by the "Add a custom
 // kernel" flow below (discoverSpkBodies()/loadCustomKernel()) --
@@ -318,6 +331,16 @@ const fileInput = document.getElementById('fileInput');
 const tryNaifBtn = document.getElementById('tryNaifBtn');
 const timeSlider = document.getElementById('timeSlider');
 const timeLabel = document.getElementById('timeLabel');
+const epochControls = mountEpochControls(document.getElementById('epochControls'), {
+  getEt0: () => demo.et0,
+  getCurrentEt: () => demo.et0 + Number(timeSlider.value) * DAY,
+  getOffsetBounds: () => ({ min: Number(timeSlider.min), max: Number(timeSlider.max) }),
+  setOffsetDays: (offsetDays) => {
+    timeSlider.value = String(offsetDays);
+    return updateSceneForOffset(offsetDays);
+  },
+  log,
+});
 const centerSelect = document.getElementById('centerSelect');
 const frameSelect = document.getElementById('frameSelect');
 const rotatingCheckbox = document.getElementById('rotatingCheckbox');
@@ -357,6 +380,132 @@ function log(line) {
 }
 function resetLog(line) {
   statusEl.textContent = line;
+}
+
+/**
+ * Calendar/JD text entry + datetime-local picker + UTC/TAI toggle for
+ * "3. Reference epoch". This is the same widget the curated pages
+ * mount from examples/shared/epochInput.js, duplicated here rather
+ * than imported -- this file deliberately doesn't import from
+ * examples/shared/ (see modules.md's own note on that), so this stays
+ * a self-contained copy; keep the two in sync by hand if either one's
+ * behavior changes.
+ *
+ * Like every time conversion elsewhere on this page, this uses
+ * str2et()/et2utc()/et2tai()/taiToEt()'s own default (global) pool --
+ * loadLeapseconds() below only ever loads into that pool, never into
+ * demo.remote.pool (a fresh, per-openRemoteSpk() KernelPool).
+ */
+function mountEpochControls(container, { getEt0, getCurrentEt, getOffsetBounds, setOffsetDays, log }) {
+  container.classList.add('epochControls');
+
+  const textRow = document.createElement('div');
+  textRow.className = 'epochRow';
+  const textInput = document.createElement('input');
+  textInput.type = 'text';
+  textInput.className = 'epochTextInput';
+  textInput.placeholder = 'e.g. 2024-06-15 12:00:00, JD 2460477.0';
+  textInput.spellcheck = false;
+  const textBtn = document.createElement('button');
+  textBtn.type = 'button';
+  textBtn.textContent = 'Go';
+  textRow.append(textInput, textBtn);
+
+  const datetimeRow = document.createElement('div');
+  datetimeRow.className = 'epochRow';
+  const datetimeInput = document.createElement('input');
+  datetimeInput.type = 'datetime-local';
+  datetimeInput.className = 'epochDatetimeInput';
+  datetimeInput.step = '1'; // whole seconds
+  datetimeRow.append(datetimeInput);
+
+  const taiRow = document.createElement('label');
+  taiRow.className = 'epochTaiRow';
+  const taiCheckbox = document.createElement('input');
+  taiCheckbox.type = 'checkbox';
+  const taiLabelText = document.createElement('span');
+  taiLabelText.textContent = 'Interpret entered times as TAI (unchecked: UTC)';
+  taiRow.append(taiCheckbox, taiLabelText);
+
+  const errorEl = document.createElement('div');
+  errorEl.className = 'epochError';
+
+  container.append(textRow, datetimeRow, taiRow, errorEl);
+
+  function reportError(err) {
+    errorEl.textContent = err.message;
+    log?.(`  -> ${err.message}`);
+  }
+  function clearError() {
+    errorEl.textContent = '';
+  }
+
+  /** Free-text (calendar or JD) -> ET, honoring an explicit " TDB"/" TDT"
+   *  label in the text itself over the TAI checkbox, exactly like
+   *  str2et() already does for a UTC-vs-explicit-label string. */
+  function parseText(text) {
+    if (!taiCheckbox.checked) return str2et(text);
+    const { system, contSec } = parseTimeString(text);
+    if (system === 'TDB' || system === 'TDT') return str2et(text);
+    return taiToEt(contSec);
+  }
+
+  /** datetime-local's value ("YYYY-MM-DDTHH:MM:SS", never labeled) -> ET. */
+  function parseDatetimeLocal(value) {
+    if (!taiCheckbox.checked) return str2et(value);
+    const { contSec } = parseTimeString(value);
+    return taiToEt(contSec);
+  }
+
+  function applyEt(et) {
+    const et0 = getEt0();
+    const { min, max } = getOffsetBounds();
+    const offsetDays = Math.min(Math.max((et - et0) / DAY, min), max);
+    clearError();
+    return Promise.resolve(setOffsetDays(offsetDays)).catch((err) => reportError(err));
+  }
+
+  textBtn.addEventListener('click', () => {
+    try {
+      applyEt(parseText(textInput.value));
+    } catch (err) {
+      reportError(err);
+    }
+  });
+  textInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') textBtn.click();
+  });
+
+  datetimeInput.addEventListener('change', () => {
+    if (!datetimeInput.value) return;
+    try {
+      applyEt(parseDatetimeLocal(datetimeInput.value));
+    } catch (err) {
+      reportError(err);
+    }
+  });
+
+  taiCheckbox.addEventListener('change', () => refresh());
+
+  function refresh() {
+    try {
+      const et = getCurrentEt();
+      datetimeInput.value = taiCheckbox.checked ? et2tai(et, 0) : et2utc(et, 0);
+    } catch {
+      // No session yet, or no leapseconds kernel loaded yet.
+    }
+  }
+
+  function setEnabled(enabled) {
+    textInput.disabled = !enabled;
+    textBtn.disabled = !enabled;
+    datetimeInput.disabled = !enabled;
+    taiCheckbox.disabled = !enabled;
+  }
+
+  setEnabled(false);
+  refresh();
+  return { refresh, setEnabled };
 }
 
 // AU, for scaling km positions down to a sane Three.js scene size.
@@ -2683,6 +2832,7 @@ async function buildScene() {
   timeSlider.min = String((demo.kernelStartEt - demo.et0) / DAY);
   timeSlider.max = String((demo.kernelStopEt - demo.et0) / DAY);
   timeSlider.disabled = false;
+  epochControls.setEnabled(true);
   centerSelect.disabled = false;
   frameSelect.disabled = false;
   rotatingCheckbox.disabled = false;
@@ -3491,6 +3641,7 @@ async function updateSceneForOffset(offsetDays) {
   const mySeq = ++sceneUpdateSeq;
   const et = demo.et0 + offsetDays * DAY;
   timeLabel.textContent = `${et2utcCalendar(et)}  (${offsetDays >= 0 ? '+' : ''}${offsetDays.toFixed(2)} d)`;
+  epochControls.refresh();
 
   for (const b of demo.bodies) {
     // A custom body (loadSelectedCustomBodies()) is already prefetched
