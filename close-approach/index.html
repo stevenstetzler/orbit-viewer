@@ -118,7 +118,7 @@
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { DAY, INERTIAL_FRAME, SUN_TARGET, AU_KM } from '../examples/shared/constants.js';
+import { DAY, INERTIAL_FRAME, AU_KM } from '../examples/shared/constants.js';
 import { bodyBySlug, SATELLITE_KERNEL_FOR_BODY } from '../examples/shared/bodies.js';
 import { buildCurrentScale } from '../examples/shared/scale.js';
 import { computeOrbitState, periodFromEllipse, customBodySampleCount } from '../examples/shared/orbitMath.js';
@@ -437,16 +437,15 @@ async function buildScene(proxyCatalogue) {
   demo.bodies = [centralBody, ...satellites];
 
   // Not displayed (this page shows only Earth + its satellites), but
-  // probed anyway: a Horizons-fetched close-approach object's own SPK
-  // is always Sun-centered (scripts/horizonsSpk.mjs's own
-  // buildHorizonsSpkUrl() always sets CENTER=SUN), so chaining it to
-  // the Solar System Barycenter needs the Sun's own segment already
-  // registered in the pool -- without this, prefetchCustomBody()'s
-  // hop-by-hop fallback doesn't recognize the Sun as "already known"
-  // and tries (and fails) to find a Sun-to-SSB segment inside the tiny
-  // fetched object's own SPK instead, which never has one.
-  demo.sunStub = { target: SUN_TARGET, name: 'Sun' };
-  await prefetchBodyProbe(demo.remote, demo.sunStub, null, demo.et0);
+  // a Horizons-fetched close-approach object's own SPK is always
+  // Sun-centered (scripts/horizonsSpk.mjs's own buildHorizonsSpkUrl()
+  // always sets CENTER=SUN), so chaining it to the Solar System
+  // Barycenter needs the Sun's own segment -- prefetchCustomBody()'s
+  // hop-by-hop fallback (see the primaryRemote option passed below)
+  // fetches it from the primary kernel (demo.remote) on demand, over
+  // exactly the epoch window each fetched object actually needs, so
+  // there's no need to pre-probe a Sun stub into demo.bodies here the
+  // way an earlier version of this page did.
   scale = buildCurrentScale('linear', 'linear', demo.bodies, demo.remote.pool, () =>
     log('  -> no body here has a known real radius to anchor Linear/Linear scale -- unexpected.')
   );
@@ -684,7 +683,7 @@ async function selectCloseApproach(row) {
     for (const [target, info] of discovered) {
       const name = knownNames.get(target) ?? row.des;
       try {
-        await prefetchCustomBody(remoteFile, demo.remote.pool, target, info.etStart, info.etEnd, { systemBodies: [...demo.bodies, demo.sunStub], counters: demo.counters, log });
+        await prefetchCustomBody(remoteFile, demo.remote.pool, target, info.etStart, info.etEnd, { systemBodies: demo.bodies, primaryRemote: demo.remote, counters: demo.counters, log });
       } catch (err) {
         log(`  -> skipped ${name} (${target}): ${err.message}`);
         continue;
