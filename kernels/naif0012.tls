@@ -1,0 +1,88 @@
+KPL/LSK
+
+
+LEAPSECONDS KERNEL FILE
+===========================================================================
+
+This file was distributed with a version of CSPICE that was released
+prior to the date shown immediately above the "KPL/LSK" tag at the
+top of this file. It is provided here as a test/example fixture for
+the spiceJS library: it is the standard, publicly available NAIF
+leapseconds kernel "naif0012.tls" (the most recent leapseconds kernel
+as of this writing -- no additional leap seconds have been announced
+since the one taking effect on 2017-JAN-01).
+
+See https://naif.jpl.nasa.gov/pub/naif/generic_kernels/lsk/ for the
+authoritative, up-to-date copy of this file.
+
+
+Explanation
+--------------------------------------------------------
+
+The contents of this file are used by the CSPICE (and by extension,
+spiceJS) function that converts between UTC and ephemeris time (ET,
+also called Barycentric Dynamical Time, TDB). This function is
+sometimes called "deltet" or "unitim".
+
+   ET = UTC + DELTA_AT + DELTA_T_A + K * sin(E)
+
+where
+
+   DELTA_AT  is the number of leap seconds (TAI - UTC) in effect at
+             the given UTC epoch, taken from the DELTA_AT
+             assignment below,
+
+   DELTA_T_A, K, EB and M are constants used to model the small
+             periodic term (the difference between Terrestrial Time
+             and Barycentric Dynamical Time) via
+
+                E = M0 + M1 * T + EB * sin( M0 + M1 * T )
+
+             where T is TT (here approximated by TAI + DELTA_T_A)
+             expressed as seconds past J2000.
+
+The leapseconds themselves (the DELTA_AT array below) are announced
+periodically by the IERS. Each pair of values in the DELTA_AT array
+below gives the number of leap seconds (TAI-UTC) that took effect on
+the paired date. For example, the pair "10, @1972-JAN-1" means that
+on 1972 JAN 1, TAI-UTC became 10 seconds.
+
+\begindata
+
+DELTET/DELTA_T_A       =   32.184
+DELTET/K               =    1.657D-3
+DELTET/EB              =    1.671D-2
+DELTET/M               =  (  6.239996D0   1.99096871D-7 )
+
+DELTET/DELTA_AT        = ( 10, @1972-JAN-1
+                            11, @1972-JUL-1
+                            12, @1973-JAN-1
+                            13, @1974-JAN-1
+                            14, @1975-JAN-1
+                            15, @1976-JAN-1
+                            16, @1977-JAN-1
+                            17, @1978-JAN-1
+                            18, @1979-JAN-1
+                            19, @1980-JAN-1
+                            20, @1981-JUL-1
+                            21, @1982-JUL-1
+                            22, @1983-JUL-1
+                            23, @1985-JUL-1
+                            24, @1988-JAN-1
+                            25, @1990-JAN-1
+                            26, @1991-JAN-1
+                            27, @1992-JUL-1
+                            28, @1993-JUL-1
+                            29, @1994-JUL-1
+                            30, @1996-JAN-1
+                            31, @1997-JUL-1
+                            32, @1999-JAN-1
+                            33, @2006-JAN-1
+                            34, @2009-JAN-1
+                            35, @2012-JUL-1
+                            36, @2015-JUL-1
+                            37, @2017-JAN-1 )
+
+\begintext
+
+End of file.
