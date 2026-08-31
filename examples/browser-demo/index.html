@@ -1914,23 +1914,27 @@ customKernelCancelBtn.addEventListener('click', () => closeCustomKernelModal());
  * *custom file's own* summaries looking for the whole chain -- see
  * its doc comment).
  *
- * Two-step fallback:
+ * Each hop of the fallback walk tries three things, in order:
  * 1. Try the ordinary full-chain prefetchSpkQuery() first -- handles
  *    a self-contained custom kernel (its own chain reaches the SSB by
  *    itself, or the body is already relative to the SSB directly).
- * 2. If that fails, fall back to prefetchSpkBodySegment(): fetch just
- *    this body's own local segment (relative to whatever center the
- *    kernel actually declares -- discovered structurally, see
- *    discoverSpkBodies()), no chain-to-SSB requirement. Since
- *    KernelPool segments are file-agnostic, this is enough *if* the
- *    declared center's own chain to the SSB is already sitting in
- *    demo.remote.pool -- true for the common cases (Sun, Earth, any
- *    planet barycenter) since buildScene() already prefetched all ten
- *    standard bodies' own chains at session start. A real spkez()
- *    probe confirms the chain actually resolves now (or throws the
- *    library's own clear "no path back to the SSB" error if it
- *    doesn't -- e.g. a custom body relative to some other body that's
- *    neither in this file nor already loaded).
+ * 2. If that fails, walk hop by hop. At each hop, first check
+ *    demo.systemBodies -- a body already known there (any of the ten
+ *    standard ones, always; any previously-resolved satellite/custom
+ *    body) needs only its coverage widened (ensureBodyCoverage()), not
+ *    a fresh segment fetch.
+ * 3. Otherwise, try demo.remote.remoteFile (the primary kernel,
+ *    already open, already sharing this same pool) before assuming
+ *    the center can only be defined in the *custom* file -- a hop can
+ *    land on a body that's genuinely present in the primary kernel
+ *    without (yet) being one of demo.systemBodies. Falls back to the
+ *    custom file itself (prefetchSpkBodySegment(), one hop, no
+ *    chain-to-SSB requirement of its own) only if the primary kernel
+ *    doesn't have it either. A real spkez() probe at the end confirms
+ *    the chain actually resolves now (or throws the library's own
+ *    clear "no path back to the SSB" error if it doesn't -- e.g. a
+ *    custom body relative to some other body that's neither in this
+ *    file, the primary kernel, nor already loaded).
  */
 async function prefetchCustomBody(remoteFile, pool, target, etStart, etEnd) {
   try {
@@ -1988,7 +1992,22 @@ async function prefetchCustomBody(remoteFile, pool, target, etStart, etEnd) {
       break; // known bodies always themselves already chain to the SSB
     }
 
-    await prefetchSpkBodySegment(remoteFile, pool, { bodyId: current, etStart, etEnd });
+    // Not currently in demo.systemBodies, but possibly still present
+    // in the primary kernel (demo.remote.remoteFile, already open and
+    // sharing this same pool) -- e.g. a body demo.systemBodies simply
+    // hasn't resolved yet. Tried before the custom file itself since
+    // the primary kernel is the far more likely place for any
+    // standard body to live.
+    let foundInPrimary = false;
+    try {
+      await prefetchSpkBodySegment(demo.remote.remoteFile, pool, { bodyId: current, etStart, etEnd });
+      foundInPrimary = true;
+    } catch {
+      // Not in the primary kernel either -- fall through to the custom file.
+    }
+    if (!foundInPrimary) {
+      await prefetchSpkBodySegment(remoteFile, pool, { bodyId: current, etStart, etEnd });
+    }
     const segs = pool.getSpkSegments(current);
     current = segs[segs.length - 1].center;
   }
