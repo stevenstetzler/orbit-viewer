@@ -9,6 +9,8 @@ This work is inspired / derivative of other orbit viewer tools and software crea
 
 among others.
 
+This software and documentation in this projects has primarily been written by Claude Code.
+
 ## Install and run
 
 ```sh
