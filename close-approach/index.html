@@ -138,7 +138,7 @@ const timeSlider = document.getElementById('timeSlider');
 const timeLabel = document.getElementById('timeLabel');
 const epochControls = mountEpochControls(document.getElementById('epochControls'), {
   getEt0: () => demo.et0,
-  getCurrentEt: () => demo.et0 + Number(timeSlider.value) * DAY,
+  getCurrentEt: () => etForOffsetDays(Number(timeSlider.value)),
   getOffsetBounds: () => ({ min: Number(timeSlider.min), max: Number(timeSlider.max) }),
   setOffsetDays: (offsetDays) => {
     timeSlider.value = String(offsetDays);
@@ -221,6 +221,61 @@ function reaimCameraAt(newTarget) {
 let demo = null;
 let sceneUpdateSeq = 0;
 let scale = null;
+
+/**
+ * offsetDays (from timeSlider, relative to demo.et0) -> ET. Recomputing
+ * `demo.et0 + offsetDays * DAY` generically is *not* bit-exact with
+ * demo.kernelStartEt/kernelStopEt right at the slider's own extremes --
+ * confirmed live to be off by anywhere from sub-microsecond to a few
+ * microseconds, varying with demo.et0/the exact offsetDays involved,
+ * from two independent IEEE-754 rounding sources: the day<->seconds
+ * arithmetic here, *and* timeSlider's own `value` sanitization (an
+ * `<input type=range>`'s reported `.value` is the browser's own
+ * re-stringification of its internal float, which isn't guaranteed
+ * bit-identical to what was assigned). Even a sub-microsecond error,
+ * when it rounds downward, trips a real display bug in spicejs's
+ * et2utc()/et2utcCalendar(): an et just under a whole UTC second gets
+ * its printed seconds rounded up to "60.000" without the carry
+ * propagating into the next minute/day, e.g. "1899 DEC 31 23:59:60.000"
+ * instead of this page's own real kernel start "1900 JAN 01
+ * 00:00:00.000". Snapping to the exact, already-known bound whenever
+ * offsetDays comes within BOUNDARY_SNAP_TOLERANCE_DAYS of it -- rather
+ * than requiring exact equality, which the two rounding sources above
+ * can't reliably deliver -- sidesteps the rounding error entirely,
+ * rather than trying to fix spicejs's own carry logic from here.
+ * demo.minOffsetDays/maxOffsetDays (and their ET-space counterparts
+ * demo.minEt/maxEt, since unlike the other curated pages this one
+ * doesn't reassign demo.kernelStartEt/kernelStopEt itself -- see
+ * selectCloseApproach()'s own doc comment) track whatever the
+ * "Reference epoch" slider's own current min/max actually are --
+ * restricted to one close-approach object's own real coverage while
+ * it's active, back to the full 1900-2100 span otherwise.
+ */
+const BOUNDARY_SNAP_TOLERANCE_DAYS = 1e-6; // ~86 microseconds -- orders of magnitude above the observed sub-10-microsecond rounding noise, orders of magnitude below this page's own millisecond display precision
+function etForOffsetDays(offsetDays) {
+  if (offsetDays <= demo.minOffsetDays + BOUNDARY_SNAP_TOLERANCE_DAYS) return demo.minEt;
+  if (offsetDays >= demo.maxOffsetDays - BOUNDARY_SNAP_TOLERANCE_DAYS) return demo.maxEt;
+  return demo.et0 + offsetDays * DAY;
+}
+
+/**
+ * Sets the "Reference epoch" slider's own effective range to
+ * [minEt, maxEt] -- the one place demo.minEt/maxEt/minOffsetDays/
+ * maxOffsetDays and timeSlider.min/max are set together, so
+ * etForOffsetDays() above and the slider's own DOM bounds can never
+ * drift out of sync. Used for the full 1900-2100 span (buildScene(),
+ * and selectCloseApproach()'s own "back to full range" reset) and for
+ * restricting to one close-approach object's own real coverage
+ * (selectCloseApproach()'s own final restriction).
+ */
+function setSliderRange(minEt, maxEt) {
+  demo.minEt = minEt;
+  demo.maxEt = maxEt;
+  demo.minOffsetDays = (minEt - demo.et0) / DAY;
+  demo.maxOffsetDays = (maxEt - demo.et0) / DAY;
+  timeSlider.min = String(demo.minOffsetDays);
+  timeSlider.max = String(demo.maxOffsetDays);
+}
 
 function ensureMarkers() {
   for (const b of demo.bodies) {
@@ -359,7 +414,7 @@ function buildLegend(bodiesState) {
 async function updateSceneForOffset(offsetDays) {
   if (!demo) return;
   const mySeq = ++sceneUpdateSeq;
-  const et = demo.et0 + offsetDays * DAY;
+  const et = etForOffsetDays(offsetDays);
   timeLabel.textContent = `${et2utcCalendar(et)}  (${offsetDays >= 0 ? '+' : ''}${offsetDays.toFixed(2)} d)`;
   epochControls.refresh();
 
@@ -453,8 +508,7 @@ async function buildScene(proxyCatalogue) {
   ensureMarkers();
   buildLegend(demo.bodies);
 
-  timeSlider.min = String((demo.kernelStartEt - demo.et0) / DAY);
-  timeSlider.max = String((demo.kernelStopEt - demo.et0) / DAY);
+  setSliderRange(demo.kernelStartEt, demo.kernelStopEt);
   timeSlider.value = '0';
   timeSlider.disabled = false;
   epochControls.setEnabled(true);
@@ -637,7 +691,7 @@ async function selectCloseApproach(row) {
     // Already the active object -- just jump the epoch within its own
     // already-restricted slider range and re-aim, no need to refetch.
     if (demo.activeCloseApproachDes === row.des) {
-      const offsetDays = Math.min(Math.max((et - demo.et0) / DAY, Number(timeSlider.min)), Number(timeSlider.max));
+      const offsetDays = Math.min(Math.max((et - demo.et0) / DAY, demo.minOffsetDays), demo.maxOffsetDays);
       timeSlider.value = String(offsetDays);
       await updateSceneForOffset(offsetDays);
       lookAtBody(demo.bodies.find((b) => b.isCloseApproach && b.des === row.des));
@@ -650,9 +704,8 @@ async function selectCloseApproach(row) {
 
     // Back to the full range while nothing close-approach-specific is
     // active, so the new object's own (possibly far-off) date is reachable.
-    timeSlider.min = String((demo.kernelStartEt - demo.et0) / DAY);
-    timeSlider.max = String((demo.kernelStopEt - demo.et0) / DAY);
-    const offsetDays = Math.min(Math.max((et - demo.et0) / DAY, Number(timeSlider.min)), Number(timeSlider.max));
+    setSliderRange(demo.kernelStartEt, demo.kernelStopEt);
+    const offsetDays = Math.min(Math.max((et - demo.et0) / DAY, demo.minOffsetDays), demo.maxOffsetDays);
     timeSlider.value = String(offsetDays);
     await updateSceneForOffset(offsetDays);
 
@@ -706,9 +759,8 @@ async function selectCloseApproach(row) {
     const added = demo.bodies.filter((b) => b.isCloseApproach && b.des === row.des);
     const restrictStart = Math.max(...added.map((b) => b.coverageStart));
     const restrictEnd = Math.min(...added.map((b) => b.coverageEnd));
-    timeSlider.min = String((restrictStart - demo.et0) / DAY);
-    timeSlider.max = String((restrictEnd - demo.et0) / DAY);
-    timeSlider.value = String(Math.min(Math.max(offsetDays, Number(timeSlider.min)), Number(timeSlider.max)));
+    setSliderRange(restrictStart, restrictEnd);
+    timeSlider.value = String(Math.min(Math.max(offsetDays, demo.minOffsetDays), demo.maxOffsetDays));
     ensureMarkers();
     buildLegend(demo.bodies);
     await updateSceneForOffset(Number(timeSlider.value));
