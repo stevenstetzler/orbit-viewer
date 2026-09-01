@@ -130,15 +130,32 @@ export async function prefetchBodyProbe(remote, body, primaryId, et0) {
  * already live in (so it can be positioned relative to, or used as an
  * observer for, any of them). Tries the fast path (prefetchSpkQuery(),
  * which already knows how to chain through segments in `pool`) first,
- * then falls back to a manual hop-by-hop walk through `remoteFile`
- * itself for a body chained via a center this session doesn't already
- * know how to reach (e.g. a heliocentric small-body kernel).
- * `systemBodies`, if given, is consulted at each hop so a chain that
- * bottoms out at an already-known body (any of the ten standard ones,
- * or a previously resolved satellite/custom body) doesn't need its own
- * segment fetched from `remoteFile` at all.
+ * then falls back to a manual hop-by-hop walk for a body chained via a
+ * center this session doesn't already know how to reach (e.g. a
+ * heliocentric small-body kernel). Each hop tries three things, in
+ * order:
+ *  1. `systemBodies`, if given -- a chain that bottoms out at an
+ *     already-known body (a *currently displayed* one: any of the ten
+ *     standard bodies, or a previously resolved satellite/custom body)
+ *     doesn't need its own segment fetched at all, just its coverage
+ *     widened if necessary.
+ *  2. `primaryRemote`, if given -- the session's own primary kernel
+ *     (`de440s` in the ordinary case), already open and already
+ *     sharing this same `pool`. A hop can land on a body that's
+ *     genuinely present there (the Sun, a planet barycenter, ...)
+ *     without being a *currently displayed* one -- e.g. `/earth/
+ *     trajectory/` only ever puts Earth + the Moon in `systemBodies`,
+ *     so a heliocentric custom body's chain up through the Sun would
+ *     otherwise fall through to step 3 and fail, even though the
+ *     Sun's own segment is sitting right there in `primaryRemote`'s
+ *     file. Tried before the custom file itself since the primary
+ *     kernel is the far more likely place for any standard body to
+ *     live, custom-body-specific kernels notwithstanding.
+ *  3. `remoteFile` (the custom file itself) -- for a center that's
+ *     genuinely only defined there (a multi-hop chain fully contained
+ *     within the custom kernel).
  */
-export async function prefetchCustomBody(remoteFile, pool, target, etStart, etEnd, { systemBodies = [], counters = null, log = () => {} } = {}) {
+export async function prefetchCustomBody(remoteFile, pool, target, etStart, etEnd, { systemBodies = [], primaryRemote = null, counters = null, log = () => {} } = {}) {
   try {
     await prefetchSpkQuery(remoteFile, pool, { target, observer: SSB, etStart, etEnd });
     return;
@@ -168,7 +185,18 @@ export async function prefetchCustomBody(remoteFile, pool, target, etStart, etEn
       break;
     }
 
-    await prefetchSpkBodySegment(remoteFile, pool, { bodyId: current, etStart, etEnd });
+    let foundInPrimary = false;
+    if (primaryRemote) {
+      try {
+        await prefetchSpkBodySegment(primaryRemote.remoteFile, pool, { bodyId: current, etStart, etEnd });
+        foundInPrimary = true;
+      } catch {
+        // Not in the primary kernel either -- fall through to the custom file.
+      }
+    }
+    if (!foundInPrimary) {
+      await prefetchSpkBodySegment(remoteFile, pool, { bodyId: current, etStart, etEnd });
+    }
     const segs = pool.getSpkSegments(current);
     current = segs[segs.length - 1].center;
   }
@@ -191,7 +219,7 @@ export async function prefetchCustomBody(remoteFile, pool, target, etStart, etEn
  * narrower satellite kernel is the body's own limitation, not the
  * session's.
  */
-export async function openSatelliteRemote(entry, pool, openRemoteFileFn, log = () => {}) {
+export async function openSatelliteRemote(entry, pool, openRemoteFileFn, log = () => {}, primaryRemote = null) {
   log(`  Fetching ${entry.file} (${entry.size}) through the local proxy...`);
   const remoteFile = await openRemoteFileFn(new URL(`kernels/remote/${entry.file}`, SITE_ROOT).href);
   let discovered = new Map();
@@ -204,7 +232,7 @@ export async function openSatelliteRemote(entry, pool, openRemoteFileFn, log = (
     remoteFile,
     pool,
     discovered,
-    prefetch: ({ target, etStart, etEnd }) => prefetchCustomBody(remoteFile, pool, target, etStart, etEnd, { log }),
+    prefetch: ({ target, etStart, etEnd }) => prefetchCustomBody(remoteFile, pool, target, etStart, etEnd, { primaryRemote, log }),
   };
 }
 
@@ -233,7 +261,7 @@ export async function resolveOneSatellite(primaryRemote, parentSpec, candidate, 
   let satRemote = satelliteRemotes.get(mapping.kernelId);
   if (!satRemote) {
     try {
-      satRemote = await openSatelliteRemote(proxyCatalogue.get(mapping.kernelId), primaryRemote.pool, openRemoteFileFn, log);
+      satRemote = await openSatelliteRemote(proxyCatalogue.get(mapping.kernelId), primaryRemote.pool, openRemoteFileFn, log, primaryRemote);
       satelliteRemotes.set(mapping.kernelId, satRemote);
     } catch (err) {
       log(`  -> couldn't open ${mapping.kernelId}.bsp for ${candidate.name} (${err.message})`);

@@ -706,7 +706,7 @@ async function loadSelectedCustomBodies() {
     const info = discovered.get(target);
     const name = bodyName(target, demo.remote.pool);
     try {
-      await prefetchCustomBody(remoteFile, demo.remote.pool, target, info.etStart, info.etEnd, { systemBodies: demo.bodies, counters: demo.counters, log });
+      await prefetchCustomBody(remoteFile, demo.remote.pool, target, info.etStart, info.etEnd, { systemBodies: demo.bodies, primaryRemote: demo.remote, counters: demo.counters, log });
     } catch (err) {
       log(`  -> skipped ${name} (${target}): ${err.message}`);
       continue;
