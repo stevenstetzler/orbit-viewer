@@ -339,7 +339,7 @@ const timeSlider = document.getElementById('timeSlider');
 const timeLabel = document.getElementById('timeLabel');
 const epochControls = mountEpochControls(document.getElementById('epochControls'), {
   getEt0: () => demo.et0,
-  getCurrentEt: () => demo.et0 + Number(timeSlider.value) * DAY,
+  getCurrentEt: () => etForOffsetDays(Number(timeSlider.value)),
   getOffsetBounds: () => ({ min: Number(timeSlider.min), max: Number(timeSlider.max) }),
   setOffsetDays: (offsetDays) => {
     timeSlider.value = String(offsetDays);
@@ -1362,6 +1362,40 @@ let modeChangeInFlight = false;
 let sceneUpdateSeq = 0; // see updateSceneForOffset()'s staleness guard
 let proxyCatalogue = null; // Map<kernelId, entry> once detectKernelProxy() finds one; null otherwise
 
+/**
+ * offsetDays (from timeSlider, relative to demo.et0) -> ET. Recomputing
+ * `demo.et0 + offsetDays * DAY` generically is *not* bit-exact with
+ * demo.kernelStartEt/kernelStopEt right at the slider's own extremes --
+ * confirmed live (on the curated /<body>/trajectory/ pages, which share
+ * this exact pattern) to be off by anywhere from sub-microsecond to a
+ * few microseconds, varying with demo.et0/the exact offsetDays
+ * involved, from two independent IEEE-754 rounding sources: the
+ * day<->seconds arithmetic here, *and* timeSlider's own `value`
+ * sanitization (an `<input type=range>`'s reported `.value` is the
+ * browser's own re-stringification of its internal float, which isn't
+ * guaranteed bit-identical to what was assigned). Even a sub-microsecond
+ * error, when it rounds downward, trips a real display bug in spicejs's
+ * et2utc()/et2utcCalendar(): an et just under a whole UTC second gets
+ * its printed seconds rounded up to "60.000" without the carry
+ * propagating into the next minute/day, e.g. "1899 DEC 31 23:59:60.000"
+ * instead of the real kernel start "1900 JAN 01 00:00:00.000". Snapping
+ * to the exact, already-known bound whenever offsetDays comes within
+ * BOUNDARY_SNAP_TOLERANCE_DAYS of it -- rather than requiring exact
+ * equality, which the two rounding sources above can't reliably deliver
+ * -- sidesteps the rounding error entirely, rather than trying to fix
+ * spicejs's own carry logic from here. demo.minOffsetDays/maxOffsetDays
+ * track whatever demo.kernelStartEt/kernelStopEt currently are --
+ * narrowed by narrowKernelRange() below when a custom/satellite
+ * kernel's own real coverage is tighter than the default 1900-2100
+ * span.
+ */
+const BOUNDARY_SNAP_TOLERANCE_DAYS = 1e-6; // ~86 microseconds -- orders of magnitude above the observed sub-10-microsecond rounding noise, orders of magnitude below this page's own millisecond display precision
+function etForOffsetDays(offsetDays) {
+  if (offsetDays <= demo.minOffsetDays + BOUNDARY_SNAP_TOLERANCE_DAYS) return demo.kernelStartEt;
+  if (offsetDays >= demo.maxOffsetDays - BOUNDARY_SNAP_TOLERANCE_DAYS) return demo.kernelStopEt;
+  return demo.et0 + offsetDays * DAY;
+}
+
 // Position scale, in scene units per km, for each Position-scale mode
 // (see the "Position scale"/"Radius scale" View controls). `linear` is
 // the same AU-anchored factor kmToScene() always used (SCENE_UNITS_PER_AU
@@ -1783,8 +1817,10 @@ function narrowKernelRange(newStartEt, newStopEt, label) {
   }
   demo.kernelStartEt = start;
   demo.kernelStopEt = stop;
-  timeSlider.min = String((demo.kernelStartEt - demo.et0) / DAY);
-  timeSlider.max = String((demo.kernelStopEt - demo.et0) / DAY);
+  demo.minOffsetDays = (demo.kernelStartEt - demo.et0) / DAY;
+  demo.maxOffsetDays = (demo.kernelStopEt - demo.et0) / DAY;
+  timeSlider.min = String(demo.minOffsetDays);
+  timeSlider.max = String(demo.maxOffsetDays);
   return narrowed;
 }
 
@@ -1853,7 +1889,9 @@ let pendingCustomKernel = null; // { file, remoteFile, discovered } while the mo
  */
 function openCustomKernelModal(file, remoteFile, discovered, knownNames = null) {
   const bodies = [...discovered.values()].sort((a, b) => a.target - b.target);
-  pendingCustomKernel = { file, remoteFile, discovered, knownNames };
+  const etMin = Math.min(...bodies.map((b) => b.etStart));
+  const etMax = Math.max(...bodies.map((b) => b.etEnd));
+  pendingCustomKernel = { file, remoteFile, discovered, knownNames, etMin, etMax };
 
   customKernelModalTitle.textContent = `Add bodies from ${file.name} (${bodies.length} found)`;
   customKernelBodyList.innerHTML = '';
@@ -1876,18 +1914,42 @@ function openCustomKernelModal(file, remoteFile, discovered, knownNames = null) 
     customKernelBodyList.appendChild(li);
   }
 
-  const etMin = Math.min(...bodies.map((b) => b.etStart));
-  const etMax = Math.max(...bodies.map((b) => b.etEnd));
   customKernelEpochSlider.min = String(etMin);
   customKernelEpochSlider.max = String(etMax);
-  customKernelEpochSlider.value = String((etMin + etMax) / 2);
+  // Rounded to the nearest microsecond, not used raw: plain averaging
+  // can leave sub-microsecond IEEE-754 noise on the result, and when
+  // etMin/etMax bracket a "nice" instant (e.g. a kernel that starts/ends
+  // exactly on a whole day), that noise alone is enough to trip the same
+  // et2utc()/et2utcCalendar() carry bug etForOffsetDays() above guards
+  // against -- confirmed live with a synthetic 2020-01-01..2020-01-10
+  // kernel, whose exact midpoint (2020-01-05T12:00:00) rendered as
+  // "2020 JAN 05 11:59:60.000" without this rounding.
+  customKernelEpochSlider.value = String(Math.round((etMin + etMax) / 2 * 1e6) / 1e6);
   updateCustomKernelEpochLabel();
 
   customKernelModal.style.display = '';
 }
 
+// ~1 microsecond -- same snap-to-known-bound idea as
+// BOUNDARY_SNAP_TOLERANCE_DAYS above, sized for this slider's own units
+// (ET seconds directly, not day-offsets), since customKernelEpochSlider.min/
+// max are already absolute ET values with no separate day<->seconds
+// arithmetic layer to round-trip through -- only the range input's own
+// `value` sanitization can introduce noise here.
+const EPOCH_SLIDER_SNAP_TOLERANCE_SECONDS = 1e-6;
+
+/** customKernelEpochSlider's current value, snapped to pendingCustomKernel's own etMin/etMax when within EPOCH_SLIDER_SNAP_TOLERANCE_SECONDS of either -- see etForOffsetDays() above for why this matters (the same et2utc()/et2utcCalendar() carry bug applies here too). */
+function customKernelChosenEt() {
+  const raw = Number(customKernelEpochSlider.value);
+  if (!pendingCustomKernel) return raw;
+  const { etMin, etMax } = pendingCustomKernel;
+  if (raw <= etMin + EPOCH_SLIDER_SNAP_TOLERANCE_SECONDS) return etMin;
+  if (raw >= etMax - EPOCH_SLIDER_SNAP_TOLERANCE_SECONDS) return etMax;
+  return raw;
+}
+
 function updateCustomKernelEpochLabel() {
-  customKernelEpochLabel.textContent = et2utcCalendar(Number(customKernelEpochSlider.value));
+  customKernelEpochLabel.textContent = et2utcCalendar(customKernelChosenEt());
 }
 
 function closeCustomKernelModal() {
@@ -2051,7 +2113,7 @@ async function loadSelectedCustomBodies() {
   const { file, remoteFile, discovered, knownNames } = pendingCustomKernel;
   const checkedTargets = [...customKernelBodyList.querySelectorAll('input[type=checkbox]:checked')]
     .map((cb) => Number(cb.dataset.target));
-  const chosenEt0 = Number(customKernelEpochSlider.value);
+  const chosenEt0 = customKernelChosenEt();
   closeCustomKernelModal();
 
   if (checkedTargets.length === 0) {
@@ -2136,8 +2198,13 @@ async function loadSelectedCustomBodies() {
     log(`  -> the chosen reference epoch (${et2utcCalendar(chosenEt0)}) falls outside the narrowed range; ` +
       `using ${et2utcCalendar(demo.et0)} instead.`);
   }
-  timeSlider.min = String((demo.kernelStartEt - demo.et0) / DAY);
-  timeSlider.max = String((demo.kernelStopEt - demo.et0) / DAY);
+  // demo.et0 just moved -- minOffsetDays/maxOffsetDays (set relative to
+  // the *old* et0 inside narrowKernelRange() above) need recomputing
+  // relative to the new one, not just re-stringifying the stale values.
+  demo.minOffsetDays = (demo.kernelStartEt - demo.et0) / DAY;
+  demo.maxOffsetDays = (demo.kernelStopEt - demo.et0) / DAY;
+  timeSlider.min = String(demo.minOffsetDays);
+  timeSlider.max = String(demo.maxOffsetDays);
   timeSlider.value = '0';
   await updateSceneForOffset(0);
 }
@@ -2815,8 +2882,10 @@ async function buildScene() {
   // kernelStopEt, see beginSession()), not a fixed window -- the slider's
   // own value is always an *offset in days from demo.et0*, so the bounds
   // are expressed the same way.
-  timeSlider.min = String((demo.kernelStartEt - demo.et0) / DAY);
-  timeSlider.max = String((demo.kernelStopEt - demo.et0) / DAY);
+  demo.minOffsetDays = (demo.kernelStartEt - demo.et0) / DAY;
+  demo.maxOffsetDays = (demo.kernelStopEt - demo.et0) / DAY;
+  timeSlider.min = String(demo.minOffsetDays);
+  timeSlider.max = String(demo.maxOffsetDays);
   timeSlider.disabled = false;
   epochControls.setEnabled(true);
   centerSelect.disabled = false;
@@ -3324,8 +3393,13 @@ async function openSatelliteKernel(kernelId) {
           log(`  -> the current reference epoch (${et2utcCalendar(currentEt)}) is now outside the narrowed ` +
             `range; moved to ${et2utcCalendar(clamped)}.`);
           demo.et0 = clamped;
-          timeSlider.min = String((demo.kernelStartEt - demo.et0) / DAY);
-          timeSlider.max = String((demo.kernelStopEt - demo.et0) / DAY);
+          // demo.et0 just moved again -- minOffsetDays/maxOffsetDays (set
+          // relative to the previous et0 inside narrowKernelRange() above)
+          // need recomputing relative to the new one.
+          demo.minOffsetDays = (demo.kernelStartEt - demo.et0) / DAY;
+          demo.maxOffsetDays = (demo.kernelStopEt - demo.et0) / DAY;
+          timeSlider.min = String(demo.minOffsetDays);
+          timeSlider.max = String(demo.maxOffsetDays);
           timeSlider.value = '0';
         }
       }
@@ -3625,7 +3699,7 @@ function handlePreciseModeClick(b, evt) {
 async function updateSceneForOffset(offsetDays) {
   if (!demo) return;
   const mySeq = ++sceneUpdateSeq;
-  const et = demo.et0 + offsetDays * DAY;
+  const et = etForOffsetDays(offsetDays);
   timeLabel.textContent = `${et2utcCalendar(et)}  (${offsetDays >= 0 ? '+' : ''}${offsetDays.toFixed(2)} d)`;
   epochControls.refresh();
 

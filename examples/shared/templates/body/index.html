@@ -98,7 +98,7 @@ const timeSlider = document.getElementById('timeSlider');
 const timeLabel = document.getElementById('timeLabel');
 const epochControls = mountEpochControls(document.getElementById('epochControls'), {
   getEt0: () => demo.et0,
-  getCurrentEt: () => demo.et0 + Number(timeSlider.value) * DAY,
+  getCurrentEt: () => etForOffsetDays(Number(timeSlider.value)),
   getOffsetBounds: () => ({ min: Number(timeSlider.min), max: Number(timeSlider.max) }),
   setOffsetDays: (offsetDays) => {
     timeSlider.value = String(offsetDays);
@@ -207,6 +207,35 @@ let demo = null;
 let sceneUpdateSeq = 0;
 let scale = null;
 
+/**
+ * offsetDays (from timeSlider, relative to demo.et0) -> ET. Recomputing
+ * `demo.et0 + offsetDays * DAY` generically is *not* bit-exact with
+ * demo.kernelStartEt/kernelStopEt right at the slider's own extremes --
+ * confirmed live to be off by anywhere from sub-microsecond to a few
+ * microseconds, varying with demo.et0/the exact offsetDays involved,
+ * from two independent IEEE-754 rounding sources: the day<->seconds
+ * arithmetic here, *and* timeSlider's own `value` sanitization (an
+ * `<input type=range>`'s reported `.value` is the browser's own
+ * re-stringification of its internal float, which isn't guaranteed
+ * bit-identical to what was assigned). Even a sub-microsecond error,
+ * when it rounds downward, trips a real display bug in spicejs's
+ * et2utc()/et2utcCalendar(): an et just under a whole UTC second gets
+ * its printed seconds rounded up to "60.000" without the carry
+ * propagating into the next minute/day, e.g. "1899 DEC 31 23:59:60.000"
+ * instead of this page's own real kernel start "1900 JAN 01
+ * 00:00:00.000". Snapping to the exact, already-known bound whenever
+ * offsetDays comes within BOUNDARY_SNAP_TOLERANCE_DAYS of it -- rather
+ * than requiring exact equality, which the two rounding sources above
+ * can't reliably deliver -- sidesteps the rounding error entirely,
+ * rather than trying to fix spicejs's own carry logic from here.
+ */
+const BOUNDARY_SNAP_TOLERANCE_DAYS = 1e-6; // ~86 microseconds -- orders of magnitude above the observed sub-10-microsecond rounding noise, orders of magnitude below this page's own millisecond display precision
+function etForOffsetDays(offsetDays) {
+  if (offsetDays <= demo.minOffsetDays + BOUNDARY_SNAP_TOLERANCE_DAYS) return demo.kernelStartEt;
+  if (offsetDays >= demo.maxOffsetDays - BOUNDARY_SNAP_TOLERANCE_DAYS) return demo.kernelStopEt;
+  return demo.et0 + offsetDays * DAY;
+}
+
 function ensureMarkers() {
   for (const b of demo.bodies) {
     if (b.marker) scene.remove(b.marker);
@@ -289,7 +318,7 @@ function buildLegend(bodiesState) {
 async function updateSceneForOffset(offsetDays) {
   if (!demo) return;
   const mySeq = ++sceneUpdateSeq;
-  const et = demo.et0 + offsetDays * DAY;
+  const et = etForOffsetDays(offsetDays);
   timeLabel.textContent = `${et2utcCalendar(et)}  (${offsetDays >= 0 ? '+' : ''}${offsetDays.toFixed(2)} d)`;
   epochControls.refresh();
 
@@ -358,8 +387,10 @@ async function buildScene(proxyCatalogue) {
   ensureMarkers();
   buildLegend(demo.bodies);
 
-  timeSlider.min = String((demo.kernelStartEt - demo.et0) / DAY);
-  timeSlider.max = String((demo.kernelStopEt - demo.et0) / DAY);
+  demo.minOffsetDays = (demo.kernelStartEt - demo.et0) / DAY;
+  demo.maxOffsetDays = (demo.kernelStopEt - demo.et0) / DAY;
+  timeSlider.min = String(demo.minOffsetDays);
+  timeSlider.max = String(demo.maxOffsetDays);
   timeSlider.value = '0';
   timeSlider.disabled = false;
   epochControls.setEnabled(true);
