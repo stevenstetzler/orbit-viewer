@@ -1,0 +1,104 @@
+name: Deploy
+
+# See deploy/README.md for the one-time host setup this workflow
+# assumes: the self-hosted runner registered with the orbit-viewer-deploy
+# label, /srv/orbit-viewer/ owned by the runner's own user, and the
+# deploy/sudo/ wrapper scripts + sudoers rule + systemd units + nginx
+# include already installed there by hand (deliberately never by this
+# workflow itself -- see that doc's "Why the deploy scripts aren't
+# auto-installed").
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+  push:
+    branches: [main]
+
+concurrency:
+  # A new push to the same PR supersedes its own in-flight preview
+  # deploy; prod deploys (no PR number) share a single 'prod' group so
+  # two pushes to main can't race each other's restart.
+  group: orbit-viewer-deploy-${{ github.event.pull_request.number || 'prod' }}
+  cancel-in-progress: true
+
+jobs:
+  # Gated behind the "preview" Environment's required-reviewers rule
+  # (repo Settings -> Environments -- see deploy/README.md) -- every
+  # step below, including the checkout, waits for a maintainer to
+  # approve this specific run before any of it executes. That approval
+  # is the actual security boundary here, not just a formality: this
+  # job runs the PR branch's own code, unreviewed, on the same machine
+  # production lives on.
+  preview:
+    if: github.event_name == 'pull_request' && github.event.action != 'closed'
+    runs-on: [self-hosted, orbit-viewer-deploy]
+    environment: preview
+    steps:
+      - name: Compute branch slug
+        id: slug
+        run: |
+          RAW="${{ github.head_ref }}"
+          SLUG=$(printf '%s' "$RAW" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-60 | sed -E 's/-+$//')
+          if [[ -z "$SLUG" ]]; then
+            echo "::error::branch '$RAW' has no usable characters for a URL slug" >&2
+            exit 1
+          fi
+          echo "slug=$SLUG" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Sync into persistent preview directory and install deps
+        run: bash deploy/sync-and-build.sh "/srv/orbit-viewer/branches/${{ steps.slug.outputs.slug }}"
+
+      - name: Deploy preview (nginx + systemd, via the installed wrapper script)
+        run: sudo /usr/local/bin/orbit-viewer-deploy-preview.sh "${{ steps.slug.outputs.slug }}"
+
+      - name: Summary
+        run: |
+          {
+            echo "### Preview deployed"
+            echo "Branch \`${{ github.head_ref }}\` -> \`/${{ steps.slug.outputs.slug }}/\` on the deploy host."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Not gated -- runs automatically the moment a PR closes (merged or
+  # not), so a preview never outlives the PR it belongs to. Nothing
+  # here needs approval: it only ever removes what preview's own
+  # approved run created, never adds anything new.
+  teardown:
+    if: github.event_name == 'pull_request' && github.event.action == 'closed'
+    runs-on: [self-hosted, orbit-viewer-deploy]
+    steps:
+      - name: Compute branch slug
+        id: slug
+        run: |
+          RAW="${{ github.head_ref }}"
+          SLUG=$(printf '%s' "$RAW" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-60 | sed -E 's/-+$//')
+          echo "slug=$SLUG" >> "$GITHUB_OUTPUT"
+
+      - name: Tear down preview (nginx + systemd, via the installed wrapper script)
+        if: steps.slug.outputs.slug != ''
+        run: sudo /usr/local/bin/orbit-viewer-teardown-preview.sh "${{ steps.slug.outputs.slug }}"
+
+      - name: Remove the persistent checkout
+        if: steps.slug.outputs.slug != ''
+        run: rm -rf "/srv/orbit-viewer/branches/${{ steps.slug.outputs.slug }}"
+
+  # main only merges through a reviewed, approved PR in the first
+  # place, so this deliberately isn't behind its own separate approval
+  # gate the way `preview` is -- add `environment: production` here
+  # too if you'd rather have a second, explicit gate at deploy time.
+  prod:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, orbit-viewer-deploy]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sync into the production directory and install deps
+        run: bash deploy/sync-and-build.sh /srv/orbit-viewer/prod
+
+      - name: Deploy production (restart, via the installed wrapper script)
+        run: sudo /usr/local/bin/orbit-viewer-deploy-prod.sh
+
+      - name: Summary
+        run: echo "Deployed production at \`${{ github.sha }}\`." >> "$GITHUB_STEP_SUMMARY"

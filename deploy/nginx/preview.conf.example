@@ -1,0 +1,19 @@
+# NOT installed directly -- this is what
+# deploy/sudo/orbit-viewer-deploy-preview.sh actually *writes*, one
+# real file per active preview, to
+# /etc/nginx/conf.d/orbit-viewer-previews/<slug>.conf. Shown here so
+# you can see exactly what a preview's nginx config looks like without
+# having to read the wrapper script -- this file itself is never
+# read by nginx or by any script.
+#
+# <slug> and <port> below are filled in from the branch name and the
+# port this preview was allocated (see deploy/README.md's "How
+# branch names become URLs" and "Port allocation").
+location /<slug>/ {
+    proxy_pass http://127.0.0.1:<port>/;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}

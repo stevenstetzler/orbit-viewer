@@ -1,0 +1,45 @@
+
+# Template unit for one branch preview -- `%i` is the branch slug (see
+# deploy/README.md for what "slug" means and how it's computed), so
+# `systemctl start orbit-viewer@my-feature-branch.service` runs the
+# checkout at /srv/orbit-viewer/branches/my-feature-branch on the port
+# recorded in /etc/orbit-viewer/previews/my-feature-branch.env --
+# both written by deploy/sudo/orbit-viewer-deploy-preview.sh, never by
+# hand.
+#
+# Install once: copy this file to /etc/systemd/system/, then
+# `systemctl daemon-reload`. A *new* preview branch never needs a
+# daemon-reload of its own -- only a change to this template file
+# itself does; deploy/sudo/orbit-viewer-deploy-preview.sh just
+# `systemctl enable --now`s a new instance name against the template
+# already on disk.
+#
+# Replace RUNNER_USER below with the actual account the self-hosted
+# runner service runs as (see deploy/README.md) before installing.
+
+[Unit]
+Description=orbit-viewer preview (%i)
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/orbit-viewer/previews/%i.env
+WorkingDirectory=/srv/orbit-viewer/branches/%i
+ExecStart=/usr/bin/env node scripts/serve-example.mjs --port ${PORT}
+Restart=on-failure
+RestartSec=2
+User=RUNNER_USER
+Group=RUNNER_USER
+
+# Hardening: this process runs code from an *unreviewed* (until the
+# preview environment's own approval gate -- see deploy/README.md)
+# pull request branch, on the same machine production runs on. Give it
+# nothing beyond what it actually needs.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/orbit-viewer/branches/%i /srv/orbit-viewer/cache
+
+[Install]
+WantedBy=multi-user.target
