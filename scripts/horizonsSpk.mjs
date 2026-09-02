@@ -27,28 +27,117 @@
  *    body ID -- moot here, since SBDB's own `spkid` is never
  *    ambiguous with one).
  *
- * One genuinely non-obvious Horizons quirk, still relevant here:
- * **`COMMAND`'s value must include literal surrounding single quotes
- * as part of the string content itself**, not just shell-escaping for
- * curl the way the docs' own examples make it look. Confirmed
- * directly: `COMMAND=DES=2099942` (properly percent-encoded, no
- * quotes) fails with `"missing COMMAND content"`; `COMMAND='DES=2099942'`
- * (quotes as literal characters, *then* percent-encoded as a whole)
- * succeeds. buildHorizonsSpkUrl() below always wraps the command
- * value in `'...'` for exactly this reason.
+ * Two genuinely non-obvious Horizons quirks, both confirmed directly
+ * against the real API (not just the docs), still relevant here:
+ *
+ * - **`COMMAND`'s value must include literal surrounding single quotes
+ *   as part of the string content itself**, not just shell-escaping for
+ *   curl the way the docs' own examples make it look. Confirmed
+ *   directly: `COMMAND=DES=2099942` (properly percent-encoded, no
+ *   quotes) fails with `"missing COMMAND content"`; `COMMAND='DES=2099942'`
+ *   (quotes as literal characters, *then* percent-encoded as a whole)
+ *   succeeds. The same is true of any `START_TIME`/`STOP_TIME` value
+ *   that contains a space (a time-of-day component, not just a bare
+ *   date): unquoted, Horizons' own parameter parser rejects it with
+ *   `"Too many constants"`; quoted, exactly like `COMMAND`, it works.
+ *   buildHorizonsSpkUrl() below wraps every one of these three values
+ *   in `'...'` for exactly this reason.
+ *
+ * - **`START_TIME`/`STOP_TIME` default to the TDB timescale, not UTC,
+ *   whenever `CENTER` isn't geocentric** (`CENTER=SUN` here always is
+ *   not) -- confirmed directly: requesting `START_TIME=1990-01-01`
+ *   with no timescale label produces an SPK whose real coverage begins
+ *   at ET -315576000, which is bit-for-bit what parsing that same
+ *   string as **TDB** produces (`str2et('1990-01-01 00:00:00 TDB')`),
+ *   not UTC (`str2et('1990-01-01T00:00:00')`, off by exactly 57.184s
+ *   -- 25 leap seconds + the fixed 32.184s TT-TAI offset, as of 1990).
+ *   This is also *documented* Horizons behavior (`TIME_TYPE`'s default
+ *   is "UT for an Earth-based observer, TDB otherwise"), not a bug in
+ *   Horizons itself -- but passing an explicit `TIME_TYPE=UT` to
+ *   override it has no effect on an `EPHEM_TYPE=SPK` request specifically
+ *   (confirmed: the request still succeeds, but the resulting SPK's
+ *   real coverage is unchanged from the TDB-default case) -- nor does
+ *   appending a `UT`/`TDB` label directly onto the `START_TIME`/
+ *   `STOP_TIME` value itself the way Horizons' own docs describe for
+ *   other endpoints (confirmed:
+ *   `START_TIME=1990-01-01UT` fails with `"No UT/TT time-scale
+ *   specification for START time; all times are TDB"`, i.e. Horizons
+ *   doesn't even recognize the label there for SPK generation). The
+ *   only way found to actually control what UTC instant an SPK's real
+ *   coverage bound lands on: convert the desired UTC time to its
+ *   TDB-timescale calendar equivalent *before* sending it, since that
+ *   default interpretation is applied deterministically. See
+ *   `toHorizonsTimeParam()` below.
  *
  * `format=json` (used for both APIs here, over the docs' `text`
  * default) is much simpler to parse than embedded-in-plain-text
  * shapes -- see each function's own doc comment for its exact fields.
  *
- * No Node-server-only dependencies beyond the global `fetch()` --
- * same convention scripts/download-spk.mjs already uses for its own
- * outbound requests to NAIF -- so this module works unmodified from
- * scripts/serve-example.mjs's own Node process.
+ * The only Node-server-only dependency beyond the global `fetch()`
+ * (the same convention scripts/download-spk.mjs already uses for its
+ * own outbound requests to NAIF) is `spicejs` itself, for the UTC->TDB
+ * conversion above -- already an ordinary npm dependency of this repo
+ * (see package.json), and already imported the same way from
+ * scripts/inspect-spk.mjs.
  */
+import { readFileSync } from 'node:fs';
+import { load, str2et } from 'spicejs';
 
 const SBDB_API_URL = 'https://ssd-api.jpl.nasa.gov/sbdb.api';
 const HORIZONS_API_URL = 'https://ssd.jpl.nasa.gov/api/horizons.api';
+
+// Loaded once, lazily, into spicejs's own default/global pool (the same
+// convention every browser-side str2et() call in this app relies on --
+// see examples/shared/kernelSession.js's loadLeapseconds()) -- str2et()
+// needs the real leap-second table (DELTET/DELTA_AT) to convert a UTC
+// time string to ET correctly for any date, not just ones after this
+// process started.
+let leapsecondsLoaded = null;
+function ensureLeapsecondsLoaded() {
+  if (!leapsecondsLoaded) {
+    const bytes = readFileSync(new URL('../kernels/naif0012.tls', import.meta.url));
+    leapsecondsLoaded = load(bytes);
+  }
+  return leapsecondsLoaded;
+}
+
+/**
+ * `et` (TDB seconds past the J2000 epoch, 2000-01-01T12:00:00) formatted
+ * as a calendar string using plain, uniform (leap-second-free) Gregorian
+ * calendar arithmetic -- exactly the same convention `Date.UTC()`/
+ * `Date`'s own UTC getters already use, which is why this works: TDB
+ * itself is a uniform, leap-second-free continuous timescale, so
+ * treating `et` as a millisecond offset from J2000 and reading off
+ * Y/M/D/h/m/s via ordinary `Date` arithmetic reproduces precisely what
+ * Horizons computes when it defaults an unlabeled START_TIME/STOP_TIME
+ * to TDB (confirmed directly -- see this file's own top doc comment).
+ * Millisecond precision (plenty for an SPK coverage bound, and already
+ * finer than this app ever displays a time to) keeps the round-trip
+ * error under ~1ms, confirmed directly against the real API.
+ */
+function etToUniformCalendarString(et) {
+  const J2000_MS = Date.UTC(2000, 0, 1, 12, 0, 0);
+  const d = new Date(J2000_MS + et * 1000);
+  const pad = (n, width = 2) => String(Math.trunc(n)).padStart(width, '0');
+  return (
+    `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ` +
+    `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}.${pad(d.getUTCMilliseconds(), 3)}`
+  );
+}
+
+/**
+ * Converts `utcTimeString` (any UTC calendar/JD string `str2et()`
+ * accepts, e.g. `'1900-01-01'` or `'2020-06-15T12:00:00'`) into the
+ * `START_TIME`/`STOP_TIME` value that actually gets Horizons to treat
+ * it as that UTC instant -- see this file's own top doc comment for
+ * why a plain pass-through doesn't work. Quoted (see the `COMMAND`
+ * quoting note above) since the result always contains a space.
+ */
+async function toHorizonsTimeParam(utcTimeString) {
+  await ensureLeapsecondsLoaded();
+  const et = str2et(utcTimeString);
+  return `'${etToUniformCalendarString(et)}'`;
+}
 
 /**
  * Resolves `sstr` (whatever the user typed -- a name, a numbered or
@@ -118,8 +207,19 @@ export async function resolveSbdbObject(sstr) {
  * (from resolveSbdbObject() above) -- `EPHEM_TYPE=SPK`,
  * `REF_PLANE=ECLIPTIC`, `FRAME=J2000`, `CENTER=SUN` as specified, plus
  * the `COMMAND` quoting fix above (applied unconditionally).
+ *
+ * `startTime`/`stopTime` are UTC (any string `str2et()` accepts, e.g.
+ * `'1900-01-01'` or `'2020-06-15T12:00:00'`) -- converted through
+ * `toHorizonsTimeParam()` (this file's own top doc comment explains
+ * why a plain pass-through doesn't land on the UTC instant a caller
+ * actually asked for) before being sent as `START_TIME`/`STOP_TIME`.
+ * Async only because of that conversion (needs the leap-second table).
  */
-export function buildHorizonsSpkUrl({ spkid, startTime, stopTime }) {
+export async function buildHorizonsSpkUrl({ spkid, startTime, stopTime }) {
+  const [horizonsStartTime, horizonsStopTime] = await Promise.all([
+    toHorizonsTimeParam(startTime),
+    toHorizonsTimeParam(stopTime),
+  ]);
   const params = new URLSearchParams({
     format: 'json',
     COMMAND: `'DES=${spkid}'`,
@@ -129,8 +229,8 @@ export function buildHorizonsSpkUrl({ spkid, startTime, stopTime }) {
     REF_PLANE: 'ECLIPTIC',
     FRAME: 'J2000',
     CENTER: 'SUN',
-    START_TIME: startTime,
-    STOP_TIME: stopTime,
+    START_TIME: horizonsStartTime,
+    STOP_TIME: horizonsStopTime,
   });
   return `${HORIZONS_API_URL}?${params}`;
 }
@@ -140,8 +240,9 @@ export function buildHorizonsSpkUrl({ spkid, startTime, stopTime }) {
  * resolveSbdbObject() -- this function deliberately does *not* take a
  * raw user-typed string; resolving that to a `spkid` first is the
  * caller's job, since it's a separate, disambiguation-capable step)
- * over `[startTime, stopTime]` (any date string Horizons accepts,
- * e.g. `'2020-01-01'`), returning `{ bytes: Uint8Array, id: spk_file_id }`.
+ * over `[startTime, stopTime]` (any UTC date string `str2et()` accepts,
+ * e.g. `'2020-01-01'` -- see buildHorizonsSpkUrl()'s own doc comment),
+ * returning `{ bytes: Uint8Array, id: spk_file_id }`.
  *
  * Throws a plain `Error` (message = Horizons' own `error` or `result`
  * text) if Horizons couldn't produce an SPK for this *specific*
@@ -154,7 +255,7 @@ export function buildHorizonsSpkUrl({ spkid, startTime, stopTime }) {
  * resolveSbdbObject()'s job, upstream of this call.)
  */
 export async function fetchHorizonsSpk({ spkid, startTime, stopTime }) {
-  const url = buildHorizonsSpkUrl({ spkid, startTime, stopTime });
+  const url = await buildHorizonsSpkUrl({ spkid, startTime, stopTime });
   let response;
   try {
     response = await fetch(url);
