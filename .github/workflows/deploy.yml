@@ -3,10 +3,10 @@ name: Deploy
 # See deploy/README.md for the one-time host setup this workflow
 # assumes: the self-hosted runner registered with the orbit-viewer-deploy
 # label, /srv/orbit-viewer/ owned by the runner's own user, and the
-# deploy/sudo/ wrapper scripts + sudoers rule + systemd units + nginx
-# include already installed there by hand (deliberately never by this
-# workflow itself -- see that doc's "Why the deploy scripts aren't
-# auto-installed").
+# wrapper scripts + sudoers rule + systemd units + nginx config
+# installed by stevenstetzler/cloud-apps's Ansible roles -- deliberately
+# never by this workflow itself (see that doc's "What lives here vs.
+# what lives in cloud-apps").
 on:
   pull_request:
     types: [opened, synchronize, reopened, closed]
