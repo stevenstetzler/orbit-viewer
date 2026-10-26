@@ -88,6 +88,7 @@ import {
   ensureBodyCoverage, prefetchBodyProbe, bodyHasCoverageAt, resolveSatellitesFor,
 } from '../examples/shared/kernelSession.js';
 import { mountEpochControls } from '../examples/shared/epochInput.js';
+import { bodyFixedToJ2000 } from '../examples/shared/bodyOrientation.js';
 
 const { load, str2et, et2utcCalendar, openRemoteSpk, openRemoteFile, spkez } = window.spicejs;
 
@@ -236,15 +237,80 @@ function etForOffsetDays(offsetDays) {
   return demo.et0 + offsetDays * DAY;
 }
 
+// Surface images, by physical body id -- see textures/README.md for sources.
+// Both are equirectangular with longitude 0 at the image's centre. Bodies
+// without an entry stay flat-colored.
+const SURFACE_TEXTURES = {
+  399: '../textures/earth.jpg',
+  301: '../textures/moon.jpg',
+};
+const textureLoader = new THREE.TextureLoader();
+
+/**
+ * Body-fixed -> three.js local axes for a SphereGeometry: its poles are on
+ * +Y and u = 0.5 (image centre, longitude 0) is on +X, with longitude
+ * increasing toward -Z. So body x -> X, body z (north pole) -> Y,
+ * body y (90 degrees E) -> -Z.
+ */
+const BODY_TO_SPHERE = new THREE.Matrix4().set(
+  1, 0, 0, 0,
+  0, 0, 1, 0,
+  0, -1, 0, 0,
+  0, 0, 0, 1,
+);
+const SPHERE_TO_BODY = BODY_TO_SPHERE.clone().invert();
+/** J2000 -> scene axes, the same Y/Z swap scale.js's scaleLinearPosition() applies to positions. */
+const J2000_TO_SCENE = new THREE.Matrix4().set(
+  1, 0, 0, 0,
+  0, 0, 1, 0,
+  0, -1, 0, 0,
+  0, 0, 0, 1,
+);
+
 function ensureMarkers() {
   for (const b of demo.bodies) {
     if (b.marker) scene.remove(b.marker);
-    const geo = new THREE.SphereGeometry(scale.markerRadius(b), 20, 16);
-    const mat = new THREE.MeshStandardMaterial({
-      color: b.color, emissive: b.color, emissiveIntensity: b.target === bodySpec.target ? 1.2 : 0.15,
-    });
+    const textureUrl = SURFACE_TEXTURES[b.bodyId];
+    const geo = textureUrl
+      ? new THREE.SphereGeometry(scale.markerRadius(b), 96, 48)
+      : new THREE.SphereGeometry(scale.markerRadius(b), 20, 16);
+    const isCentral = b.target === bodySpec.target;
+    let mat;
+    if (textureUrl) {
+      const map = textureLoader.load(textureUrl);
+      map.colorSpace = THREE.SRGBColorSpace;
+      map.anisotropy = renderer.capabilities.getMaxAnisotropy();
+      // Mostly self-lit (the scene's lights are just a viewer-side point light
+      // and ambient fill, not the Sun), so the image reads at any angle.
+      mat = new THREE.MeshStandardMaterial({
+        map, emissive: 0xffffff, emissiveMap: map, emissiveIntensity: isCentral ? 0.5 : 0.35, roughness: 1, metalness: 0,
+      });
+    } else {
+      mat = new THREE.MeshStandardMaterial({
+        color: b.color, emissive: b.color, emissiveIntensity: isCentral ? 1.2 : 0.15,
+      });
+    }
     b.marker = new THREE.Mesh(geo, mat);
+    b.marker.matrixAutoUpdate = true;
     scene.add(b.marker);
+  }
+}
+
+/** Spins a textured body to its real orientation at `et` (no-op for untextured bodies, or if the PCK lacks its pole). */
+function orientMarker(b, et) {
+  if (!SURFACE_TEXTURES[b.bodyId]) return;
+  try {
+    const r = bodyFixedToJ2000(b.bodyId, et, demo.remote.pool);
+    const rot = new THREE.Matrix4().set(
+      r[0][0], r[0][1], r[0][2], 0,
+      r[1][0], r[1][1], r[1][2], 0,
+      r[2][0], r[2][1], r[2][2], 0,
+      0, 0, 0, 1,
+    );
+    const m = J2000_TO_SCENE.clone().multiply(rot).multiply(SPHERE_TO_BODY);
+    b.marker.quaternion.setFromRotationMatrix(m);
+  } catch (err) {
+    log(`  -> couldn't orient ${b.name} (${err.message})`);
   }
 }
 
@@ -342,6 +408,7 @@ async function updateSceneForOffset(offsetDays) {
       const { position } = spkez(b.target, bodySpec.target, et, 'NONE', INERTIAL_FRAME, demo.remote.pool);
       const [x, y, z] = scale.posToScene(position);
       b.marker.position.set(x, y, z);
+      orientMarker(b, et);
     } catch (err) {
       log(`  -> couldn't place ${b.name} (${err.message})`);
     }
