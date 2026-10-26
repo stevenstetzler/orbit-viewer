@@ -1,8 +1,8 @@
 # Surface textures
 
 Equirectangular images (longitude 0 at the image centre) draped on the
-body spheres in the `/<body>/` view -- see `SURFACE_TEXTURES` in
-`examples/shared/templates/body/index.html`. Orientation comes from the
+body spheres in the `/<body>/` and `/<body>/trajectory/` views -- see
+`SURFACE_TEXTURES` in `examples/shared/surfaceTextures.js`. Orientation comes from the
 IAU pole/prime-meridian constants in `kernels/pck00011.tpc`
 (`examples/shared/bodyOrientation.js`).
 

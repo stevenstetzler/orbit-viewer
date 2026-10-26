@@ -126,6 +126,7 @@ import {
   discoverSpkBodies, ensureBodyCoverage, prefetchBodyProbe, prefetchCustomBody, bodyHasCoverageAt, resolveSatellitesFor,
 } from '../../examples/shared/kernelSession.js';
 import { mountEpochControls } from '../../examples/shared/epochInput.js';
+import { makeMarkerMesh, orientMarker } from '../../examples/shared/surfaceTextures.js';
 
 const { load, str2et, et2utcCalendar, openRemoteSpk, openRemoteFile, spkez, bodyName } = window.spicejs;
 
@@ -297,12 +298,17 @@ function etForOffsetDays(offsetDays) {
 function ensureMarkers() {
   for (const b of demo.bodies) {
     if (b.marker) scene.remove(b.marker);
-    const geo = new THREE.SphereGeometry(scale.markerRadius(b), 20, 16);
-    const mat = new THREE.MeshStandardMaterial({
-      color: b.color, emissive: b.color, emissiveIntensity: b.target === demo.viewObserver ? 1.2 : 0.15,
-    });
-    b.marker = new THREE.Mesh(geo, mat);
+    b.marker = makeMarkerMesh(b, scale.markerRadius(b), b.target === demo.viewObserver, renderer);
     scene.add(b.marker);
+  }
+}
+
+/** Spins a textured body to its real orientation at `et`. */
+function orientBodyMarker(b, et) {
+  try {
+    orientMarker(b, et, demo.remote.pool);
+  } catch (err) {
+    log(`  -> couldn't orient ${b.name} (${err.message})`);
   }
 }
 
@@ -529,6 +535,7 @@ async function updateSceneForOffset(offsetDays) {
       const { position } = spkez(b.target, demo.viewObserver, et, 'NONE', INERTIAL_FRAME, demo.remote.pool);
       const [x, y, z] = scale.posToScene(position);
       b.marker.position.set(x, y, z);
+      orientBodyMarker(b, et);
     } catch (err) {
       log(`  -> couldn't place ${b.name} (${err.message})`);
     }
