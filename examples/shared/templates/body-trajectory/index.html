@@ -79,6 +79,9 @@
     <div id="timeLabel"></div>
     <div id="epochControls"></div>
 
+    <h2>Time window <span style="text-transform:none;letter-spacing:0;color:#626c80">(added kernels)</span></h2>
+    <div id="timeWindowControls"></div>
+
     <h2>Add a custom trajectory</h2>
     <p class="sub" style="margin:0 0 8px">Any local <code>.bsp</code> files (a spacecraft trajectory, say)
       shown as a real sampled trajectory relative to this system.</p>
@@ -130,6 +133,7 @@ import {
   discoverSpkBodies, ensureBodyCoverage, prefetchBodyProbe, prefetchCustomBody, bodyHasCoverageAt, resolveSatellitesFor,
 } from '../../examples/shared/kernelSession.js';
 import { mountEpochControls } from '../../examples/shared/epochInput.js';
+import { mountTimeWindowControls } from '../../examples/shared/timeWindow.js';
 import { mountTrajectoryLines } from '../../examples/shared/trajectoryLines.js';
 import { makeMarkerMesh, orientMarker } from '../../examples/shared/surfaceTextures.js';
 
@@ -146,6 +150,12 @@ const epochControls = mountEpochControls(document.getElementById('epochControls'
     timeSlider.value = String(offsetDays);
     return updateSceneForOffset(offsetDays);
   },
+  log,
+});
+const timeWindowControls = mountTimeWindowControls(document.getElementById('timeWindowControls'), {
+  getWindow: () => demo?.customWindow ?? null,
+  getLimits: () => customWindowLimits(),
+  setWindow: (startEt, endEt) => setTimeWindow(startEt, endEt),
   log,
 });
 const legendEl = document.getElementById('legend');
@@ -349,12 +359,17 @@ function trajectoryPeriodFor(b, et) {
 
 /** A custom body's own real trajectory -- uniformly sampled across its entire discovered interval. Cache keyed by the current observer (demo.viewObserver, see viewFromBody()). */
 function customBodyTrajectoryPositions(b) {
-  const key = demo.viewObserver;
+  // Only the user's chosen time window (see setTimeWindow()), within this body's own real coverage.
+  const [w0, w1] = demo.customWindow ?? [b.coverageStart, b.coverageEnd];
+  const start = Math.max(b.coverageStart, w0);
+  const end = Math.min(b.coverageEnd, w1);
+  const key = `${demo.viewObserver}|${start}|${end}`;
   if (b.fullTrajectoryCache?.key === key) return b.fullTrajectoryCache.positions;
-  const n = customBodySampleCount(b.coverageStart, b.coverageEnd);
+  if (!(end > start)) return [];
+  const n = customBodySampleCount(start, end);
   const positions = [];
   for (let i = 0; i < n; i++) {
-    const sampleEt = b.coverageStart + (b.coverageEnd - b.coverageStart) * (i / (n - 1));
+    const sampleEt = start + (end - start) * (i / (n - 1));
     try {
       positions.push(spkez(b.target, demo.viewObserver, sampleEt, 'NONE', INERTIAL_FRAME, demo.remote.pool).position);
     } catch {
@@ -624,6 +639,8 @@ async function beginSession(remote, proxyCatalogue, { sourceLabel, sourceSizeByt
     remote, et0, kernelStartEt, kernelStopEt, sourceLabel, sourceSizeBytes, counters, bodies: [],
     viewObserver: bodySpec.target, lookAtTarget: null, satelliteRemotes: new Map(),
   };
+  demo.baseStartEt = demo.kernelStartEt;
+  demo.baseStopEt = demo.kernelStopEt;
   await buildScene(proxyCatalogue);
 }
 
@@ -719,6 +736,44 @@ function narrowKernelRange(newStartEt, newStopEt, label) {
   return narrowed;
 }
 
+/** The widest time window the inputs allow: the added bodies' combined real coverage, within the session's own base range. */
+function customWindowLimits() {
+  const custom = demo?.bodies.filter((b) => b.isCustom) ?? [];
+  if (custom.length === 0) return null;
+  return [
+    Math.max(demo.baseStartEt, Math.min(...custom.map((b) => b.coverageStart))),
+    Math.min(demo.baseStopEt, Math.max(...custom.map((b) => b.coverageEnd))),
+  ];
+}
+
+/**
+ * Applies the "Time window" inputs: the slider's range and every added
+ * body's trajectory line now cover just [startEt, endEt] (clamped to
+ * customWindowLimits()). The current reference epoch is reclamped into
+ * it, same as when a kernel first narrows the range.
+ */
+async function setTimeWindow(startEt, endEt) {
+  const limits = customWindowLimits();
+  if (!demo || !limits) throw new Error('Add a kernel first -- the time window applies to added bodies.');
+  const start = Math.max(limits[0], Math.min(startEt, endEt));
+  const end = Math.min(limits[1], Math.max(startEt, endEt));
+  if (!(end > start)) {
+    throw new Error(`That window doesn't overlap the added bodies' coverage (${et2utcCalendar(limits[0])} to ${et2utcCalendar(limits[1])}).`);
+  }
+  const currentEt = demo.et0 + Number(timeSlider.value) * DAY;
+  demo.customWindow = [start, end];
+  demo.kernelStartEt = start;
+  demo.kernelStopEt = end;
+  demo.minOffsetDays = (start - demo.et0) / DAY;
+  demo.maxOffsetDays = (end - demo.et0) / DAY;
+  timeSlider.min = String(demo.minOffsetDays);
+  timeSlider.max = String(demo.maxOffsetDays);
+  const clampedEt = Math.min(Math.max(currentEt, start), end);
+  const offsetDays = Math.min(Math.max((clampedEt - demo.et0) / DAY, demo.minOffsetDays), demo.maxOffsetDays);
+  timeSlider.value = String(offsetDays);
+  await updateSceneForOffset(offsetDays);
+}
+
 async function loadSelectedCustomBodies() {
   if (!pendingCustomKernel || !demo) return;
   const { resolve } = pendingCustomKernel;
@@ -783,6 +838,9 @@ async function addCheckedCustomBodies() {
   const addedStart = Math.min(...added.map((b) => b.coverageStart));
   const addedEnd = Math.max(...added.map((b) => b.coverageEnd));
   narrowKernelRange(addedStart, addedEnd, file.name);
+  demo.customWindow = [demo.kernelStartEt, demo.kernelStopEt];
+  timeWindowControls.refresh();
+  timeWindowControls.setEnabled(true);
 
   // The pre-narrowing reference epoch may now fall outside the
   // just-narrowed range -- reclamp it into range, same as
