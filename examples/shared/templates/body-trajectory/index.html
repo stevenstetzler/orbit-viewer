@@ -84,6 +84,9 @@
     <input id="customKernelInput" type="file" accept=".bsp,.spk" />
     <div id="customKernelStatus"></div>
 
+    <h2>Trajectory lines</h2>
+    <div id="trajectoryLineControls"></div>
+
     <h2>Bodies shown</h2>
     <ul id="legend"></ul>
   </div>
@@ -126,6 +129,7 @@ import {
   discoverSpkBodies, ensureBodyCoverage, prefetchBodyProbe, prefetchCustomBody, bodyHasCoverageAt, resolveSatellitesFor,
 } from '../../examples/shared/kernelSession.js';
 import { mountEpochControls } from '../../examples/shared/epochInput.js';
+import { mountTrajectoryLines } from '../../examples/shared/trajectoryLines.js';
 import { makeMarkerMesh, orientMarker } from '../../examples/shared/surfaceTextures.js';
 
 const { load, str2et, et2utcCalendar, openRemoteSpk, openRemoteFile, spkez, bodyName } = window.spicejs;
@@ -193,6 +197,7 @@ renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(viewport.clientWidth, viewport.clientHeight);
 viewport.appendChild(renderer.domElement);
 const controls = new OrbitControls(camera, renderer.domElement);
+const trajectoryLines = mountTrajectoryLines(document.getElementById('trajectoryLineControls'), scene, viewport);
 controls.enableDamping = true;
 scene.add(new THREE.AmbientLight(0xffffff, 0.6));
 const centerLight = new THREE.PointLight(0xffffff, 2, 0, 0);
@@ -201,6 +206,7 @@ window.addEventListener('resize', () => {
   camera.aspect = viewport.clientWidth / viewport.clientHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(viewport.clientWidth, viewport.clientHeight);
+  trajectoryLines.setResolution(viewport.clientWidth, viewport.clientHeight);
 });
 function animate() {
   requestAnimationFrame(animate);
@@ -391,12 +397,8 @@ function sampleSatelliteTrajectory(target, observer, et0, et1) {
  * prefetch/coverage widening always agree.
  */
 function rebuildArcs(centerEt, windows) {
-  for (const b of demo.bodies) {
-    if (b.arcLine) {
-      scene.remove(b.arcLine);
-      b.arcLine = null;
-    }
-  }
+  trajectoryLines.disposeAll();
+  for (const b of demo.bodies) b.arcLine = null;
   for (const b of demo.bodies) {
     if (b.target === demo.viewObserver) continue;
     try {
@@ -409,10 +411,7 @@ function rebuildArcs(centerEt, windows) {
         positions = sampleSatelliteTrajectory(b.target, demo.viewObserver, window[0], window[1]);
       }
       const arcPoints = positions.map((p) => new THREE.Vector3(...scale.posToScene(p)));
-      const arcGeo = new THREE.BufferGeometry().setFromPoints(arcPoints);
-      const arcMat = new THREE.LineBasicMaterial({ color: b.color, transparent: true, opacity: 0.45 });
-      b.arcLine = new THREE.Line(arcGeo, arcMat);
-      scene.add(b.arcLine);
+      b.arcLine = trajectoryLines.makeLine(arcPoints, b.color);
     } catch (err) {
       log(`  -> couldn't draw ${b.name}'s trajectory (${err.message})`);
     }
