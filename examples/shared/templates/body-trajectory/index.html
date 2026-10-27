@@ -79,9 +79,9 @@
     <div id="epochControls"></div>
 
     <h2>Add a custom trajectory</h2>
-    <p class="sub" style="margin:0 0 8px">Any local <code>.bsp</code> (a spacecraft trajectory, say)
+    <p class="sub" style="margin:0 0 8px">Any local <code>.bsp</code> files (a spacecraft trajectory, say)
       shown as a real sampled trajectory relative to this system.</p>
-    <input id="customKernelInput" type="file" accept=".bsp,.spk" />
+    <input id="customKernelInput" type="file" accept=".bsp,.spk" multiple />
     <div id="customKernelStatus"></div>
 
     <h2>Trajectory lines</h2>
@@ -620,9 +620,15 @@ async function beginSession(remote, proxyCatalogue, { sourceLabel, sourceSizeByt
 // ---------------------------------------------------------------------
 let pendingCustomKernel = null;
 
-function openCustomKernelModal(file, remoteFile, discovered) {
-  pendingCustomKernel = { file, remoteFile, discovered };
-  customKernelModalTitle.textContent = `Add bodies from ${file.name}`;
+/** Shows the review dialog; resolves once the user has loaded or cancelled it (so several selected files are offered one at a time). `progress` is e.g. " (2 of 3)". */
+function openCustomKernelModal(file, remoteFile, discovered, progress = '') {
+  return new Promise((resolve) => {
+    pendingCustomKernel = { file, remoteFile, discovered, resolve };
+    showCustomKernelModal(file, discovered, progress);
+  });
+}
+function showCustomKernelModal(file, discovered, progress) {
+  customKernelModalTitle.textContent = `Add bodies from ${file.name}${progress}`;
   customKernelBodyList.innerHTML = '';
   for (const b of [...discovered.values()].sort((a, z) => a.target - z.target)) {
     const li = document.createElement('li');
@@ -648,7 +654,11 @@ function closeCustomKernelModal() {
   customKernelModal.style.display = 'none';
   pendingCustomKernel = null;
 }
-customKernelCancelBtn.addEventListener('click', closeCustomKernelModal);
+customKernelCancelBtn.addEventListener('click', () => {
+  const resolve = pendingCustomKernel?.resolve;
+  closeCustomKernelModal();
+  resolve?.();
+});
 
 /**
  * Narrows the "Reference epoch" slider's own overall range to the
@@ -698,6 +708,15 @@ function narrowKernelRange(newStartEt, newStopEt, label) {
 
 async function loadSelectedCustomBodies() {
   if (!pendingCustomKernel || !demo) return;
+  const { resolve } = pendingCustomKernel;
+  try {
+    await addCheckedCustomBodies();
+  } finally {
+    resolve();
+  }
+}
+
+async function addCheckedCustomBodies() {
   const { file, remoteFile, discovered } = pendingCustomKernel;
   const checkedTargets = [...customKernelBodyList.querySelectorAll('input[type=checkbox]:checked')].map((cb) => Number(cb.dataset.target));
   closeCustomKernelModal();
@@ -772,10 +791,10 @@ customKernelLoadBtn.addEventListener('click', () => {
   });
 });
 
-async function scanAndOfferCustomKernel(file) {
+async function scanAndOfferCustomKernel(file, progress = '') {
   if (!demo) return;
   customKernelInput.disabled = true;
-  customKernelStatusEl.textContent = `Scanning ${file.name}...`;
+  customKernelStatusEl.textContent = `Scanning ${file.name}${progress}...`;
   try {
     const resolveRange = async (_url, startByte, endByteExclusive) => new Uint8Array(await file.slice(startByte, endByteExclusive).arrayBuffer());
     const remoteFile = await openRemoteFile(file.name, { fileLength: file.size, resolveRange });
@@ -784,7 +803,7 @@ async function scanAndOfferCustomKernel(file) {
     if (discovered.size === 0) {
       log(`${file.name} has no SPK segments -- nothing to add.`);
     } else {
-      openCustomKernelModal(file, remoteFile, discovered);
+      await openCustomKernelModal(file, remoteFile, discovered, progress);
     }
   } catch (err) {
     customKernelStatusEl.textContent = `ERROR scanning ${file.name}: ${err.message}`;
@@ -795,9 +814,13 @@ async function scanAndOfferCustomKernel(file) {
   }
 }
 customKernelInput.addEventListener('change', () => {
-  const file = customKernelInput.files && customKernelInput.files[0];
-  if (!file) return;
-  scanAndOfferCustomKernel(file);
+  const files = Array.from(customKernelInput.files ?? []);
+  if (files.length === 0) return;
+  (async () => {
+    for (const [i, file] of files.entries()) {
+      await scanAndOfferCustomKernel(file, files.length > 1 ? ` (${i + 1} of ${files.length})` : '');
+    }
+  })();
 });
 
 async function loadFromProxy(entry, proxyCatalogue) {
