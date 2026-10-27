@@ -24,6 +24,12 @@ const DIM = 0.6;
  * @param {THREE.Scene} scene
  * @param {HTMLElement} viewport - sized element whose pixel size LineMaterial needs
  */
+/** A line's draw color: dimmed toward the background by default; a user-picked color (`dim` false) is shown as chosen. */
+function lineColor(color, dim) {
+  const c = new THREE.Color(color);
+  return dim ? c.multiplyScalar(DIM) : c;
+}
+
 export function mountTrajectoryLines(container, scene, viewport) {
   const lines = new Set();
   let visible = true;
@@ -56,8 +62,8 @@ export function mountTrajectoryLines(container, scene, viewport) {
   });
 
   return {
-    /** A wide line through `points` (THREE.Vector3[]) in `color`, added to the scene and tracked; `null` if there are fewer than two points. A `hidden` line stays off even when the global checkbox is on. */
-    makeLine(points, color, hidden = false) {
+    /** A wide line through `points` (THREE.Vector3[]) in `color`, added to the scene and tracked; `null` if there are fewer than two points. A `hidden` line stays off even when the global checkbox is on; `dim` false draws `color` exactly as given. */
+    makeLine(points, color, hidden = false, dim = true) {
       if (points.length < 2) return null;
       const geo = new LineGeometry();
       geo.setPositions(points.flatMap((p) => [p.x, p.y, p.z]));
@@ -65,7 +71,7 @@ export function mountTrajectoryLines(container, scene, viewport) {
         // Opaque, with the color dimmed toward the dark background instead of
         // using opacity: consecutive segments overlap at their joints, which
         // shows as mottling on a translucent wide line.
-        color: new THREE.Color(color).multiplyScalar(DIM), linewidth: width,
+        color: lineColor(color, dim), linewidth: width,
         resolution: new THREE.Vector2(viewport.clientWidth, viewport.clientHeight),
       });
       const line = new Line2(geo, mat);
@@ -74,6 +80,10 @@ export function mountTrajectoryLines(container, scene, viewport) {
       lines.add(line);
       scene.add(line);
       return line;
+    },
+    /** Recolors an existing line in place (see makeLine()'s `dim`). */
+    setLineColor(line, color, dim = true) {
+      if (line) line.material.color.copy(lineColor(color, dim));
     },
     /** Hides/shows one body's line regardless of the global checkbox (both must allow it). */
     setLineHidden(line, hidden) {
