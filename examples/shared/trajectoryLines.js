@@ -44,7 +44,7 @@ export function mountTrajectoryLines(container, scene, viewport) {
 
   function apply() {
     for (const line of lines) {
-      line.visible = visible;
+      line.visible = visible && !line.userData.hidden;
       line.material.linewidth = width;
     }
   }
@@ -56,8 +56,8 @@ export function mountTrajectoryLines(container, scene, viewport) {
   });
 
   return {
-    /** A wide line through `points` (THREE.Vector3[]) in `color`, added to the scene and tracked; `null` if there are fewer than two points. */
-    makeLine(points, color) {
+    /** A wide line through `points` (THREE.Vector3[]) in `color`, added to the scene and tracked; `null` if there are fewer than two points. A `hidden` line stays off even when the global checkbox is on. */
+    makeLine(points, color, hidden = false) {
       if (points.length < 2) return null;
       const geo = new LineGeometry();
       geo.setPositions(points.flatMap((p) => [p.x, p.y, p.z]));
@@ -69,10 +69,17 @@ export function mountTrajectoryLines(container, scene, viewport) {
         resolution: new THREE.Vector2(viewport.clientWidth, viewport.clientHeight),
       });
       const line = new Line2(geo, mat);
-      line.visible = visible;
+      line.userData.hidden = hidden;
+      line.visible = visible && !hidden;
       lines.add(line);
       scene.add(line);
       return line;
+    },
+    /** Hides/shows one body's line regardless of the global checkbox (both must allow it). */
+    setLineHidden(line, hidden) {
+      if (!line) return;
+      line.userData.hidden = hidden;
+      line.visible = visible && !hidden;
     },
     /** Removes and frees every line made so far. */
     disposeAll() {

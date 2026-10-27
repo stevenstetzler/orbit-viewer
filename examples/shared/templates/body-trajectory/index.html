@@ -29,6 +29,7 @@
   #legend { list-style: none; margin: 0; padding: 0; }
   #legend li { display: flex; align-items: center; gap: 8px; margin: 2px -8px; padding: 4px 8px; border-radius: 4px; }
   #legend li.active { background: #172038; box-shadow: inset 2px 0 0 #7fb2ff; }
+  #legend button.toggle[aria-pressed=true] { background: #2a5adf; color: #fff; }
   #legend .swatch { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }
   #legend .name { flex: 1 1 auto; }
   #legend .dist { color: #8892a6; font-variant-numeric: tabular-nums; }
@@ -411,7 +412,7 @@ function rebuildArcs(centerEt, windows) {
         positions = sampleSatelliteTrajectory(b.target, demo.viewObserver, window[0], window[1]);
       }
       const arcPoints = positions.map((p) => new THREE.Vector3(...scale.posToScene(p)));
-      b.arcLine = trajectoryLines.makeLine(arcPoints, b.color);
+      b.arcLine = trajectoryLines.makeLine(arcPoints, b.color, !!b.hidden);
     } catch (err) {
       log(`  -> couldn't draw ${b.name}'s trajectory (${err.message})`);
     }
@@ -443,6 +444,18 @@ function buildLegend(bodiesState) {
     const dist = document.createElement('span');
     dist.className = 'dist';
     dist.id = `dist-${b.target}`;
+    const showBtn = document.createElement('button');
+    showBtn.type = 'button';
+    showBtn.className = 'toggle';
+    showBtn.textContent = 'Show';
+    showBtn.title = `Show or hide ${b.name} and its trajectory`;
+    showBtn.setAttribute('aria-pressed', String(!b.hidden));
+    showBtn.addEventListener('click', () => {
+      b.hidden = !b.hidden;
+      showBtn.setAttribute('aria-pressed', String(!b.hidden));
+      if (b.marker) b.marker.visible = !b.hidden && bodyHasCoverageAt(b, etForOffsetDays(Number(timeSlider.value)));
+      trajectoryLines.setLineHidden(b.arcLine, b.hidden);
+    });
     const lookBtn = document.createElement('button');
     lookBtn.type = 'button';
     lookBtn.textContent = 'Look';
@@ -454,7 +467,7 @@ function buildLegend(bodiesState) {
     fromBtn.title = `View from ${b.name}`;
     fromBtn.disabled = b.target === demo?.viewObserver;
     fromBtn.addEventListener('click', () => viewFromBody(b));
-    li.append(swatch, name, dist, lookBtn, fromBtn);
+    li.append(swatch, name, dist, showBtn, lookBtn, fromBtn);
     legendEl.appendChild(li);
   }
 }
@@ -529,7 +542,7 @@ async function updateSceneForOffset(offsetDays) {
       b.marker.visible = false;
       continue;
     }
-    b.marker.visible = true;
+    b.marker.visible = !b.hidden;
     try {
       const { position } = spkez(b.target, demo.viewObserver, et, 'NONE', INERTIAL_FRAME, demo.remote.pool);
       const [x, y, z] = scale.posToScene(position);
