@@ -1,5 +1,5 @@
 /**
- * Body-fixed -> J2000 rotation (the IAU pole/prime-meridian model) from
+ * Body-fixed -> inertial-frame rotation (the IAU pole/prime-meridian model) from
  * the BODY<id>_POLE_RA/POLE_DEC/PM/NUT_PREC_* constants in
  * kernels/pck00011.tpc -- the same constants spicejs's own IAU_<BODY>
  * frames use, but spicejs only exposes them through spkez() (rotating a
@@ -34,13 +34,16 @@ function mul(a, b) {
   return a.map((row) => [0, 1, 2].map((j) => row[0] * b[0][j] + row[1] * b[1][j] + row[2] * b[2][j]));
 }
 
+// IAU-76 mean obliquity of J2000, the one SPICE's ECLIPJ2000 frame uses.
+const OBLIQUITY_J2000 = (84381.448 / 3600) * DEG;
+
 /**
  * The rotation taking a body-fixed vector (x = prime meridian, z = north
  * pole) to J2000, at `et` (seconds past J2000, TDB). `bodyId` is the
  * physical body (e.g. 399 Earth, 301 Moon). Throws if the PCK doesn't
  * define the body's pole -- callers just skip orientation then.
  */
-export function bodyFixedToJ2000(bodyId, et, pool) {
+function bodyFixedToJ2000(bodyId, et, pool) {
   const ra = bodyValues(bodyId, 'POLE_RA', pool);
   const dec = bodyValues(bodyId, 'POLE_DEC', pool);
   const pm = bodyValues(bodyId, 'PM', pool);
@@ -67,4 +70,18 @@ export function bodyFixedToJ2000(bodyId, et, pool) {
   }
 
   return mul(mul(rotZ((alpha + 90) * DEG), rotX((90 - delta) * DEG)), rotZ(W * DEG));
+}
+
+/**
+ * Body-fixed -> `frame` rotation, where `frame` is whichever inertial
+ * frame the caller's positions are in: `'J2000'` or `'ECLIPJ2000'` (this
+ * app's own INERTIAL_FRAME, see constants.js). The two differ by the
+ * J2000 obliquity about x, so using the wrong one tilts every body's
+ * spin axis and prime meridian relative to where it's drawn.
+ */
+export function bodyFixedToInertial(bodyId, et, pool, frame) {
+  const r = bodyFixedToJ2000(bodyId, et, pool);
+  if (frame === 'J2000') return r;
+  if (frame === 'ECLIPJ2000') return mul(rotX(-OBLIQUITY_J2000), r);
+  throw new Error(`bodyFixedToInertial: unsupported frame "${frame}"`);
 }

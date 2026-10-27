@@ -6,7 +6,8 @@
  * from bodyOrientation.js's IAU pole/prime-meridian model.
  */
 import * as THREE from 'three';
-import { bodyFixedToJ2000 } from './bodyOrientation.js';
+import { INERTIAL_FRAME } from './constants.js';
+import { bodyFixedToInertial } from './bodyOrientation.js';
 
 // Resolved against this module, not the page, since the two templates
 // live at different depths (/earth/ vs /earth/trajectory/).
@@ -21,7 +22,8 @@ const textureLoader = new THREE.TextureLoader();
  * +Y and u = 0.5 (image centre, longitude 0) is on +X, with longitude
  * increasing toward -Z. So body x -> X, body z (north pole) -> Y,
  * body y (90 degrees E) -> -Z. The same Y/Z swap scale.js's
- * scaleLinearPosition() applies to positions also takes J2000 -> scene.
+ * scaleLinearPosition() applies to positions also takes the page's
+ * inertial frame (INERTIAL_FRAME) -> scene.
  */
 const BODY_TO_SPHERE = new THREE.Matrix4().set(
   1, 0, 0, 0,
@@ -30,7 +32,7 @@ const BODY_TO_SPHERE = new THREE.Matrix4().set(
   0, 0, 0, 1,
 );
 const SPHERE_TO_BODY = BODY_TO_SPHERE.clone().invert();
-const J2000_TO_SCENE = BODY_TO_SPHERE;
+const INERTIAL_TO_SCENE = BODY_TO_SPHERE;
 
 export function hasSurfaceTexture(b) {
   return b.bodyId in SURFACE_TEXTURES;
@@ -63,12 +65,12 @@ export function makeMarkerMesh(b, radius, isCentral, renderer) {
  */
 export function orientMarker(b, et, pool) {
   if (!hasSurfaceTexture(b)) return;
-  const r = bodyFixedToJ2000(b.bodyId, et, pool);
+  const r = bodyFixedToInertial(b.bodyId, et, pool, INERTIAL_FRAME);
   const rot = new THREE.Matrix4().set(
     r[0][0], r[0][1], r[0][2], 0,
     r[1][0], r[1][1], r[1][2], 0,
     r[2][0], r[2][1], r[2][2], 0,
     0, 0, 0, 1,
   );
-  b.marker.quaternion.setFromRotationMatrix(J2000_TO_SCENE.clone().multiply(rot).multiply(SPHERE_TO_BODY));
+  b.marker.quaternion.setFromRotationMatrix(INERTIAL_TO_SCENE.clone().multiply(rot).multiply(SPHERE_TO_BODY));
 }
