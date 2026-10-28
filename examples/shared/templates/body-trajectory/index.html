@@ -29,6 +29,8 @@
   #legend { list-style: none; margin: 0; padding: 0; }
   #legend li { display: flex; align-items: center; gap: 8px; margin: 2px -8px; padding: 4px 8px; border-radius: 4px; }
   #legend li.active { background: #172038; box-shadow: inset 2px 0 0 #7fb2ff; }
+  #legend button.toggle[aria-pressed=true] { background: #2a5adf; color: #fff; }
+  #legend input.colorPick { width: 26px; height: 22px; padding: 0; border: none; background: none; cursor: pointer; flex: 0 0 auto; }
   #legend .swatch { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }
   #legend .name { flex: 1 1 auto; }
   #legend .dist { color: #8892a6; font-variant-numeric: tabular-nums; }
@@ -78,11 +80,17 @@
     <div id="timeLabel"></div>
     <div id="epochControls"></div>
 
+    <h2>Time window <span style="text-transform:none;letter-spacing:0;color:#626c80">(added kernels)</span></h2>
+    <div id="timeWindowControls"></div>
+
     <h2>Add a custom trajectory</h2>
-    <p class="sub" style="margin:0 0 8px">Any local <code>.bsp</code> (a spacecraft trajectory, say)
+    <p class="sub" style="margin:0 0 8px">Any local <code>.bsp</code> files (a spacecraft trajectory, say)
       shown as a real sampled trajectory relative to this system.</p>
-    <input id="customKernelInput" type="file" accept=".bsp,.spk" />
+    <input id="customKernelInput" type="file" accept=".bsp,.spk" multiple />
     <div id="customKernelStatus"></div>
+
+    <h2>Trajectory lines</h2>
+    <div id="trajectoryLineControls"></div>
 
     <h2>Bodies shown</h2>
     <ul id="legend"></ul>
@@ -126,6 +134,9 @@ import {
   discoverSpkBodies, ensureBodyCoverage, prefetchBodyProbe, prefetchCustomBody, bodyHasCoverageAt, resolveSatellitesFor,
 } from '../../examples/shared/kernelSession.js';
 import { mountEpochControls } from '../../examples/shared/epochInput.js';
+import { mountTimeWindowControls } from '../../examples/shared/timeWindow.js';
+import { mountTrajectoryLines } from '../../examples/shared/trajectoryLines.js';
+import { makeMarkerMesh, orientMarker } from '../../examples/shared/surfaceTextures.js';
 
 const { load, str2et, et2utcCalendar, openRemoteSpk, openRemoteFile, spkez, bodyName } = window.spicejs;
 
@@ -140,6 +151,12 @@ const epochControls = mountEpochControls(document.getElementById('epochControls'
     timeSlider.value = String(offsetDays);
     return updateSceneForOffset(offsetDays);
   },
+  log,
+});
+const timeWindowControls = mountTimeWindowControls(document.getElementById('timeWindowControls'), {
+  getWindow: () => demo?.customWindow ?? null,
+  getLimits: () => customWindowLimits(),
+  setWindow: (startEt, endEt) => setTimeWindow(startEt, endEt),
   log,
 });
 const legendEl = document.getElementById('legend');
@@ -192,6 +209,7 @@ renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(viewport.clientWidth, viewport.clientHeight);
 viewport.appendChild(renderer.domElement);
 const controls = new OrbitControls(camera, renderer.domElement);
+const trajectoryLines = mountTrajectoryLines(document.getElementById('trajectoryLineControls'), scene, viewport);
 controls.enableDamping = true;
 scene.add(new THREE.AmbientLight(0xffffff, 0.6));
 const centerLight = new THREE.PointLight(0xffffff, 2, 0, 0);
@@ -200,6 +218,7 @@ window.addEventListener('resize', () => {
   camera.aspect = viewport.clientWidth / viewport.clientHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(viewport.clientWidth, viewport.clientHeight);
+  trajectoryLines.setResolution(viewport.clientWidth, viewport.clientHeight);
 });
 function animate() {
   requestAnimationFrame(animate);
@@ -297,12 +316,17 @@ function etForOffsetDays(offsetDays) {
 function ensureMarkers() {
   for (const b of demo.bodies) {
     if (b.marker) scene.remove(b.marker);
-    const geo = new THREE.SphereGeometry(scale.markerRadius(b), 20, 16);
-    const mat = new THREE.MeshStandardMaterial({
-      color: b.color, emissive: b.color, emissiveIntensity: b.target === demo.viewObserver ? 1.2 : 0.15,
-    });
-    b.marker = new THREE.Mesh(geo, mat);
+    b.marker = makeMarkerMesh(b, scale.markerRadius(b), b.target === demo.viewObserver, renderer);
     scene.add(b.marker);
+  }
+}
+
+/** Spins a textured body to its real orientation at `et`. */
+function orientBodyMarker(b, et) {
+  try {
+    orientMarker(b, et, demo.remote.pool);
+  } catch (err) {
+    log(`  -> couldn't orient ${b.name} (${err.message})`);
   }
 }
 
@@ -336,12 +360,17 @@ function trajectoryPeriodFor(b, et) {
 
 /** A custom body's own real trajectory -- uniformly sampled across its entire discovered interval. Cache keyed by the current observer (demo.viewObserver, see viewFromBody()). */
 function customBodyTrajectoryPositions(b) {
-  const key = demo.viewObserver;
+  // Only the user's chosen time window (see setTimeWindow()), within this body's own real coverage.
+  const [w0, w1] = demo.customWindow ?? [b.coverageStart, b.coverageEnd];
+  const start = Math.max(b.coverageStart, w0);
+  const end = Math.min(b.coverageEnd, w1);
+  const key = `${demo.viewObserver}|${start}|${end}`;
   if (b.fullTrajectoryCache?.key === key) return b.fullTrajectoryCache.positions;
-  const n = customBodySampleCount(b.coverageStart, b.coverageEnd);
+  if (!(end > start)) return [];
+  const n = customBodySampleCount(start, end);
   const positions = [];
   for (let i = 0; i < n; i++) {
-    const sampleEt = b.coverageStart + (b.coverageEnd - b.coverageStart) * (i / (n - 1));
+    const sampleEt = start + (end - start) * (i / (n - 1));
     try {
       positions.push(spkez(b.target, demo.viewObserver, sampleEt, 'NONE', INERTIAL_FRAME, demo.remote.pool).position);
     } catch {
@@ -385,12 +414,8 @@ function sampleSatelliteTrajectory(target, observer, et0, et1) {
  * prefetch/coverage widening always agree.
  */
 function rebuildArcs(centerEt, windows) {
-  for (const b of demo.bodies) {
-    if (b.arcLine) {
-      scene.remove(b.arcLine);
-      b.arcLine = null;
-    }
-  }
+  trajectoryLines.disposeAll();
+  for (const b of demo.bodies) b.arcLine = null;
   for (const b of demo.bodies) {
     if (b.target === demo.viewObserver) continue;
     try {
@@ -403,10 +428,7 @@ function rebuildArcs(centerEt, windows) {
         positions = sampleSatelliteTrajectory(b.target, demo.viewObserver, window[0], window[1]);
       }
       const arcPoints = positions.map((p) => new THREE.Vector3(...scale.posToScene(p)));
-      const arcGeo = new THREE.BufferGeometry().setFromPoints(arcPoints);
-      const arcMat = new THREE.LineBasicMaterial({ color: b.color, transparent: true, opacity: 0.45 });
-      b.arcLine = new THREE.Line(arcGeo, arcMat);
-      scene.add(b.arcLine);
+      b.arcLine = trajectoryLines.makeLine(arcPoints, b.color, !!b.hidden, !b.isCustom);
     } catch (err) {
       log(`  -> couldn't draw ${b.name}'s trajectory (${err.message})`);
     }
@@ -424,6 +446,27 @@ function reaimCameraAtLookAtTarget() {
   reaimCameraAt(b.marker.position);
 }
 
+const DEFAULT_CUSTOM_BODY_COLOR = 0xff0000;
+
+/** A color picker for an added body: recolors its legend swatch, marker and trajectory line together. */
+function makeColorPicker(b, swatch) {
+  const input = document.createElement('input');
+  input.type = 'color';
+  input.className = 'colorPick';
+  input.title = `Color of ${b.name} and its trajectory`;
+  input.value = '#' + b.color.toString(16).padStart(6, '0');
+  input.addEventListener('input', () => {
+    b.color = parseInt(input.value.slice(1), 16);
+    swatch.style.background = input.value;
+    if (b.marker) {
+      b.marker.material.color.setHex(b.color);
+      b.marker.material.emissive.setHex(b.color);
+    }
+    trajectoryLines.setLineColor(b.arcLine, b.color, false);
+  });
+  return input;
+}
+
 function buildLegend(bodiesState) {
   legendEl.innerHTML = '';
   for (const b of bodiesState) {
@@ -438,6 +481,19 @@ function buildLegend(bodiesState) {
     const dist = document.createElement('span');
     dist.className = 'dist';
     dist.id = `dist-${b.target}`;
+    const colorPick = b.isCustom ? makeColorPicker(b, swatch) : null;
+    const showBtn = document.createElement('button');
+    showBtn.type = 'button';
+    showBtn.className = 'toggle';
+    showBtn.textContent = 'Show';
+    showBtn.title = `Show or hide ${b.name} and its trajectory`;
+    showBtn.setAttribute('aria-pressed', String(!b.hidden));
+    showBtn.addEventListener('click', () => {
+      b.hidden = !b.hidden;
+      showBtn.setAttribute('aria-pressed', String(!b.hidden));
+      if (b.marker) b.marker.visible = !b.hidden && bodyHasCoverageAt(b, etForOffsetDays(Number(timeSlider.value)));
+      trajectoryLines.setLineHidden(b.arcLine, b.hidden);
+    });
     const lookBtn = document.createElement('button');
     lookBtn.type = 'button';
     lookBtn.textContent = 'Look';
@@ -449,7 +505,7 @@ function buildLegend(bodiesState) {
     fromBtn.title = `View from ${b.name}`;
     fromBtn.disabled = b.target === demo?.viewObserver;
     fromBtn.addEventListener('click', () => viewFromBody(b));
-    li.append(swatch, name, dist, lookBtn, fromBtn);
+    li.append(swatch, name, dist, ...(colorPick ? [colorPick] : []), showBtn, lookBtn, fromBtn);
     legendEl.appendChild(li);
   }
 }
@@ -524,11 +580,12 @@ async function updateSceneForOffset(offsetDays) {
       b.marker.visible = false;
       continue;
     }
-    b.marker.visible = true;
+    b.marker.visible = !b.hidden;
     try {
       const { position } = spkez(b.target, demo.viewObserver, et, 'NONE', INERTIAL_FRAME, demo.remote.pool);
       const [x, y, z] = scale.posToScene(position);
       b.marker.position.set(x, y, z);
+      orientBodyMarker(b, et);
     } catch (err) {
       log(`  -> couldn't place ${b.name} (${err.message})`);
     }
@@ -605,6 +662,8 @@ async function beginSession(remote, proxyCatalogue, { sourceLabel, sourceSizeByt
     remote, et0, kernelStartEt, kernelStopEt, sourceLabel, sourceSizeBytes, counters, bodies: [],
     viewObserver: bodySpec.target, lookAtTarget: null, satelliteRemotes: new Map(),
   };
+  demo.baseStartEt = demo.kernelStartEt;
+  demo.baseStopEt = demo.kernelStopEt;
   await buildScene(proxyCatalogue);
 }
 
@@ -614,9 +673,15 @@ async function beginSession(remote, proxyCatalogue, { sourceLabel, sourceSizeByt
 // ---------------------------------------------------------------------
 let pendingCustomKernel = null;
 
-function openCustomKernelModal(file, remoteFile, discovered) {
-  pendingCustomKernel = { file, remoteFile, discovered };
-  customKernelModalTitle.textContent = `Add bodies from ${file.name}`;
+/** Shows the review dialog; resolves once the user has loaded or cancelled it (so several selected files are offered one at a time). `progress` is e.g. " (2 of 3)". */
+function openCustomKernelModal(file, remoteFile, discovered, progress = '') {
+  return new Promise((resolve) => {
+    pendingCustomKernel = { file, remoteFile, discovered, resolve };
+    showCustomKernelModal(file, discovered, progress);
+  });
+}
+function showCustomKernelModal(file, discovered, progress) {
+  customKernelModalTitle.textContent = `Add bodies from ${file.name}${progress}`;
   customKernelBodyList.innerHTML = '';
   for (const b of [...discovered.values()].sort((a, z) => a.target - z.target)) {
     const li = document.createElement('li');
@@ -642,7 +707,11 @@ function closeCustomKernelModal() {
   customKernelModal.style.display = 'none';
   pendingCustomKernel = null;
 }
-customKernelCancelBtn.addEventListener('click', closeCustomKernelModal);
+customKernelCancelBtn.addEventListener('click', () => {
+  const resolve = pendingCustomKernel?.resolve;
+  closeCustomKernelModal();
+  resolve?.();
+});
 
 /**
  * Narrows the "Reference epoch" slider's own overall range to the
@@ -690,8 +759,55 @@ function narrowKernelRange(newStartEt, newStopEt, label) {
   return narrowed;
 }
 
+/** The widest time window the inputs allow: the added bodies' combined real coverage, within the session's own base range. */
+function customWindowLimits() {
+  const custom = demo?.bodies.filter((b) => b.isCustom) ?? [];
+  if (custom.length === 0) return null;
+  return [
+    Math.max(demo.baseStartEt, Math.min(...custom.map((b) => b.coverageStart))),
+    Math.min(demo.baseStopEt, Math.max(...custom.map((b) => b.coverageEnd))),
+  ];
+}
+
+/**
+ * Applies the "Time window" inputs: the slider's range and every added
+ * body's trajectory line now cover just [startEt, endEt] (clamped to
+ * customWindowLimits()). The current reference epoch is reclamped into
+ * it, same as when a kernel first narrows the range.
+ */
+async function setTimeWindow(startEt, endEt) {
+  const limits = customWindowLimits();
+  if (!demo || !limits) throw new Error('Add a kernel first -- the time window applies to added bodies.');
+  const start = Math.max(limits[0], Math.min(startEt, endEt));
+  const end = Math.min(limits[1], Math.max(startEt, endEt));
+  if (!(end > start)) {
+    throw new Error(`That window doesn't overlap the added bodies' coverage (${et2utcCalendar(limits[0])} to ${et2utcCalendar(limits[1])}).`);
+  }
+  const currentEt = demo.et0 + Number(timeSlider.value) * DAY;
+  demo.customWindow = [start, end];
+  demo.kernelStartEt = start;
+  demo.kernelStopEt = end;
+  demo.minOffsetDays = (start - demo.et0) / DAY;
+  demo.maxOffsetDays = (end - demo.et0) / DAY;
+  timeSlider.min = String(demo.minOffsetDays);
+  timeSlider.max = String(demo.maxOffsetDays);
+  const clampedEt = Math.min(Math.max(currentEt, start), end);
+  const offsetDays = Math.min(Math.max((clampedEt - demo.et0) / DAY, demo.minOffsetDays), demo.maxOffsetDays);
+  timeSlider.value = String(offsetDays);
+  await updateSceneForOffset(offsetDays);
+}
+
 async function loadSelectedCustomBodies() {
   if (!pendingCustomKernel || !demo) return;
+  const { resolve } = pendingCustomKernel;
+  try {
+    await addCheckedCustomBodies();
+  } finally {
+    resolve();
+  }
+}
+
+async function addCheckedCustomBodies() {
   const { file, remoteFile, discovered } = pendingCustomKernel;
   const checkedTargets = [...customKernelBodyList.querySelectorAll('input[type=checkbox]:checked')].map((cb) => Number(cb.dataset.target));
   closeCustomKernelModal();
@@ -712,7 +828,7 @@ async function loadSelectedCustomBodies() {
       continue;
     }
     const body = {
-      target, bodyId: target, name, color: 0xffffff, fallbackRadius: 1.0,
+      target, bodyId: target, name, color: DEFAULT_CUSTOM_BODY_COLOR, fallbackRadius: 1.0,
       primaryId: info.center, isCustom: true, fullyPrefetched: true,
       coverageStart: info.etStart, coverageEnd: info.etEnd,
     };
@@ -745,6 +861,9 @@ async function loadSelectedCustomBodies() {
   const addedStart = Math.min(...added.map((b) => b.coverageStart));
   const addedEnd = Math.max(...added.map((b) => b.coverageEnd));
   narrowKernelRange(addedStart, addedEnd, file.name);
+  demo.customWindow = [demo.kernelStartEt, demo.kernelStopEt];
+  timeWindowControls.refresh();
+  timeWindowControls.setEnabled(true);
 
   // The pre-narrowing reference epoch may now fall outside the
   // just-narrowed range -- reclamp it into range, same as
@@ -766,10 +885,10 @@ customKernelLoadBtn.addEventListener('click', () => {
   });
 });
 
-async function scanAndOfferCustomKernel(file) {
+async function scanAndOfferCustomKernel(file, progress = '') {
   if (!demo) return;
   customKernelInput.disabled = true;
-  customKernelStatusEl.textContent = `Scanning ${file.name}...`;
+  customKernelStatusEl.textContent = `Scanning ${file.name}${progress}...`;
   try {
     const resolveRange = async (_url, startByte, endByteExclusive) => new Uint8Array(await file.slice(startByte, endByteExclusive).arrayBuffer());
     const remoteFile = await openRemoteFile(file.name, { fileLength: file.size, resolveRange });
@@ -778,7 +897,7 @@ async function scanAndOfferCustomKernel(file) {
     if (discovered.size === 0) {
       log(`${file.name} has no SPK segments -- nothing to add.`);
     } else {
-      openCustomKernelModal(file, remoteFile, discovered);
+      await openCustomKernelModal(file, remoteFile, discovered, progress);
     }
   } catch (err) {
     customKernelStatusEl.textContent = `ERROR scanning ${file.name}: ${err.message}`;
@@ -789,9 +908,13 @@ async function scanAndOfferCustomKernel(file) {
   }
 }
 customKernelInput.addEventListener('change', () => {
-  const file = customKernelInput.files && customKernelInput.files[0];
-  if (!file) return;
-  scanAndOfferCustomKernel(file);
+  const files = Array.from(customKernelInput.files ?? []);
+  if (files.length === 0) return;
+  (async () => {
+    for (const [i, file] of files.entries()) {
+      await scanAndOfferCustomKernel(file, files.length > 1 ? ` (${i + 1} of ${files.length})` : '');
+    }
+  })();
 });
 
 async function loadFromProxy(entry, proxyCatalogue) {

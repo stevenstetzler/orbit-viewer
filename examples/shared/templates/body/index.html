@@ -24,6 +24,7 @@
   }
   #legend { list-style: none; margin: 0; padding: 0; }
   #legend li { display: flex; align-items: center; gap: 8px; margin: 2px -8px; padding: 4px 8px; border-radius: 4px; }
+  #legend button.toggle[aria-pressed=true] { background: #2a5adf; color: #fff; }
   #legend .swatch { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }
   #legend .name { flex: 1 1 auto; }
   #legend .dist { color: #8892a6; font-variant-numeric: tabular-nums; }
@@ -88,6 +89,7 @@ import {
   ensureBodyCoverage, prefetchBodyProbe, bodyHasCoverageAt, resolveSatellitesFor,
 } from '../examples/shared/kernelSession.js';
 import { mountEpochControls } from '../examples/shared/epochInput.js';
+import { makeMarkerMesh, orientMarker } from '../examples/shared/surfaceTextures.js';
 
 const { load, str2et, et2utcCalendar, openRemoteSpk, openRemoteFile, spkez } = window.spicejs;
 
@@ -239,12 +241,17 @@ function etForOffsetDays(offsetDays) {
 function ensureMarkers() {
   for (const b of demo.bodies) {
     if (b.marker) scene.remove(b.marker);
-    const geo = new THREE.SphereGeometry(scale.markerRadius(b), 20, 16);
-    const mat = new THREE.MeshStandardMaterial({
-      color: b.color, emissive: b.color, emissiveIntensity: b.target === bodySpec.target ? 1.2 : 0.15,
-    });
-    b.marker = new THREE.Mesh(geo, mat);
+    b.marker = makeMarkerMesh(b, scale.markerRadius(b), b.target === bodySpec.target, renderer);
     scene.add(b.marker);
+  }
+}
+
+/** Spins a textured body to its real orientation at `et`. */
+function orientBodyMarker(b, et) {
+  try {
+    orientMarker(b, et, demo.remote.pool);
+  } catch (err) {
+    log(`  -> couldn't orient ${b.name} (${err.message})`);
   }
 }
 
@@ -273,6 +280,7 @@ function rebuildArcs(centerEt) {
       const arcGeo = new THREE.BufferGeometry().setFromPoints(arcPoints);
       const arcMat = new THREE.LineBasicMaterial({ color: b.color, transparent: true, opacity: 0.45 });
       b.arcLine = new THREE.Line(arcGeo, arcMat);
+      b.arcLine.visible = !b.hidden;
       scene.add(b.arcLine);
     } catch (err) {
       log(`  -> couldn't draw ${b.name}'s orbit ellipse (${err.message})`);
@@ -305,12 +313,24 @@ function buildLegend(bodiesState) {
     const dist = document.createElement('span');
     dist.className = 'dist';
     dist.id = `dist-${b.target}`;
+    const showBtn = document.createElement('button');
+    showBtn.type = 'button';
+    showBtn.className = 'toggle';
+    showBtn.textContent = 'Show';
+    showBtn.title = `Show or hide ${b.name} and its orbit`;
+    showBtn.setAttribute('aria-pressed', String(!b.hidden));
+    showBtn.addEventListener('click', () => {
+      b.hidden = !b.hidden;
+      showBtn.setAttribute('aria-pressed', String(!b.hidden));
+      if (b.marker) b.marker.visible = !b.hidden && bodyHasCoverageAt(b, etForOffsetDays(Number(timeSlider.value)));
+      if (b.arcLine) b.arcLine.visible = !b.hidden;
+    });
     const lookBtn = document.createElement('button');
     lookBtn.type = 'button';
     lookBtn.textContent = 'Look';
     lookBtn.title = b.target === bodySpec.target ? `Look at ${b.name} (recenter)` : `Look at ${b.name}`;
     lookBtn.addEventListener('click', () => lookAtBody(b));
-    li.append(swatch, name, dist, lookBtn);
+    li.append(swatch, name, dist, showBtn, lookBtn);
     legendEl.appendChild(li);
   }
 }
@@ -337,11 +357,12 @@ async function updateSceneForOffset(offsetDays) {
       b.marker.visible = false;
       continue;
     }
-    b.marker.visible = true;
+    b.marker.visible = !b.hidden;
     try {
       const { position } = spkez(b.target, bodySpec.target, et, 'NONE', INERTIAL_FRAME, demo.remote.pool);
       const [x, y, z] = scale.posToScene(position);
       b.marker.position.set(x, y, z);
+      orientBodyMarker(b, et);
     } catch (err) {
       log(`  -> couldn't place ${b.name} (${err.message})`);
     }
