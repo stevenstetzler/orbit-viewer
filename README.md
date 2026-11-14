@@ -20,7 +20,7 @@ npm install             # pulls in spicejs (github:stevenstetzler/spiceJS)
 npm run serve-example   # http://localhost:8080
 ```
 
-Then open **http://localhost:8080/examples/browser-demo/**. This
+Then open **http://localhost:8080/** for the landing page, which links and explains every view, or go straight to **http://localhost:8080/examples/browser-demo/**. This
 serves the repo *and* a local proxy that streams NAIF kernels on
 demand via HTTP range requests (so even a multi-gigabyte kernel costs
 a few hundred KB to open) — the demo detects the proxy and auto-loads

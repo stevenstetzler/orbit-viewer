@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Orbit Viewer</title>
+<style>
+  html, body { margin: 0; background: #05070d; color: #d7dce5; font: 15px/1.5 system-ui, sans-serif; }
+  main { max-width: 960px; margin: 0 auto; padding: 40px 16px 64px; }
+  h1 { font-size: 28px; margin: 0 0 8px; color: #fff; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: #8892a6; margin: 36px 0 12px; }
+  p { margin: 0 0 12px; }
+  p.lead { color: #aab3c5; font-size: 16px; max-width: 720px; }
+  a { color: #7fb2ff; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+  a.card {
+    display: block; background: #0b0e17; border: 1px solid #1c2230; border-radius: 6px;
+    padding: 14px 16px; color: inherit; text-decoration: none;
+  }
+  a.card:hover, a.card:focus-visible { border-color: #2a5adf; background: #0e1320; }
+  .card h3 { margin: 0 0 4px; font-size: 16px; color: #fff; }
+  .card .path { font: 12px ui-monospace, monospace; color: #7fb2ff; margin-bottom: 8px; }
+  .card p { margin: 0; color: #aab3c5; font-size: 14px; }
+  .bodies { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 0; padding: 0; list-style: none; }
+  .bodies a { display: inline-block; background: #141a26; border: 1px solid #1c2230; border-radius: 4px; padding: 4px 10px; text-decoration: none; }
+  .bodies a:hover { border-color: #2a5adf; }
+  .bodies .t { color: #8892a6; margin-left: 4px; font-size: 12px; }
+  footer { margin-top: 48px; color: #8892a6; font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Orbit Viewer</h1>
+  <p class="lead">
+    An interactive solar system and orbit viewer in your browser, built on the
+    JPL DE440 planetary ephemeris and read directly from NAIF SPK kernels.
+    Pick a view below &mdash; each is a different way of looking at the same real data.
+  </p>
+
+  <h2>Explore</h2>
+  <div class="grid">
+    <a class="card" href="solar-system/">
+      <h3>Solar System</h3>
+      <div class="path">/solar-system/</div>
+      <p>The Sun and nine planets, seen from the Sun, drawn as idealized orbit ellipses.
+         Scrub the epoch, and add any asteroid or comet by name via JPL Horizons.</p>
+    </a>
+    <a class="card" href="solar-system/trajectory/">
+      <h3>Solar System Trajectories</h3>
+      <div class="path">/solar-system/trajectory/</div>
+      <p>The same view, but every orbit is the real sampled path rather than an ellipse.
+         Re-center on any body, or upload your own <code>.bsp</code> trajectory.</p>
+    </a>
+    <a class="card" href="close-approach/">
+      <h3>Close Approaches</h3>
+      <div class="path">/close-approach/</div>
+      <p>Every real asteroid and comet pass within 2 lunar distances of Earth since 1900.
+         Click a row to jump to that approach and see its actual trajectory past Earth and the Moon.</p>
+    </a>
+    <a class="card" href="examples/browser-demo/">
+      <h3>Full Explorer</h3>
+      <div class="path">/examples/browser-demo/</div>
+      <p>The complete demo with every control exposed: frames, rotating views, scale modes,
+         custom kernels, and live Horizons search. The most powerful, and the busiest.</p>
+    </a>
+  </div>
+
+  <h2>Planets and their moons</h2>
+  <p>
+    A true-to-scale view of one body and its known natural satellites. Each body also has a
+    <em>trajectory</em> variant (&hellip;<code>/trajectory/</code>) that shows real sampled satellite paths,
+    lets you view from any moon, and accepts a custom trajectory such as a spacecraft.
+  </p>
+  <ul class="bodies">
+    <li><a href="sun/">Sun</a></li>
+    <li><a href="mercury/">Mercury</a></li>
+    <li><a href="venus/">Venus</a></li>
+    <li><a href="earth/">Earth</a><a class="t" href="earth/trajectory/">trajectory</a></li>
+    <li><a href="mars/">Mars</a><a class="t" href="mars/trajectory/">trajectory</a></li>
+    <li><a href="jupiter/">Jupiter</a><a class="t" href="jupiter/trajectory/">trajectory</a></li>
+    <li><a href="saturn/">Saturn</a><a class="t" href="saturn/trajectory/">trajectory</a></li>
+    <li><a href="uranus/">Uranus</a><a class="t" href="uranus/trajectory/">trajectory</a></li>
+    <li><a href="neptune/">Neptune</a><a class="t" href="neptune/trajectory/">trajectory</a></li>
+    <li><a href="pluto/">Pluto</a><a class="t" href="pluto/trajectory/">trajectory</a></li>
+  </ul>
+
+  <h2>About the data</h2>
+  <p>
+    Positions come from the JPL DE440 ephemeris, covering 1900&ndash;2100 in these views.
+    Kernels stream on demand over HTTP range requests, so only the bytes a view needs are fetched.
+    Asteroid, comet, and spacecraft trajectories come from
+    <a href="https://ssd.jpl.nasa.gov/horizons/">JPL Horizons</a>; close-approach events come from
+    <a href="https://ssd-api.jpl.nasa.gov/doc/cad.html">JPL's Close-Approach Data API</a>.
+  </p>
+
+  <footer>
+    Source and docs on <a href="https://github.com/stevenstetzler/orbit-viewer">GitHub</a>.
+    Built on <a href="https://github.com/stevenstetzler/spiceJS">spiceJS</a>.
+  </footer>
+</main>
+</body>
+</html>
