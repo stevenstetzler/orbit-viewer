@@ -1,20 +1,20 @@
 /**
  * Surface images for the textured body spheres, shared by the /<body>/
  * and /<body>/trajectory/ templates -- see textures/README.md for
- * sources. Both images are equirectangular with longitude 0 at the
- * centre; bodies without an entry stay flat-colored. Orientation comes
+ * sources. All images are equirectangular, east longitude increasing to
+ * the right with longitude 0 at the centre; bodies without an entry stay
+ * flat-colored. Orientation comes
  * from bodyOrientation.js's IAU pole/prime-meridian model.
  */
 import * as THREE from 'three';
 import { INERTIAL_FRAME } from './constants.js';
 import { bodyFixedToInertial } from './bodyOrientation.js';
 
-// Resolved against this module, not the page, since the two templates
-// live at different depths (/earth/ vs /earth/trajectory/).
-const SURFACE_TEXTURES = {
-  399: new URL('../../textures/earth.jpg', import.meta.url).href,
-  301: new URL('../../textures/moon.jpg', import.meta.url).href,
-};
+// Keyed by SPICE body id; resolved against this module, not the page, since
+// the two templates live at different depths (/earth/ vs /earth/trajectory/).
+const SURFACE_TEXTURES = Object.fromEntries(Object.entries({
+  399: 'earth', 301: 'moon',
+}).map(([id, name]) => [id, new URL(`../../textures/${name}.jpg`, import.meta.url).href]));
 const textureLoader = new THREE.TextureLoader();
 
 /**

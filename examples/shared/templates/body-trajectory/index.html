@@ -136,7 +136,7 @@ import {
 import { mountEpochControls } from '../../examples/shared/epochInput.js';
 import { mountTimeWindowControls } from '../../examples/shared/timeWindow.js';
 import { mountTrajectoryLines } from '../../examples/shared/trajectoryLines.js';
-import { makeMarkerMesh, orientMarker } from '../../examples/shared/surfaceTextures.js';
+import { hasSurfaceTexture, makeMarkerMesh, orientMarker } from '../../examples/shared/surfaceTextures.js';
 
 const { load, str2et, et2utcCalendar, openRemoteSpk, openRemoteFile, spkez, bodyName } = window.spicejs;
 
@@ -458,7 +458,7 @@ function makeColorPicker(b, swatch) {
   input.addEventListener('input', () => {
     b.color = parseInt(input.value.slice(1), 16);
     swatch.style.background = input.value;
-    if (b.marker) {
+    if (b.marker && !hasSurfaceTexture(b)) { // a textured sphere keeps its image; only flat-colored markers are tinted
       b.marker.material.color.setHex(b.color);
       b.marker.material.emissive.setHex(b.color);
     }
