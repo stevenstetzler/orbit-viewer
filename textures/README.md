@@ -22,8 +22,8 @@ Each map was a full-resolution GeoTIFF (up to ~800 MB), downsampled to at most
 4096x2048 and re-encoded as a progressive JPEG (quality 82-86, none over 2.5 MB)
 so a body's page stays a few MB. Where a source file's central meridian was
 not 0 (or its extent did not start at -180), the image was rolled so east
-longitude 0 is the centre column. USGS/NASA planetary data is generally public
-domain; see each product page's citation and use constraints.
+longitude 0 is the centre column. License and citation details for every image are in
+[CREDITS.md](CREDITS.md).
 
 | File | Source product | Source resolution | Credit |
 | --- | --- | --- | --- |
