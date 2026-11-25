@@ -13,7 +13,11 @@ import { bodyFixedToInertial } from './bodyOrientation.js';
 // Keyed by SPICE body id; resolved against this module, not the page, since
 // the two templates live at different depths (/earth/ vs /earth/trajectory/).
 const SURFACE_TEXTURES = Object.fromEntries(Object.entries({
-  399: 'earth', 301: 'moon',
+  199: 'mercury', 299: 'venus', 399: 'earth', 301: 'moon', 499: 'mars',
+  501: 'io', 502: 'europa', 503: 'ganymede', 504: 'callisto',
+  602: 'enceladus', 603: 'tethys', 604: 'dione', 605: 'rhea', 606: 'titan', 608: 'iapetus',
+  801: 'triton', 901: 'charon', 999: 'pluto',
+  2000001: 'ceres',
 }).map(([id, name]) => [id, new URL(`../../textures/${name}.jpg`, import.meta.url).href]));
 const textureLoader = new THREE.TextureLoader();
 
