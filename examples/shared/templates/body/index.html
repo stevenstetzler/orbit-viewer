@@ -89,7 +89,7 @@ import {
   ensureBodyCoverage, prefetchBodyProbe, bodyHasCoverageAt, resolveSatellitesFor,
 } from '../examples/shared/kernelSession.js';
 import { mountEpochControls } from '../examples/shared/epochInput.js';
-import { makeMarkerMesh, orientMarker } from '../examples/shared/surfaceTextures.js';
+import { makeMarkerMesh, orientMarker, updateMarkerDots } from '../examples/shared/surfaceTextures.js';
 
 const { load, str2et, et2utcCalendar, openRemoteSpk, openRemoteFile, spkez } = window.spicejs;
 
@@ -156,7 +156,9 @@ const DEFAULT_CAMERA_FAR = 5_000_000;
 const camera = new THREE.PerspectiveCamera(50, viewport.clientWidth / viewport.clientHeight, 0.0005, DEFAULT_CAMERA_FAR);
 const DEFAULT_CAMERA_POSITION = new THREE.Vector3(0, 22, 34);
 camera.position.copy(DEFAULT_CAMERA_POSITION);
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+// Log depth: the scene spans ~10 orders of magnitude (near 0.0005, far 5e6), where a normal depth buffer
+// can't tell a planet from the orbit line behind it.
+const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(viewport.clientWidth, viewport.clientHeight);
 viewport.appendChild(renderer.domElement);
@@ -170,9 +172,11 @@ window.addEventListener('resize', () => {
   camera.updateProjectionMatrix();
   renderer.setSize(viewport.clientWidth, viewport.clientHeight);
 });
+let demo = null; // the loaded session; set once kernels are open (animate() below reads it from its first frame)
 function animate() {
   requestAnimationFrame(animate);
   controls.update();
+  if (demo) updateMarkerDots(demo.bodies, camera, viewport.clientHeight);
   renderer.render(scene, camera);
 }
 animate();
@@ -205,7 +209,6 @@ function reaimCameraAt(newTarget) {
   controls.update();
 }
 
-let demo = null;
 let sceneUpdateSeq = 0;
 let scale = null;
 

@@ -42,8 +42,31 @@ export function hasSurfaceTexture(b) {
   return b.bodyId in SURFACE_TEXTURES;
 }
 
-/** The sphere + material for one body's marker -- textured if it has an image, else the flat emissive color. */
+/** Screen-space dot size (px) and the apparent sphere radius (px) below which it replaces the sphere. */
+const MIN_DOT_PX = 7;
+const MIN_SPHERE_RADIUS_PX = 3;
+
+/**
+ * The sphere + material for one body's marker -- textured if it has an image,
+ * else the flat emissive color -- with a small fixed-size dot attached. At true
+ * scale a moon is often well under a pixel across, so updateMarkerDots() shows
+ * the dot instead of the sphere whenever the sphere is too small to see.
+ */
 export function makeMarkerMesh(b, radius, isCentral, renderer) {
+  const mesh = makeSphere(b, radius, isCentral, renderer);
+  const dot = new THREE.Points(
+    new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0], 3)),
+    new THREE.PointsMaterial({ color: b.color, size: MIN_DOT_PX, sizeAttenuation: false }),
+  );
+  dot.visible = false;
+  dot.frustumCulled = false;
+  mesh.add(dot);
+  mesh.userData.dot = dot;
+  mesh.userData.radius = radius;
+  return mesh;
+}
+
+function makeSphere(b, radius, isCentral, renderer) {
   if (!hasSurfaceTexture(b)) {
     return new THREE.Mesh(
       new THREE.SphereGeometry(radius, 20, 16),
@@ -77,4 +100,27 @@ export function orientMarker(b, et, pool) {
     0, 0, 0, 1,
   );
   b.marker.quaternion.setFromRotationMatrix(INERTIAL_TO_SCENE.clone().multiply(rot).multiply(SPHERE_TO_BODY));
+}
+
+/**
+ * Call each frame: shows a body's dot (and hides its sphere) when the sphere
+ * would be under MIN_SPHERE_RADIUS_PX across on screen, so a true-scale moon is
+ * still findable. `viewportHeightPx` is the rendered canvas height.
+ */
+export function updateMarkerDots(bodies, camera, viewportHeightPx) {
+  const pxPerUnit = viewportHeightPx / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2));
+  for (const b of bodies) {
+    const m = b.marker;
+    const dot = m?.userData.dot;
+    if (!dot) continue;
+    const dist = camera.position.distanceTo(m.position);
+    const tooSmall = (m.userData.radius / dist) * pxPerUnit < MIN_SPHERE_RADIUS_PX;
+    dot.visible = tooSmall;
+    m.material.visible = !tooSmall;
+  }
+}
+
+/** Recolors a body's dot (the color picker calls this alongside its other recoloring). */
+export function setMarkerDotColor(marker, hex) {
+  marker?.userData.dot?.material.color.setHex(hex);
 }
